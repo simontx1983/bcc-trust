@@ -140,6 +140,29 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         self::assertSame(['[bcc-trust] push subscriptions not deleted'], $GLOBALS['__bcc_ph']['log_errors'] ?? []);
     }
 
+    /**
+     * F-495: when the revocation write does not land, nothing was revoked, so
+     * "sign out everywhere" answers 503 (try again), never 200. The
+     * WordPress credentials and push subscriptions are still cut: each is
+     * its own write.
+     */
+    public function testARevocationThatCannotBeWrittenIsA503(): void
+    {
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        $res  = (new SessionController())->logoutEverywhere(new \WP_REST_Request([]));
+        $data = $res->get_data();
+
+        self::assertSame(503, $res->get_status());
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        $headers = new \ReflectionProperty($res, 'headers');
+        $headers->setAccessible(true);
+        self::assertSame('private, no-store', $headers->getValue($res)['Cache-Control'] ?? null);
+        self::assertSame(['bcc_token_version'], $GLOBALS['__bcc_ph']['failed_updates'] ?? null, 'control: the revoke was attempted');
+        self::assertSame([self::USER], $GLOBALS['__bcc_ph']['wp_sessions_destroyed'] ?? []);
+        self::assertSame([self::EXPECTED_DELETE], $GLOBALS['__bcc_ph']['deletes']);
+    }
+
     public function testAWrongCurrentPasswordDeletesNothing(): void
     {
         $res = (new MyAccountEndpoint())->patchPassword(new \WP_REST_Request([

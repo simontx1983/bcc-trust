@@ -54,6 +54,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class EdgeRepository {
 
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     const TYPE_VOTE        = 'vote';
     const TYPE_ENDORSEMENT = 'endorsement';
 
@@ -164,15 +166,20 @@ class EdgeRepository {
      *   category rows joined once per row and multiplied the vote.
      * - A moderation-hidden review confers no trust (decision: a hidden
      *   review stops counting) — same predicate as the page score reads.
+     * - FAIL-CLOSED read. The sum decides a WRITE (a zero weight deletes
+     *   the edge), so it must be this query's own answer: runRead() throws
+     *   RepositoryReadFailure on a read that did not run, before anything
+     *   is written, and both callers already treat a throw as "not
+     *   recalculated". Rationale: M7 (private tracker).
      *
      * @param int $sourceUserId  The voter.
      * @param int $targetUserId  The page owner receiving the trust signal.
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the sum cannot be read
      */
     public function recalculateVoteEdge( int $sourceUserId, int $targetUserId ): void {
         global $wpdb;
 
-        /** @var object{total_weight: float|numeric-string, vote_count: int|numeric-string}|null $row */
-        $row = $wpdb->get_row( $wpdb->prepare(
+        $rows = self::runRead( (string) $wpdb->prepare(
             "SELECT COALESCE( SUM( v.weight ), 0 ) AS total_weight,
                     COUNT(*)                        AS vote_count
                FROM {$this->votesTable} v
@@ -185,7 +192,15 @@ class EdgeRepository {
                 AND " . $this->votes()->hiddenReviewExclusion('v'),
             $targetUserId,
             $sourceUserId
-        ) );
+        ), __FUNCTION__, true );
+
+        // An aggregate with no GROUP BY yields exactly one row, even over
+        // zero votes. No row means the result is not this query's.
+        if ( !isset( $rows[0] ) ) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure( static::class, __FUNCTION__, 'aggregate returned no row' );
+        }
+        /** @var object{total_weight: float|numeric-string|null, vote_count: int|numeric-string|null} $row */
+        $row = $rows[0];
 
         $this->upsertOrDelete(
             $sourceUserId,

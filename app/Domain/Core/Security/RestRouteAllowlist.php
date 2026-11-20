@@ -15,9 +15,9 @@ if (!defined('ABSPATH')) {
  *   - Signed-in non-admins (members): `/bcc/v1` and `/bcc-trust/v1` only.
  *     Every other route answers 403, any method: core's `/wp/v2/*`, the
  *     index, `/batch/v1`, other plugins' namespaces.
- *   - Signed-out callers: BCC's namespaces, plus GET/HEAD elsewhere, except
- *     `/wp/v2/users*`, which is refused outright. Any other method outside
- *     BCC's namespaces answers 401.
+ *   - Signed-out callers: the same two namespaces, plus the exact
+ *     method-and-route pairs in EXEMPT_ROUTES (none today). Every other
+ *     route answers 401, any method, reads included.
  *
  * And application passwords are available to admins only.
  *
@@ -29,16 +29,19 @@ if (!defined('ABSPATH')) {
  * frontend and its NextAuth server call no REST route outside BCC's
  * namespaces, so members lose nothing.
  *
+ * ⚠⚠ Signed-out READS are refused too: outside BCC's namespaces nothing
+ * applies BCC's privacy rules. Rationale: review of this allowlist,
+ * 2026-11-18 (private tracker). No client of BCC reads them; the deploy
+ * health probes read BCC routes (`/wp-json/bcc/v1/ranks`).
+ *
  * Matching:
- *   - The BCC check is the allow direction, so it stays fail-closed: the
+ *   - Both checks are the allow direction, so they stay fail-closed: the
  *     route is only lowercased (core matches routes case-insensitively,
  *     `'@^…$@i'`). Core's route patterns are anchored and begin with their
  *     namespace, so a route that starts with `/bcc/v1/` can only reach a
- *     BCC handler. Any other spelling (`//bcc/v1/…`, no leading slash) reaches
- *     no BCC handler either, and is refused like any other route.
- *   - The `/wp/v2/users` check is the deny direction, so it normalises the
- *     way core might: lowercased, repeated slashes collapsed, and a leading
- *     slash supplied.
+ *     BCC handler. Any other spelling (`//bcc/v1/…`, no leading slash)
+ *     reaches no BCC handler either, and is refused like any other route.
+ *     An exemption is one exact route, compared the same way.
  *   - `rest_pre_dispatch` also runs for each request inside a `/batch/v1`
  *     call (an admin's, since the batch route itself is refused to everyone
  *     else) and for internal `rest_do_request()` dispatches. BCC's own
@@ -76,8 +79,20 @@ final class RestRouteAllowlist
     /** BCC's REST namespaces, the only ones open to signed-in non-admins. */
     public const NAMESPACES = ['/bcc/v1', '/bcc-trust/v1'];
 
-    /** What a signed-out caller may do outside BCC's namespaces. */
-    private const ANONYMOUS_METHODS = ['GET', 'HEAD'];
+    /**
+     * What a signed-out caller may reach outside BCC's namespaces: exact
+     * `"METHOD /route"` pairs, the method in capitals and the route in
+     * lower case as core receives it (one leading slash, no trailing
+     * slash). GET does not bring HEAD with it: list each method.
+     *
+     * Empty on purpose. An entry is for a server-to-server callback that is
+     * genuinely in use (a cache or security service calling back with its
+     * own signature), never for a browser read, and it needs a test of its
+     * own.
+     *
+     * @var list<string>
+     */
+    public const EXEMPT_ROUTES = [];
 
     public static function register(): void
     {
@@ -101,11 +116,20 @@ final class RestRouteAllowlist
             return $result;
         }
 
-        $signedIn = get_current_user_id() > 0;
-        if (!$signedIn && !self::isCoreUsersRoute($route)
-            && in_array(strtoupper((string) $request->get_method()), self::ANONYMOUS_METHODS, true)
-        ) {
-            return $result;
+        return self::refusal($route, (string) $request->get_method(), get_current_user_id() > 0) ?? $result;
+    }
+
+    /**
+     * The refusal for a non-admin outside BCC's namespaces, or null when the
+     * caller is signed out and the method and route are exempt. A member
+     * gets no exemption.
+     *
+     * @param list<string> $exemptions EXEMPT_ROUTES; a test passes its own
+     */
+    public static function refusal(string $route, string $method, bool $signedIn, array $exemptions = self::EXEMPT_ROUTES): ?\WP_REST_Response
+    {
+        if (!$signedIn && in_array(strtoupper($method) . ' ' . strtolower($route), $exemptions, true)) {
+            return null;
         }
 
         // A response, not a bare WP_Error: see the class note on /batch/v1.
@@ -140,14 +164,5 @@ final class RestRouteAllowlist
             }
         }
         return false;
-    }
-
-    /** `/wp/v2/users` itself or anything under it, however it is spelled. */
-    public static function isCoreUsersRoute(string $route): bool
-    {
-        $collapsed  = (string) preg_replace('#/+#', '/', strtolower($route));
-        $normalised = '/' . ltrim($collapsed, '/');
-
-        return preg_match('#^/wp/v2/users(?:/|$)#', $normalised) === 1;
     }
 }

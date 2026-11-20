@@ -350,6 +350,28 @@ final class AccountWalletConfirmTest extends TestCase
     }
 
     /**
+     * F-495: the session check reads the token's state again. When that read
+     * fails the token is UNKNOWN, not invalid: the door's 503 (keep the
+     * session, try again), never "sign in again".
+     */
+    public function testAnUnreadableTokenStateIsTheDoors503NotSignInAgain(): void
+    {
+        self::verifiedAgo(1, 49 * 3600);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
+        $GLOBALS['__bcc_token_state']['fail'] = true;
+
+        $res  = (new MyAccountEndpoint())->patchEmail(new \WP_REST_Request(['email' => 'new@example.com'] + self::walletProof($sig)));
+        $data = $res->get_data();
+
+        self::assertSame(503, $res->get_status());
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        $headers = new \ReflectionProperty($res, 'headers');
+        $headers->setAccessible(true);
+        self::assertSame('private, no-store', $headers->getValue($res)['Cache-Control'] ?? null);
+        self::assertTrue(self::challengeIsLive(), 'nothing spent');
+    }
+
+    /**
      * Every token mint in the plugin, and whether it is a real sign-in
      * (auth_time = now) or a continuation of the caller's session (keeps
      * auth_time). A wallet unlink or a credential change is NOT a sign-in:

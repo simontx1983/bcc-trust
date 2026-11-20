@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Feed\ActivityFeedService;
+use BCC\Core\Log\Logger;
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
@@ -812,9 +813,13 @@ final class FeedRankingService
 
     /**
      * Does this ROOM lift the §O4.1 reputation shadow-limit for its own
-     * posts? The ONE decision {@see getGroupFeed()} and
-     * {@see getMyGroupsFeed()} share, so a post can never be shown in its room
-     * and hidden in "My Groups", or the reverse.
+     * posts? The ONE decision {@see getGroupFeed()},
+     * {@see getMyGroupsFeed()} and the permalink ({@see visibleActivity()},
+     * F-451) share. So a room's ACTIVE MEMBER never sees a post in the room
+     * that "My Groups" hides or that 404s by link. The permalink lifts the
+     * limit for active members only: a non-member who can read a
+     * non-secret room's feed sees the post there but still gets a 404 by
+     * link. That split is intended, the fail-safe direction.
      *
      * Today: NFT holder rooms. There the on-chain gate plus membership IS the
      * moderation boundary, so a verified low-trust holder is not hidden from
@@ -916,12 +921,10 @@ final class FeedRankingService
      */
     private function visibleActivity(int $actId, int $viewerId, ?bool $viewerIsExempt): ?array
     {
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        $caution  = $this->cautionListExceptViewer($viewerId);
+        $blocked  = $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [];
+        $blockers = $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : [];
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
         // §F-02 — load-bearing HERE above all. A permalink that served
         // what the feed withholds is the whole reason bcc-core puts this
@@ -929,22 +932,41 @@ final class FeedRankingService
         // move the leak rather than close it.
         [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId, $viewerIsExempt);
 
-        $item = $this->activityFeed->getActivityById(
+        $item = $this->permalinkRead(
             $actId,
             $viewerId,
-            $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden,
-            viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02
+            self::mergeExclusions($caution, $blocked, $blockers),
+            $hidden,
+            $friendIds,
+            $enforceF02
         );
 
-        // §F-02 group carve-out: a refusal above may have been the
-        // author's PROFILE level withholding a post whose room shows it.
-        // Only reachable when the gate actually ran ($enforceF02), so an
-        // exempt reader costs no second query, and only a GROUP-tagged
-        // post can be recovered.
-        if ($item === null && $enforceF02) {
-            $item = $this->groupTaggedDespiteProfileLevel($actId, $viewerId, $excluded, $hidden);
+        // F-451 (main agent's decision, 2026-11-19): the room's own
+        // shadow-limit rule. A room that lifts the §O4.1 shadow-limit for
+        // its posts (roomLiftsShadowLimit(): NFT holder rooms) shows a
+        // caution-tier member's post in the room and in My Groups, so it must
+        // not 404 by link for a fellow member, and the mention gate
+        // (canView()) follows. The THIRD look re-reads without the caution
+        // list (blocks and the moderation-hidden list still apply, and so
+        // does every other gate), and keeps the post only when it is in such
+        // a room AND $viewerId is an active member there. Everywhere else the
+        // caution list's refusal stands.
+        //
+        // Taken by an exempt (admin) viewer too: it is the ROOM's rule, not
+        // the §F-02 profile rule, and it still needs the viewer's own
+        // membership. Only reachable when a caution list exists to lift.
+        if ($item === null && $caution !== []) {
+            $lifted = $this->permalinkRead(
+                $actId,
+                $viewerId,
+                self::mergeExclusions($blocked, $blockers),
+                $hidden,
+                $friendIds,
+                $enforceF02
+            );
+            if ($lifted !== null && $this->viewerIsMemberOfARoomThatLiftsTheShadowLimit($lifted, $viewerId)) {
+                $item = $lifted;
+            }
         }
 
         if ($item === null) {
@@ -958,6 +980,9 @@ final class FeedRankingService
         // exactly as a missing post does. That covers both permalink routes
         // (`/feed/{id}` and the shortcode alias share this call).
         //
+        // ⚠ It runs on whichever look produced $item, the F-451 third look
+        // included, so no look can serve what a page filter drops.
+        //
         // ⚠ A filter whose OWN read fails also lands here as a 404, not the
         // F-275 503: the block read and the announcement page read fail
         // closed by dropping. Only the activity read above throws.
@@ -966,6 +991,100 @@ final class FeedRankingService
         }
 
         return $item;
+    }
+
+    /**
+     * One permalink read under the author exclusion list $excluded:
+     * bcc-core's gated read, then the §F-02 group second look when the gate
+     * ran. A refusal there may have been the author's PROFILE level
+     * withholding a post whose room shows it. Only reachable when the gate
+     * actually ran ($enforceF02), so an exempt reader costs no second query,
+     * and only a GROUP-tagged post can be recovered.
+     *
+     * @param list<int>      $excluded
+     * @param list<int>      $hidden
+     * @param list<int>|null $friendIds
+     * @return array<string, mixed>|null
+     */
+    private function permalinkRead(
+        int $actId,
+        int $viewerId,
+        array $excluded,
+        array $hidden,
+        ?array $friendIds,
+        bool $enforceF02
+    ): ?array {
+        $item = $this->activityFeed->getActivityById(
+            $actId,
+            $viewerId,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden,
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
+        );
+
+        if ($item === null && $enforceF02) {
+            $item = $this->groupTaggedDespiteProfileLevel($actId, $viewerId, $excluded, $hidden);
+        }
+
+        return $item;
+    }
+
+    /**
+     * F-451: is $item in a room that lifts the §O4.1 shadow-limit
+     * ({@see roomLiftsShadowLimit()}, the room's own decision) of which
+     * $viewerId is an ACTIVE member? Any of the post's rooms qualifies, as a
+     * double-tagged post is in each of them.
+     *
+     * ⚠ $viewerId, never the request's user: canView() asks on a mentionee's
+     * behalf during the author's request. The membership read is the F-354
+     * ranked one, so a ban beside a stale member row wins.
+     *
+     * ⚠ A membership read that FAILS is "not lifted" (logged), never a 503.
+     * This read is reached only for an EXISTING post in a room that lifts the
+     * limit, so a 503 here would answer differently from a missing id and
+     * tell the caller both facts (security's rule for /feed/:id, raised in
+     * F-438's design). The post answers the same 404 as a missing id, and
+     * canView() gives no bell. The fail-closed direction holds: a lift is
+     * never granted on a read that did not run.
+     *
+     * @param array<string, mixed> $item
+     */
+    private function viewerIsMemberOfARoomThatLiftsTheShadowLimit(array $item, int $viewerId): bool
+    {
+        // The room marker lives on the BACKING wp_post (external_id), never
+        // the act_id (audit H-B1).
+        $postId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+        if ($postId <= 0 || $viewerId <= 0) {
+            return false;
+        }
+
+        $groupIds = [];
+        foreach ((array) get_post_meta($postId, 'peepso_group_id', false) as $raw) {
+            $groupId = is_numeric($raw) ? (int) $raw : 0;
+            if ($groupId > 0) {
+                $groupIds[$groupId] = true;
+            }
+        }
+
+        foreach (array_keys($groupIds) as $groupId) {
+            if (!self::roomLiftsShadowLimit($this->groupContextResolver->forGroup($groupId))) {
+                continue;
+            }
+            $status = PeepSoGroupRepository::getMembershipStatusOrFail($viewerId, $groupId);
+            if ($status === false) {
+                Logger::warning('[FeedRankingService] room membership unreadable; shadow-limit not lifted (F-451)', [
+                    'viewer_id' => $viewerId,
+                    'group_id'  => $groupId,
+                ]);
+                continue;
+            }
+            if (is_string($status) && str_starts_with($status, 'member')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
