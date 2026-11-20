@@ -44,6 +44,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
@@ -230,7 +231,10 @@ final class FeedRankingService
      * because their name inputs could not be read
      * ({@see ActivityFeedService::authorReadFailures()}, a per-request count
      * snapshotted around the build, so a build that reads several pages is
-     * covered). Such a page is served to this request only, and the next
+     * covered), and not when bcc-trust masked a name the same way during the
+     * build ({@see PrivacySettings::unreadReads()}: the reactor faces read
+     * through PublicIdentity::visibleName()). Such a page is served to this
+     * request only, and the next
      * request builds again. Needs bcc-core #158 (deployed first).
      * Rationale: M3 (private tracker).
      *
@@ -238,10 +242,10 @@ final class FeedRankingService
      */
     private function buildHotFeedForSharedCache(int $limit): array
     {
-        $before  = ActivityFeedService::authorReadFailures();
+        $before  = [ActivityFeedService::authorReadFailures(), PrivacySettings::unreadReads()];
         $payload = $this->buildHotFeed(null, $limit);
 
-        return [$payload, ActivityFeedService::authorReadFailures() === $before];
+        return [$payload, [ActivityFeedService::authorReadFailures(), PrivacySettings::unreadReads()] === $before];
     }
 
     /**

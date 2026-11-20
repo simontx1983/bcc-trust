@@ -193,6 +193,11 @@ namespace BCC\Core\Feed {
             if (!empty($GLOBALS['__bcc_f02feed']['mask_authors'])) {
                 self::$authorReadFailures++;
             }
+            // A trust-side mask during the build: a privacy flag read for a
+            // member whose read the test made fail (UserMetaRepository double).
+            if (!empty($GLOBALS['__bcc_f02feed']['mask_trust_for'])) {
+                \BCC\Trust\Core\Support\PrivacySettings::flag((int) $GLOBALS['__bcc_f02feed']['mask_trust_for'], 'real_name_hidden');
+            }
 
             // F-276: every argument, in call order, so a surface's
             // limit / cursor / hashtag can be asserted and a refactor

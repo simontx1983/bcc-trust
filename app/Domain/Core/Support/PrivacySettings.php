@@ -230,6 +230,20 @@ final class PrivacySettings
         }
     }
 
+    /** Flag reads this request that could not be trusted and read as hidden. */
+    private static int $unreadReads = 0;
+
+    /**
+     * How many flag reads this request could not be trusted, each read as
+     * hidden. Monotonic within a request, so a cache shared by everyone
+     * snapshots it around a build and declines to keep a page whose names
+     * were masked that way (FeedRankingService's hot feed). Never decreases.
+     */
+    public static function unreadReads(): int
+    {
+        return self::$unreadReads;
+    }
+
     /**
      * Single-flag read. Boolean-truthy parsing per UserViewService::metaFlag.
      *
@@ -240,7 +254,14 @@ final class PrivacySettings
      */
     public static function flag(int $userId, string $key): bool
     {
-        return self::flagOrUnknown($userId, $key) ?? true;
+        $flag = self::flagOrUnknown($userId, $key);
+        if ($flag === null) {
+            self::$unreadReads++;
+
+            return true;
+        }
+
+        return $flag;
     }
 
     /**
@@ -286,6 +307,8 @@ final class PrivacySettings
 
         $values = UserMetaRepository::valuesOrUnknown([$userId], self::metaKeys());
         if ($values === null) {
+            self::$unreadReads++;
+
             return array_fill_keys(self::ALL_KEYS, true);
         }
 

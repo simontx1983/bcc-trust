@@ -101,6 +101,23 @@ final class HotFeedMaskedAuthorsNotCachedTest extends TestCase
         self::assertCount(1, self::payloadWrites(FeedRankingService::HOT_WARM_LIMIT), 'control: a clean warm stores');
     }
 
+    /**
+     * A name bcc-trust masked during the build (a privacy flag it could not
+     * read, as the reactor faces do through visibleName()) keeps the page
+     * out of the shared cache too.
+     */
+    public function testAPageWithATrustSideMaskIsServedButNotCached(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [4242 => true];
+        $GLOBALS['__bcc_f02feed']['mask_trust_for'] = 4242;
+
+        $this->service()->getHotFeed(null, 20, 0);
+        self::assertSame([], self::payloadWrites(20));
+
+        $this->service()->warmHotFeed();
+        self::assertSame([], self::payloadWrites(FeedRankingService::HOT_WARM_LIMIT), 'nor by the cron warm');
+    }
+
     /** The count is compared around EACH build, not since the request began. */
     public function testAnEarlierMaskedBuildDoesNotBlockALaterCleanOne(): void
     {
