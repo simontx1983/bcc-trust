@@ -268,6 +268,28 @@ final class PendingEmailSignupTest extends TestCase
         self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
     }
 
+    /**
+     * F-508: the reset revokes the old sessions FIRST. When that write does
+     * not land, nothing changes: 503, the old password stands, the key is
+     * unspent, and the same link works once the store is back.
+     */
+    public function testAResetWhoseRevocationFailsChangesNothingAndTheLinkStillWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $GLOBALS['__bcc_ph']['passwords'][self::STALE] = 'the old password';
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        self::assertSame(503, self::reset(self::STALE));
+        self::assertSame('the old password', $GLOBALS['__bcc_ph']['passwords'][self::STALE], 'unchanged');
+        self::assertSame('k-' . self::STALE, $GLOBALS['__bcc_ph']['reset_keys'][self::STALE] ?? null, 'the key is not spent');
+        self::assertNotContains('password_reset_completed', $GLOBALS['__bcc_ph']['audit'] ?? []);
+
+        unset($GLOBALS['__bcc_ph']['fail_update']);
+        self::assertSame(200, self::reset(self::STALE));
+        self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
+        self::assertSame('1', (string) ($GLOBALS['__bcc_ph']['meta'][self::STALE]['bcc_token_version'] ?? ''), 'revoked on the retry');
+    }
+
     public function testAnInvalidResetKeyCostsNoBreachLookup(): void
     {
         self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);

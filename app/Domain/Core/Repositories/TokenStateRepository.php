@@ -46,6 +46,12 @@ final class TokenStateRepository
      * Rows read at most. Each key normally has one row, so a FULL read means
      * rows may be missing, and read() answers null (unknown) rather than
      * decide on part of the state.
+     *
+     * Repair (F-508), should it ever happen: that member's bearer requests
+     * answer 503 until the extra rows are gone, and each read logs "token
+     * state read failed". Ops removes the member's rows for the three keys
+     * except the newest of each (`wp user meta list <id>`, then
+     * `wp db query` on those umeta_ids), then revokes their sessions.
      */
     private const MAX_ROWS = 30;
 

@@ -28,6 +28,7 @@ use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
 use WP_REST_Request;
@@ -348,6 +349,9 @@ final class PasswordAuthController
     }
 
     /** F-285 copy (user-approved) for a sign-up's handle / email 409. */
+    /** F-508: the reset could not revoke the old sessions, so nothing was changed. */
+    private const RESET_UNAVAILABLE_MESSAGE = 'Your password could not be reset just now. Please try again with the same link.';
+
     private const TAKEN_HANDLE = 'That handle is taken. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
     private const TAKEN_EMAIL  = 'An account with that email already exists. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
 
@@ -871,6 +875,19 @@ final class PasswordAuthController
 
         $userId = (int) $user->ID;
 
+        // Revoke every outstanding bearer JWT for this user, FIRST (F-508).
+        // reset_password() clears WP session tokens, but BCC JWTs are
+        // self-contained and only honour the per-user token-version counter,
+        // so without this bump a token from before the reset stays valid for
+        // its full TTL and can be renewed via /auth/refresh. The user is not
+        // signed in on this path, so there is no live session to preserve.
+        // [audit H-2] Before the password write, so a revocation that did not
+        // land changes nothing: the answer is 503, the reset key is unspent,
+        // and the same link works again.
+        if (JwtToken::revokeAllForUser($userId) === null) {
+            return BearerAuth::unavailableResponse(self::RESET_UNAVAILABLE_MESSAGE);
+        }
+
         // reset_password() hashes + stores the new password, clears the
         // user_activation_key (single-use), and fires the `password_reset`
         // action hook. Returns void.
@@ -893,15 +910,6 @@ final class PasswordAuthController
             ]);
             do_action('bcc_email_verified', $userId);
         }
-
-        // Revoke every outstanding bearer JWT for this user. reset_password()
-        // clears WP session tokens, but BCC JWTs are self-contained and only
-        // honour the per-user token-version counter — so without this bump a
-        // token stolen BEFORE the reset (the whole reason to reset) stays
-        // valid for its full TTL and can be renewed via /auth/refresh. The
-        // user is not logged in on this path, so there is no live session to
-        // preserve. [audit H-2]
-        JwtToken::revokeAllForUser($userId);
 
         // Side-channel security email — reuses the "password changed"
         // mail since the user-facing effect is identical.
