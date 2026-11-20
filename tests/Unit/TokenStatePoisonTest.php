@@ -14,16 +14,11 @@ use PHPUnit\Framework\TestCase;
  * F-462 (HIGH): a token's revocation state comes from the DATABASE, not the
  * meta cache.
  *
- * WordPress's update_meta_cache() caches an EMPTY array for a user when its
- * meta SELECT fails, and batch priming can do that to many users at once.
- * Read through get_user_meta(), tv was then 0 and both lists empty. So a
- * revoked, signed-out or refresh-retired token was ACCEPTED. With a
- * persistent cache that lasted until the user's meta was next written.
- *
- * Here get_user_meta() answers that POISONED cache (account-prehijack-stubs'
- * store holds no token state). The database (TokenStateWpdb) holds the
- * truth. The REAL JwtToken, BearerAuth and TokenStateRepository run on top.
- * Swapping the read back to get_user_meta() makes these tests fail.
+ * Here get_user_meta() answers a STALE cache that holds no token state
+ * (account-prehijack-stubs' store), while the database (TokenStateWpdb)
+ * holds the truth. The REAL JwtToken, BearerAuth and TokenStateRepository
+ * run on top, and every decision must follow the database. Swapping the
+ * read back to get_user_meta() makes these tests fail.
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -145,8 +140,8 @@ final class TokenStatePoisonTest extends TestCase
         self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null);
     }
 
-    /** Batch priming poisons many users at once; each is still read from the database. */
-    public function testABatchPrimedPoisonRestoresNobodysDeadTokens(): void
+    /** Several users at once: each is read from the database. */
+    public function testEveryUserIsReadFromTheDatabase(): void
     {
         $dead = [];
         $live = [];

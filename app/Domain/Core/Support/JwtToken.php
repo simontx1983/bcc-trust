@@ -192,12 +192,10 @@ final class JwtToken
      */
     public static function revokeAllForUser(int $userId): ?int
     {
-        // F-462: +1 on the GUARDED read. +1 on a failed or poisoned read
-        // (tv 0) wrote tv 1 over, say, 5: a LOWER version, under which a
-        // still-live tv-1 token worked again. When the version is unknown,
-        // jump to one no outstanding token can carry, so a revocation (a
-        // password change, a suspension, a user-lifecycle hook) never fails
-        // and never goes backwards.
+        // F-462: +1 on the GUARDED read, so the version only ever rises.
+        // When it is unknown, jump to one no outstanding token can carry,
+        // so a revocation (a password change, a suspension, a user-lifecycle
+        // hook) never fails and never goes backwards.
         $known = self::tokenVersion($userId);
         $next  = $known !== null ? $known + 1 : self::versionNoTokenCanHold();
 
@@ -442,9 +440,8 @@ final class JwtToken
      * expired entries on every write and capped at DENYLIST_MAX_ENTRIES.
      *
      * F-462: returns false, and writes NOTHING, when the current list cannot
-     * be read. Writing then would replace the user's whole denylist with
-     * this one entry, bringing every other signed-out token back. Also false
-     * when the write itself did not land (writeList()).
+     * be read: the write would replace the whole list. Also false when the
+     * write itself did not land (writeList()).
      *
      * @param array<string, mixed> $payload a payload returned by decode()/decodeForRefresh()
      * @return bool true when the token is signed out (or there was nothing to do)
@@ -527,7 +524,7 @@ final class JwtToken
      * Same per-user lock and pruning as logOut(); best-effort like it.
      *
      * F-462: returns false, and writes NOTHING, when the current list cannot
-     * be read (writing would drop every other retired token), or when the
+     * be read (the write would replace the whole list), or when the
      * write itself did not land (writeList()). The refresh then mints nothing.
      *
      * @param array<string, mixed> $payload a payload returned by decodeForRefresh()

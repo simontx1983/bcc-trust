@@ -10,12 +10,9 @@
  *   - `bcc_jwt_denylist`: tokens signed out one at a time (F-120);
  *   - `bcc_jwt_retired`: tokens exchanged by a refresh (F-282).
  *
- * ⚠⚠ WHY NOT get_user_meta(). It reads through WordPress's meta cache, and
- * update_meta_cache() caches an EMPTY array when its SELECT fails. tv then
- * reads 0 and both lists read [], so a revoked, signed-out or retired
- * token is ACCEPTED. With a persistent object cache that lasts until the
- * user's meta is next written, and batch priming can poison many users at
- * once. Here the three values come from ONE query, through bcc-core's
+ * ⚠⚠ WHY NOT get_user_meta(). It reads through WordPress's meta cache,
+ * which can't tell a failed read from an empty one. These values decide
+ * authentication, so they come from ONE query, through bcc-core's
  * ProbesReads:
  *   - clearLastError(), then query() checked `=== false`;
  *   - then last_error, then the rows (trustedRows());
@@ -25,7 +22,7 @@
  * failed read is null, and the caller must refuse the token.
  *
  * Deliberately UNCACHED: a cache in front of this would bring back the
- * poisoning it exists to remove. It is one indexed query (user_id +
+ * ambiguity it exists to remove. It is one indexed query (user_id +
  * meta_key) per token decode.
  *
  * @package BCC\Trust\Core\Repositories

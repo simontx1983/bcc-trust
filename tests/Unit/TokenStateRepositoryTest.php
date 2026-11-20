@@ -13,9 +13,7 @@ use PHPUnit\Framework\TestCase;
  * F-462: the REAL TokenStateRepository, through bcc-core's ProbesReads,
  * over the $wpdb double in tests/Stubs/token-state-wpdb-stubs.php.
  *
- * A failed read must be null, never "tv 0, empty lists": that is the
- * poisoned meta-cache answer this repository replaces, and it accepts
- * revoked, signed-out and retired tokens.
+ * A failed read must be null (unknown), never "tv 0, empty lists".
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
