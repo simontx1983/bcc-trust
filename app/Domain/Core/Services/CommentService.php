@@ -35,6 +35,7 @@ use BCC\Core\PeepSo\PeepSoCommentWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
@@ -210,7 +211,10 @@ final class CommentService
             // same act_module_id on a comment as on a status post. Without
             // this, a comment could be used as a comment PARENT.
             || FeedItemGate::isCommentAct($actId, $this->commentRepo)
-            || !$this->visibility()->isLive($parent)) {
+            || !$this->visibility()->isLive($parent)
+            // A SECRET page's announcement, for a viewer the page does not
+            // admit: gone from their feeds and permalink, so its thread too.
+            || !AnnouncementPageAccess::mayViewerSeeRow($parent, $viewerId)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId = (int) $parent->act_external_id;
@@ -419,7 +423,10 @@ final class CommentService
             // same act_module_id on a comment as on a status post. Without
             // this, a comment could be used as a comment PARENT.
             || FeedItemGate::isCommentAct($actId, $this->commentRepo)
-            || !$this->visibility()->isLive($parent)) {
+            || !$this->visibility()->isLive($parent)
+            // A SECRET page's announcement, for an author the page does not
+            // admit: the same 404 as the thread above.
+            || !AnnouncementPageAccess::mayViewerSeeRow($parent, $authorId)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId   = (int) $parent->act_external_id;

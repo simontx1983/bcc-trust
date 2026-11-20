@@ -209,6 +209,18 @@ final class AuthSessionEndpointTest extends TestCase
         self::assertSame(401, $status);
     }
 
+    /** F-462: a 401 here would sign the app out; unknown is 503, private. */
+    public function testAnUnreadableTokenStateIs503NotUnauthorized(): void
+    {
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail' => true];
+
+        [$status, $data, $res] = self::call('Bearer ' . JwtToken::encode(self::USER, 'handle' . self::USER));
+
+        self::assertSame(503, $status);
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertSame('private, no-store', self::headers($res)['Cache-Control'] ?? null);
+    }
+
     public function testATokenWithinTheSkewWindowIsStillValid(): void
     {
         $exp = time() - 30; // past exp, inside the 60 s skew decode() allows

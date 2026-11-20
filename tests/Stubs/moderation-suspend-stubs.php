@@ -21,6 +21,12 @@
 
 declare(strict_types=1);
 
+namespace {
+    // F-462: JwtToken reads token state through TokenStateRepository; these
+    // suites test token behaviour, so they get its stand-in (see the file).
+    require_once __DIR__ . '/token-state-stubs.php';
+}
+
 namespace BCC\Trust\Core\Support {
     if (!function_exists(__NAMESPACE__ . '\\wp_salt')) {
         function wp_salt(string $scheme = 'auth'): string

@@ -35,6 +35,14 @@ use PHPUnit\Framework\TestCase;
  * The get_users() double models the two lookups as the matcher makes them
  * (as in MentionSearchNoLoginOracleTest) and fails the way WordPress does:
  * [] plus `last_error`.
+ *
+ * ⚠ F-456: every simulated query starts by CLEARING `last_error`, as
+ * wpdb::flush() does before each real query. Without that, a test cannot
+ * see a read whose error a later query wiped. That is how a single check
+ * after the whole user-row step passed here while missing a failed users
+ * prime, or a failed row read for any id but the last. cache_users() is two
+ * queries (usermeta, then users); get_userdata() is a query only for a row
+ * the prime did not load, and a cache read otherwise.
  */
 #[CoversClass(MemberSearchCandidates::class)]
 #[RunTestsInSeparateProcesses]
@@ -52,8 +60,17 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
                 7 => ['u_alice', 'Alice Smith', 'alice'],
                 8 => ['u_bob', 'Bob Alison', 'bobby'],
             ],
-            'fail'  => null,  // 'name' | 'prime' | 'handle'
-            'calls' => [],
+            // The one simulated query that fails: 'name' | 'handle' (the two
+            // lookups), 'prime_meta' | 'prime_users' (cache_users()'s two
+            // queries), or 'row:<id>' (get_userdata()'s read of that row).
+            'fail'     => null,
+            // Ids cache_users() does NOT load (e.g. evicted before the read),
+            // so get_userdata() has to query their rows one by one.
+            'unprimed' => [],
+            // Ids the name lookup returns that have no user row (a deleted user).
+            'ghosts'   => [],
+            'primed'   => [],
+            'calls'    => [],
         ];
         if (!class_exists('BCC\\Core\\Log\\Logger', false)) {
             eval('namespace BCC\\Core\\Log; final class Logger { public static array $lines = []; public static function error(string $m, array $c = []): void { self::$lines[] = $m . " " . json_encode($c); } public static function warning(string $m, array $c = []): void {} public static function info(string $m, array $c = []): void {} }');
@@ -62,14 +79,24 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
             public string $last_error = '';
         };
         eval(<<<'PHP'
+            /** One simulated query: clears last_error first (wpdb::flush()), then fails if it is the configured one. */
+            function msc_query(string $which): bool
+            {
+                $GLOBALS['wpdb']->last_error = '';
+                if ($GLOBALS['__msc']['fail'] === $which) {
+                    $GLOBALS['wpdb']->last_error = 'Lost connection to MySQL server during query';
+                    return false;
+                }
+                return true;
+            }
             function get_users(array $args = []): array
             {
                 $GLOBALS['__msc']['calls'][] = $args;
                 $lookup = isset($args['search']) ? 'name' : (($args['meta_key'] ?? '') === 'bcc_handle' ? 'handle' : 'other');
-                if ($GLOBALS['__msc']['fail'] === $lookup) {
-                    // What wpdb leaves after a failed query: no rows, and the error.
-                    $GLOBALS['wpdb']->last_error = 'Lost connection to MySQL server during query';
-                    return [];
+                // `users_pre_query` short-circuit (a plugin answering the lookup):
+                // no SQL runs, so last_error keeps whatever an earlier query left.
+                if (empty($GLOBALS['__msc']['pre_query']) && !msc_query($lookup)) {
+                    return []; // what wpdb leaves after a failed query: no rows, and the error
                 }
                 $out = [];
                 foreach ($GLOBALS['__msc']['users'] as $id => [$login, $display, $handle]) {
@@ -80,21 +107,33 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
                         $out[] = (string) $id;
                     }
                 }
+                if ($lookup === 'name') {
+                    foreach ($GLOBALS['__msc']['ghosts'] as $ghost) {
+                        $out[] = (string) $ghost;
+                    }
+                }
                 return $out;
             }
             function cache_users(array $ids): void
             {
-                if ($GLOBALS['__msc']['fail'] === 'prime') {
-                    $GLOBALS['wpdb']->last_error = 'Lost connection to MySQL server during query';
+                msc_query('prime_meta');
+                if (!msc_query('prime_users')) {
+                    return;
+                }
+                foreach ($ids as $id) {
+                    if (isset($GLOBALS['__msc']['users'][(int) $id]) && !in_array((int) $id, $GLOBALS['__msc']['unprimed'], true)) {
+                        $GLOBALS['__msc']['primed'][(int) $id] = true;
+                    }
                 }
             }
             function get_userdata($id)
             {
-                if ($GLOBALS['__msc']['fail'] === 'prime') {
+                $id = (int) $id;
+                if (empty($GLOBALS['__msc']['primed'][$id]) && !msc_query('row:' . $id)) {
                     return false; // the row could not be read
                 }
-                $u = $GLOBALS['__msc']['users'][(int) $id] ?? null;
-                return $u === null ? false : (object) ['ID' => (int) $id, 'user_login' => $u[0], 'display_name' => $u[1]];
+                $u = $GLOBALS['__msc']['users'][$id] ?? null;
+                return $u === null ? false : (object) ['ID' => $id, 'user_login' => $u[0], 'display_name' => $u[1]];
             }
             PHP);
     }
@@ -136,10 +175,69 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
     public static function failingSteps(): array
     {
         return [
-            'the display-name lookup'            => ['name', 'display name lookup'],
-            'the user rows read between lookups' => ['prime', 'display name check'],
-            'the handle lookup'                  => ['handle', 'handle lookup'],
+            'the display-name lookup'          => ['name', 'display name lookup'],
+            'the users prime (cache_users())'  => ['prime_users', 'user rows prime'],
+            'the handle lookup'                => ['handle', 'handle lookup'],
         ];
+    }
+
+    /**
+     * F-456: cache_users() runs a users query AFTER its usermeta query, and
+     * get_userdata() then reads each unprimed row with its own query, so a
+     * check at the end of the step saw only the last one. Here the prime
+     * fails and the rows read after it succeed, wiping the error.
+     */
+    public function testAFailedUsersPrimeIsCaughtEvenWhenTheRowReadsAfterItSucceed(): void
+    {
+        $GLOBALS['__msc']['fail'] = 'prime_users';
+
+        $this->expectException(RepositoryReadFailure::class);
+        $this->expectExceptionMessage('ids: user rows prime');
+        MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+    }
+
+    /**
+     * F-456: an unreadable row answers false, exactly like a missing user.
+     * Alice's row fails and Bob's read right after it succeeds and clears the
+     * error, so only a check at the read itself catches Alice being dropped.
+     */
+    public function testAFailedRowReadForAnyCandidateIsCaughtNotOnlyTheLast(): void
+    {
+        $GLOBALS['__msc']['unprimed'] = [7, 8];
+        $GLOBALS['__msc']['fail']     = 'row:7';
+
+        $this->expectException(RepositoryReadFailure::class);
+        $this->expectExceptionMessage('ids: user row read');
+        MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+    }
+
+    /** The control for the row check: a user with no row is a genuine miss, dropped without a throw. */
+    public function testAUserWithNoRowIsDroppedNotAFailure(): void
+    {
+        $GLOBALS['__msc']['ghosts'] = [9];
+
+        self::assertSame([7, 8], self::sorted(MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true)));
+    }
+
+    /**
+     * Not checked, on purpose: cache_users()'s usermeta query. Its users query
+     * runs after it and clears the error, and nothing the matcher reads comes
+     * from user meta, so the answer is still right.
+     */
+    public function testAFailedUsermetaPrimeLeavesTheAnswerRight(): void
+    {
+        $GLOBALS['__msc']['fail'] = 'prime_meta';
+
+        self::assertSame([7, 8], self::sorted(MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true)));
+    }
+
+    /** By default (/members, the @-mention picker) a failed row read still just drops the candidate. */
+    public function testByDefaultAFailedRowReadStillDropsTheCandidateSilently(): void
+    {
+        $GLOBALS['__msc']['unprimed'] = [7, 8];
+        $GLOBALS['__msc']['fail']     = 'row:7';
+
+        self::assertSame([7, 8], self::sorted(MemberSearchCandidates::ids('ali')), 'Alice is still found by her handle; no throw');
     }
 
     #[DataProvider('failingSteps')]
@@ -157,9 +255,15 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
         self::assertNotSame([], \BCC\Core\Log\Logger::$lines, 'the failure is logged, not only thrown');
     }
 
+    /**
+     * A lookup answered without SQL (a `users_pre_query` short-circuit) clears
+     * nothing, so only the matcher's own reset keeps an earlier, unrelated
+     * error from being blamed on it.
+     */
     public function testAnErrorLeftByAnEarlierQueryIsNotBlamedOnTheLookup(): void
     {
-        $GLOBALS['wpdb']->last_error = 'an unrelated query failed earlier';
+        $GLOBALS['__msc']['pre_query'] = true;
+        $GLOBALS['wpdb']->last_error   = 'an unrelated query failed earlier';
 
         self::assertSame([7, 8], self::sorted(MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true)));
     }

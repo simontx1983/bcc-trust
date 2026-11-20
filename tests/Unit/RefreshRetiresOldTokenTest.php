@@ -191,6 +191,39 @@ final class RefreshRetiresOldTokenTest extends TestCase
         self::assertSame([], self::retired());
     }
 
+    /** F-462: the token's state can't be read: 503, nothing minted, nothing retired. */
+    public function testAnUnreadableTokenStateRefreshesNothing(): void
+    {
+        $old = JwtToken::encode(self::USER, 'handle81');
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail' => true];
+
+        [$status, $data] = self::refresh($old);
+
+        self::assertSame(503, $status);
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertArrayNotHasKey('token', $data);
+        self::assertSame([], self::retired());
+    }
+
+    /**
+     * F-462: readable at decode, but the retired list can't be re-read under
+     * the lock: it must not be written (that would drop every other retired
+     * token), and nothing is minted. The old token is retired BEFORE the new
+     * one is minted, which is what makes this possible.
+     */
+    public function testAnUnreadableRetiredListMintsNothing(): void
+    {
+        $old = JwtToken::encode(self::USER, 'handle81');
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail_from' => 2];
+
+        [$status, $data] = self::refresh($old);
+
+        self::assertSame(503, $status);
+        self::assertArrayNotHasKey('token', $data);
+        self::assertSame([], self::retired());
+        self::assertSame([self::USER, self::USER], $GLOBALS['__bcc_token_state']['reads'], 'decode, then the retire step; no mint after it');
+    }
+
     public function testASuspendedMembersRefreshStillRetiresTheOldToken(): void
     {
         // F-305: a suspended member keeps a read-only session and may refresh.

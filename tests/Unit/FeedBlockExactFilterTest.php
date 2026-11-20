@@ -288,13 +288,15 @@ final class FeedBlockExactFilterTest extends TestCase
      */
     private static function filter(array $items, int $viewerId = self::VIEWER): array
     {
-        $m = (new ReflectionClass(FeedRankingService::class))->getMethod('dropMutuallyBlockedAuthors');
+        // The exact block filter, as a page filter: NULL (an unreadable block
+        // table) empties the page, which is what every caller does with it.
+        $m = (new ReflectionClass(FeedRankingService::class))->getMethod('keepUnblockedOrNull');
         $m->setAccessible(true);
 
-        /** @var list<array<string, mixed>> $out */
+        /** @var list<array<string, mixed>>|null $out */
         $out = $m->invoke(null, $items, $viewerId);
 
-        return $out;
+        return $out ?? [];
     }
 
     private static function chunkSize(): int

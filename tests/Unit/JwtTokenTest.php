@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+namespace {
+    // F-462: the token-state stand-in (reads the Support-namespaced
+    // get_user_meta below, i.e. MetaStore::$tv).
+    require_once __DIR__ . '/../Stubs/token-state-stubs.php';
+}
+
 // ── WP-function stubs ───────────────────────────────────────────────────────
 // JwtToken calls a handful of WordPress globals unqualified, so PHP resolves
 // them against its own namespace FIRST. Defining them here (same namespace,

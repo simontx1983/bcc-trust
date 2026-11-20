@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use WP_REST_Response;
@@ -57,12 +58,38 @@ final class FeedItemGate
     {
         if ($actId > 0) {
             $module = PeepSoActivityRepository::getModuleIdByActId($actId);
-            if ($module !== null && self::isFeedModule($module) && !self::isCommentAct($actId)) {
+            if ($module !== null
+                && self::isFeedModule($module)
+                && !self::isCommentAct($actId)
+                && self::announcementIsVisible($actId, $module)
+            ) {
                 return null;
             }
         }
 
         return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+    }
+
+    /**
+     * A SECRET page's announcement activity is the same 404 as an unknown id
+     * for a viewer the page does not admit. Without this, every engagement
+     * route that runs check() first (reactions, stoke, helpful marks) went
+     * on to answer an announcement with its "takes no reactions" 403, which
+     * told a stranger the secret page's notice exists. TRUE for any other
+     * module, at no extra read.
+     *
+     * ⚠ The viewer is the request's signed-in user: every caller of check()
+     * is a REST handler acting as get_current_user_id(), and PageAccess's
+     * admin exemption reads the same user.
+     */
+    private static function announcementIsVisible(int $actId, string $module): bool
+    {
+        if (!AnnouncementPageAccess::isAnnouncementModule($module)) {
+            return true;
+        }
+        $row = PeepSoActivityRepository::getById($actId);
+
+        return $row !== null && AnnouncementPageAccess::mayViewerSeeRow($row, get_current_user_id());
     }
 
     /**
