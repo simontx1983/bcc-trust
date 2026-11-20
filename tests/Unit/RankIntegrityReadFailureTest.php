@@ -205,6 +205,16 @@ namespace BCC\Trust\Rank\Tests\Unit {
             self::assertSame(0, DisputeRepository::countUpheldSince(5, '2026-05-01 00:00:00'), 'a real zero');
         }
 
+        /** The failure carries the database's own error, for the log and the metric. */
+        public function testAFailedUpheldCountCarriesTheDatabaseError(): void
+        {
+            self::wpdb()->next = ['ok' => false, 'error' => 'Lost connection to MySQL server', 'rows' => []];
+
+            $this->expectException(RepositoryReadFailure::class);
+            $this->expectExceptionMessage('Lost connection to MySQL server');
+            DisputeRepository::countUpheldSince(5, '2026-05-01 00:00:00');
+        }
+
         /** COUNT(*) always answers one numeric row; no row is not a count. */
         public function testACountWithNoRowThrows(): void
         {
