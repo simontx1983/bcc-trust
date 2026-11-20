@@ -306,6 +306,36 @@ class BallotRepository
     }
 
     /**
+     * The same ballots as listActiveForPoll(), FAIL-CLOSED: a failed read
+     * THROWS. For the close evaluation only (F-464 sibling), whose result
+     * is final. The closed-poll views keep the lenient read above.
+     *
+     * @return list<object>
+     * @phpstan-return list<BallotRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
+    public function listActiveForPollOrFail(int $pollId): array
+    {
+        if ($pollId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        /** @var list<BallotRow> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
+            'SELECT ' . self::COLUMNS . " FROM {$this->table}
+              WHERE poll_id = %d AND status = 'active'
+              ORDER BY id ASC
+              LIMIT %d",
+            $pollId,
+            self::MAX_BALLOTS
+        ), __FUNCTION__, true);
+
+        return $rows;
+    }
+
+    /**
      * Persist the close-time evaluation audit for one ballot: which
      * cluster findings applied, the post-cap weight actually counted,
      * and whether the ballot counted toward the quorum headcount.

@@ -165,23 +165,17 @@ class ClusterFindingsRepository
      * PHP-side over the JSON member list — findings are rare, and this
      * read backs a per-request memo in IndependenceResolver.
      *
+     * FAIL-CLOSED (F-464): a failed read THROWS, never "no clusters". The
+     * answer is WRITTEN: poll closes and their audit, dispute outcomes,
+     * rank evidence, promotions.
+     *
      * @return list<object>
      * @phpstan-return list<ClusterFindingRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
      */
     public function listActiveConfirmed(): array
     {
-        global $wpdb;
-
-        /** @var list<ClusterFindingRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            'SELECT ' . self::COLUMNS_READ . " FROM {$this->table}
-              WHERE reversed_at IS NULL AND level = 'confirmed'
-              ORDER BY id ASC
-              LIMIT %d",
-            self::MAX_ACTIVE_FINDINGS
-        ));
-
-        return $rows ?: [];
+        return $this->listActiveAtLevel('confirmed', __FUNCTION__);
     }
 
     /**
@@ -190,23 +184,43 @@ class ClusterFindingsRepository
      * (PollService close evaluation). Same PHP-side membership
      * filtering rationale: findings are rare by construction.
      *
+     * FAIL-CLOSED (F-466): a failed read THROWS, never "none": the
+     * pro-rata cap it feeds is written with the poll close.
+     *
      * @return list<object>
      * @phpstan-return list<ClusterFindingRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
      */
     public function listActiveSuspected(): array
     {
+        return $this->listActiveAtLevel('suspected', __FUNCTION__);
+    }
+
+    /**
+     * The active findings at one level, through runRead(): query() is
+     * checked `=== false`, so a wpdb early return can't hand back an
+     * earlier query's rows as this answer.
+     *
+     * @param 'confirmed'|'suspected' $level
+     * @return list<object>
+     * @phpstan-return list<ClusterFindingRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
+    private function listActiveAtLevel(string $level, string $method): array
+    {
         global $wpdb;
 
-        /** @var list<ClusterFindingRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        /** @var list<ClusterFindingRow> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
             'SELECT ' . self::COLUMNS_READ . " FROM {$this->table}
-              WHERE reversed_at IS NULL AND level = 'suspected'
+              WHERE reversed_at IS NULL AND level = %s
               ORDER BY id ASC
               LIMIT %d",
+            $level,
             self::MAX_ACTIVE_FINDINGS
-        ));
+        ), $method, true);
 
-        return $rows ?: [];
+        return $rows;
     }
 
     /**

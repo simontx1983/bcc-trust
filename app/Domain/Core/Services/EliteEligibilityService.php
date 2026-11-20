@@ -158,6 +158,10 @@ final class EliteEligibilityService
             $targetId
         );
 
+        // F-466: throws when the disputes can't be read, BEFORE anything is
+        // persisted. The automatic callers catch it (metric, or the sweep's
+        // per-page failure count) and the page stays as it was until the
+        // next recompute.
         $since = gmdate('Y-m-d H:i:s', time() - ($windowDays * DAY_IN_SECONDS));
         $hasUpheldDispute = DisputeRepository::countUpheldSince($pageId, $since) > 0;
 

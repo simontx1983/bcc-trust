@@ -113,7 +113,8 @@ class RankPromotionEngine
      *     windows: array<string, array{qualifying: int, required: int, window: int, min_tier: string}>,
      *     satisfied: array<string, bool>,
      *     target: string,
-     *     suspension_unknown: bool
+     *     suspension_unknown: bool,
+     *     findings_unknown: bool
      * }|null
      */
     public function assess(int $userId): ?array
@@ -124,7 +125,24 @@ class RankPromotionEngine
         }
 
         $activeEvents = $this->events->listActiveForSubject($userId);
-        $clusterMap   = $this->independence->activeMap();
+
+        // ⚠ F-464 / F-465: the confirmed-cluster map and the member's
+        // findings decide who counts as an independent recognizer and which
+        // ceiling and penalty apply. When either read FAILS, both answers
+        // are unknown, not empty. Like an unknown suspension below, the
+        // assessment then satisfies no rung above
+        // apprentice and is FLAGGED, so evaluate()/evaluateImmediate()
+        // persist nothing for this member this run.
+        $rankOrder       = ['apprentice' => 1, 'journeyman' => 2, 'veteran' => 3];
+        $findingsUnknown = false;
+        try {
+            $clusterMap     = $this->independence->activeMap();
+            $activeFindings = $this->findings->getActiveForUser($userId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            $findingsUnknown = true;
+            $clusterMap      = [];
+            $activeFindings  = [];
+        }
 
         // §15.3 (Phase 8): active-unexpired finding penalties, capped at
         // the total-active cap (each is already ≤ the per-finding cap by
@@ -134,9 +152,10 @@ class RankPromotionEngine
         // status-only by design.
         $nowUtc        = gmdate('Y-m-d H:i:s');
         $penaltySum    = 0.0;
-        $rankOrder     = ['apprentice' => 1, 'journeyman' => 2, 'veteran' => 3];
-        $ceilingOrd    = $rankOrder['veteran']; // no restriction by default
-        foreach ($this->findings->getActiveForUser($userId) as $finding) {
+        $ceilingOrd    = $findingsUnknown
+            ? $rankOrder['apprentice'] // unknown: nothing above the held rung
+            : $rankOrder['veteran'];   // no restriction by default
+        foreach ($activeFindings as $finding) {
             if ((string) $finding->penalty_expires_at > $nowUtc) {
                 $penaltySum += (float) $finding->score_penalty;
             }
@@ -266,25 +285,33 @@ class RankPromotionEngine
             'satisfied'          => $satisfied,
             'target'             => $target,
             'suspension_unknown' => $suspension === null,
+            'findings_unknown'   => $findingsUnknown,
         ];
     }
 
     /**
-     * True when the assessment could not read the member's suspension. The
+     * True when the assessment could not read the member's suspension, or
+     * (F-464 / F-465) the cluster findings or the member's findings. The
      * persisting paths then skip this member for this run (logged); the
      * next run re-reads.
      *
-     * @param array{suspension_unknown: bool} $assessment
+     * @param array{suspension_unknown: bool, findings_unknown: bool} $assessment
      */
-    private static function skipForUnknownSuspension(int $userId, array $assessment): bool
+    private static function skipForUnknownInputs(int $userId, array $assessment): bool
     {
-        if (!$assessment['suspension_unknown']) {
-            return false;
+        if ($assessment['suspension_unknown']) {
+            \BCC\Core\Log\Logger::warning('[RankPromotionEngine] suspension state unknown; member skipped this run', [
+                'user_id' => $userId,
+            ]);
+            return true;
         }
-        \BCC\Core\Log\Logger::warning('[RankPromotionEngine] suspension state unknown; member skipped this run', [
-            'user_id' => $userId,
-        ]);
-        return true;
+        if ($assessment['findings_unknown']) {
+            \BCC\Core\Log\Logger::warning('[RankPromotionEngine] findings unknown; member skipped this run', [
+                'user_id' => $userId,
+            ]);
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -295,7 +322,7 @@ class RankPromotionEngine
     public function evaluate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
+        if ($assessment === null || self::skipForUnknownInputs($userId, $assessment)) {
             return;
         }
 
@@ -416,7 +443,7 @@ class RankPromotionEngine
     public function evaluateImmediate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
+        if ($assessment === null || self::skipForUnknownInputs($userId, $assessment)) {
             return;
         }
 
