@@ -8,6 +8,7 @@
  *   Plugin::$discovery  the PageDiscoveryService the endpoint gets (a test
  *                       sets a scripted subclass)
  *   Plugin::$cardCalls  every getPageCardForList() call, as [kind, pageId]
+ *   Plugin::$noCard     page ids that build no card for the viewer (null)
  *   PageCardPrefetcher::$primed  every primeFor() id list
  *
  * Cards come back as ['card_kind' => kind, 'page_id' => id], so a test reads
@@ -23,6 +24,8 @@ namespace BCC\Trust\Core {
             public static ?Services\PageDiscoveryService $discovery = null;
             /** @var list<array{0: string, 1: int}> */
             public static array $cardCalls = [];
+            /** @var list<int> */
+            public static array $noCard = [];
 
             public static function instance(): self
             {
@@ -40,10 +43,13 @@ namespace BCC\Trust\Core {
             public function cardViewService(): object
             {
                 return new class {
-                    /** @return array{card_kind: string, page_id: int} */
-                    public function getPageCardForList(string $kind, int $pageId, int $viewerId, mixed $bundle): array
+                    /** @return array{card_kind: string, page_id: int}|null */
+                    public function getPageCardForList(string $kind, int $pageId, int $viewerId, mixed $bundle): ?array
                     {
                         Plugin::$cardCalls[] = [$kind, $pageId];
+                        if (in_array($pageId, Plugin::$noCard, true)) {
+                            return null;
+                        }
                         return ['card_kind' => $kind, 'page_id' => $pageId];
                     }
                 };
