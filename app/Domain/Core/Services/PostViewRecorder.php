@@ -3,6 +3,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Repositories\PostReachRepository;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Support\ViewerFingerprint;
@@ -97,6 +98,10 @@ final class PostViewRecorder
             if ($activity === null
                 || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
                 || FeedItemGate::isCommentAct($actId)
+                // A SECRET page's announcement, for a viewer the page does
+                // not admit, is not reach: nothing is counted, and the
+                // beacon still answers its silent 204, so this is no oracle.
+                || !AnnouncementPageAccess::mayViewerSeeRow($activity, $viewerId)
             ) {
                 return 'ignored_unknown_post';
             }
@@ -182,6 +187,10 @@ final class PostViewRecorder
             if ($activity === null
                 || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
                 || FeedItemGate::isCommentAct($actId)
+                // A SECRET page's announcement, for a viewer the page does
+                // not admit, is not reach: nothing is counted, and the
+                // beacon still answers its silent 204, so this is no oracle.
+                || !AnnouncementPageAccess::mayViewerSeeRow($activity, $viewerId)
             ) {
                 return 'ignored_unknown_post';
             }

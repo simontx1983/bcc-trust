@@ -14,8 +14,10 @@
  *               FrontendRedirect only registers it on rest_api_init)
  *   - 'reset_keys'   user ids get_password_reset_key() minted a key for
  *   - 'reset_throws' make get_password_reset_key() throw
- * wp_die() and both redirects throw SignInGateHalt, so the code after them
- * (an `exit`) never runs in a test. wp_safe_redirect() checks the host the
+ *   - 'status' / 'nocache'  the last status_header() code; whether
+ *               nocache_headers() ran
+ * wp_die(), both redirects and status_header() throw SignInGateHalt, so the
+ * code after them (an `exit`) never runs in a test. wp_safe_redirect() checks the host the
  * way core's wp_validate_redirect() does: an off-site target becomes
  * admin_url().
  */
@@ -119,6 +121,22 @@ namespace {
         function admin_url(string $path = ''): string
         {
             return home_url('/wp-admin/' . ltrim($path, '/'));
+        }
+    }
+
+    if (!function_exists('nocache_headers')) {
+        function nocache_headers(): void
+        {
+            $GLOBALS['__bcc_sig']['nocache'] = true;
+        }
+    }
+
+    if (!function_exists('status_header')) {
+        /** @return never */
+        function status_header(int $code, string $description = '')
+        {
+            $GLOBALS['__bcc_sig']['status'] = $code;
+            throw new \SignInGateHalt('status');
         }
     }
 

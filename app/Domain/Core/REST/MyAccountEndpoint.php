@@ -152,7 +152,8 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Field `email` is required.', 422);
         }
         $email = sanitize_email($emailRaw);
-        if ($email === '' || !is_email($email)) {
+        // F-458: the reserved placeholder domain is refused too.
+        if (!AccountRecoveryService::isUsableEmail($email)) {
             return ApiResponse::error('bcc_invalid_request', 'Email address is not valid.', 422);
         }
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
@@ -82,6 +83,10 @@ final class FeedItemReportVisibilityTest extends TestCase
         // suite dies with "Class PeepSoActivityRepository not found" — a
         // FATAL, not a failed assertion.
         require_once __DIR__ . '/../Stubs/activity-audience-stubs.php';
+        // A SECRET page's announcement: the page rule is
+        // AnnouncementPageAccessTest's; here only its wiring into canSee().
+        require_once __DIR__ . '/../Stubs/announcement-page-access-stub.php';
+        $GLOBALS['__bcc_apa'] = ['hidden' => [], 'calls' => []];
         $GLOBALS['__bcc_aud'] = ['hidden' => [], 'calls' => []];
         // Default: NO group is non-open, the pre-F-23 shape bcc-core's own
         // tests pin. So the matrix below exercises the GROUP gate, and the
@@ -94,6 +99,8 @@ final class FeedItemReportVisibilityTest extends TestCase
         global $wpdb;
         $wpdb = new class {
             public string $prefix = 'wp_';
+            /** CommentRepository::getCommentMeta() joins it. */
+            public string $posts = 'wp_posts';
             /** @var array<string, string> "user:group" => status */
             public array $members = [];
             /** @var list<int> */
@@ -103,6 +110,8 @@ final class FeedItemReportVisibilityTest extends TestCase
             private array $lastResult = [];
             /** @var array<int, mixed> */
             private array $args = [];
+            /** @var list<int> act ids CommentRepository::getCommentMeta() finds as comments */
+            public array $commentActs = [];
 
             public function prepare(string $sql, mixed ...$args): string
             {
@@ -131,6 +140,20 @@ final class FeedItemReportVisibilityTest extends TestCase
                     $this->query($sql);
                 }
                 return $this->lastResult[0][0] ?? null;
+            }
+
+            /** CommentRepository::getCommentMeta(): a row only for a comment act. */
+            public function get_row(?string $sql = null): ?object
+            {
+                if ($sql !== null && str_contains($sql, 'act_comment_object_id > 0')) {
+                    $actId = (int) ($this->args[0] ?? 0);
+
+                    return in_array($actId, $this->commentActs, true)
+                        ? (object) ['act_id' => (string) $actId, 'parent_post_id' => '1', 'parent_act_id' => '1']
+                        : null;
+                }
+
+                return null;
             }
 
             /** @return list<string> */
@@ -196,6 +219,25 @@ final class FeedItemReportVisibilityTest extends TestCase
      * canSee() no longer stops there: the post's own audience is asked
      * too, which is the next two tests.
      */
+    /**
+     * A SECRET page's announcement (module 205) is not visible to a viewer
+     * the page does not admit, so the delete and comment refusals and a
+     * `feed_item` report answer it as a missing post. The SAME row, with the
+     * page admitting the viewer, is visible: the refusal is the page's.
+     */
+    public function testAHiddenNoticeIsNotVisibleAndTheSameNoticeOnAVisiblePageIs(): void
+    {
+        $this->post([]);
+        $notice = $this->activity(module: '205');
+
+        $GLOBALS['__bcc_apa']['hidden'] = [self::ACT];
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $notice), 'hidden');
+        self::assertSame([self::ACT . ':' . self::VIEWER], $GLOBALS['__bcc_apa']['calls']);
+
+        $GLOBALS['__bcc_apa']['hidden'] = [];
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $notice), 'its page admits the viewer');
+    }
+
     public function testANonGroupPostIsNotRefusedByTheGroupRule(): void
     {
         $this->post([]);
@@ -268,6 +310,26 @@ final class FeedItemReportVisibilityTest extends TestCase
             $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = $status;
             self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()), $status);
         }
+    }
+
+    /**
+     * A COMMENT act id is not a feed item. Its row carries the status post's
+     * module, and its own wp_post no group, so every rule below would read it
+     * as an ordinary public post: a `feed_item` report on a comment under a
+     * secret group's post was filed. Now it is never visible, whoever asks.
+     * The SAME act id, not a comment, is visible: the refusal is the comment
+     * check's alone.
+     */
+    public function testACommentActIsNeverVisibleAndTheSameActNotACommentIs(): void
+    {
+        $this->post([]);
+        $this->wpdb()->commentActs = [self::ACT];
+
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()), 'a comment act');
+        self::assertFalse($this->gate()->canSee(0, $this->activity()), 'signed out too');
+
+        $this->wpdb()->commentActs = [];
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()), 'the same act, not a comment');
     }
 
     public function testUnpublishedHiddenAndPrivateMessageActivitiesAreNeverVisible(): void
@@ -541,7 +603,9 @@ final class FeedItemReportVisibilityTest extends TestCase
     {
         return new FeedItemReportVisibility(
             new GroupsService(new ReputationRepository(), new GroupContextResolver()),
-            new HiddenActivityRepository()
+            new HiddenActivityRepository(),
+            null,
+            new CommentRepository()
         );
     }
 
