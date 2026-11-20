@@ -1,7 +1,7 @@
 <?php
 /**
  * UNIT-SUITE DOUBLE of bcc-core's `BCC\Core\Repositories\PeepSoGroupPrivacy`
- * (F-460). Loaded once from tests/bootstrap.php; the integration suite has
+ * (F-460). AUTOLOADED by tests/bootstrap.php; the integration suite has
  * its own bootstrap and autoloads the REAL class from the bcc-core sibling.
  *
  * Why a double: bcc-trust's unit suite does not autoload bcc-core, and
@@ -25,9 +25,9 @@
  * PeepSoGroupPrivacyReadTest (executed on SQLite and MySQL), and end to end
  * by this plugin's integration suite.
  *
- * ⛔ Never CoreSibling::require the real PeepSoGroupPrivacy.php from a UNIT
- * test: this double is already declared, and PHP would fatal on the second
- * declaration. Use the integration suite for the real class.
+ * ⚠ AUTOLOADED, NOT DECLARED. A unit suite that wants core's REAL class
+ * requires it (CoreSibling::require('src/Repositories/PeepSoGroupPrivacy.php'),
+ * after ProbesReads) before first use, and the autoloader never fires.
  */
 
 declare(strict_types=1);
