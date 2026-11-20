@@ -66,24 +66,52 @@ final class PendingEmailService
     public const SIGNUP_EMAIL_CONFLICT = 'conflict'; // someone else holds it now; the pending one is dropped
     public const SIGNUP_EMAIL_FAILED   = 'failed';   // the write failed; pending kept for a retry
 
+    /** At most this many pending holders of one address are looked at. */
+    public const MAX_PENDING_SIGNUP_HOLDERS = 5;
+
     /**
-     * The one account whose pending sign-up address is $email, or null when
-     * none, or MORE than one, holds it (two wallet sign-ups can type the
-     * same address; neither owns it until one verifies).
+     * The accounts whose pending sign-up address is $email, oldest first, at
+     * most MAX_PENDING_SIGNUP_HOLDERS. More than one can hold it: two wallet
+     * sign-ups can type the same address (one of them perhaps not its
+     * owner), and none owns it until one proves the inbox. A holder past the
+     * bound can still verify with its emailed link, which names it.
+     *
+     * Only a sign-up whose user_email is still the wallet placeholder holds
+     * it: that is when the pending address is the one its verification
+     * proves (AuthSupport::verificationAddress()). A sign-up that moved off
+     * the placeholder may keep a leftover pending address, but it is no
+     * holder. That is filtered HERE, in the query, BEFORE the bound. Filtered
+     * after it, five such leftovers (the oldest first) could fill the bound
+     * and push a live holder out.
+     *
+     * @return list<int>
      */
-    public static function pendingSignupOwner(string $email): ?int
+    public static function pendingSignupHolders(string $email): array
     {
         $email = strtolower(trim($email));
         if ($email === '') {
-            return null;
+            return [];
         }
         $ids = get_users([
-            'meta_key'   => self::META_PENDING_SIGNUP_EMAIL,
-            'meta_value' => $email,
-            'fields'     => 'ID',
-            'number'     => 2,
+            'meta_key'       => self::META_PENDING_SIGNUP_EMAIL,
+            'meta_value'     => $email,
+            // `user_email LIKE '%@noreply.bcc.local'`, the same test as
+            // AccountRecoveryService::isPlaceholderEmail(). The column's
+            // collation ignores letter case, as that test's strtolower() does.
+            'search'         => '*@' . AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN,
+            'search_columns' => ['user_email'],
+            'fields'         => 'ID',
+            'orderby'        => 'ID',
+            'order'          => 'ASC',
+            'number'         => self::MAX_PENDING_SIGNUP_HOLDERS,
         ]);
-        return count($ids) === 1 && (int) $ids[0] > 0 ? (int) $ids[0] : null;
+        $holders = [];
+        foreach ($ids as $id) {
+            if ((int) $id > 0) {
+                $holders[] = (int) $id;
+            }
+        }
+        return $holders;
     }
 
     /** The pending sign-up address for $userId, or '' when there is none. */

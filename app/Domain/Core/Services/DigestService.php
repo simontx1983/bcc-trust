@@ -341,12 +341,17 @@ final class DigestService
      */
     private function composeBody(string $handle, array $rows, bool $hasOverflow, int $maxItems, string $unsubUrl): string
     {
-        $lines = [];
+        $lines   = [];
+        $handles = [];
         foreach ($rows as $row) {
             $message = isset($row->not_message) ? (string) $row->not_message : '';
             if ($message === '') {
                 continue;
             }
+            // F-412: the actor by their current @handle, as the bell names them.
+            $fromId  = isset($row->not_from_user_id) ? (int) $row->not_from_user_id : 0;
+            $handles[$fromId] ??= NotificationViewService::actorHandle($fromId);
+            $message = NotificationViewService::withCurrentActorHandle($message, $handles[$fromId]);
             $lines[] = '- ' . wp_strip_all_tags($message);
         }
 

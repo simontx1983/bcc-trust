@@ -49,6 +49,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\GroupSyndicationGate;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -82,8 +83,15 @@ class FeedItemReportVisibility
     public function __construct(
         private readonly GroupsService $groups,
         private readonly HiddenActivityRepository $hidden,
-        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null
+        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null,
+        private ?\BCC\Trust\Core\Repositories\CommentRepository $comments = null
     ) {
+    }
+
+    /** Injected by tests; built lazily in production, as $votes is. */
+    private function comments(): \BCC\Trust\Core\Repositories\CommentRepository
+    {
+        return $this->comments ??= \BCC\Trust\Core\Plugin::instance()->commentRepository();
     }
 
     /**
@@ -155,8 +163,29 @@ class FeedItemReportVisibility
         if (!FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return false;
         }
+        // ⚠ A COMMENT act is not a feed item, and nothing above can tell.
+        // PeepSo gives a comment's activity row the SAME module a status post
+        // carries, so it passes the allowlist, and every rule below would then
+        // be asked about the COMMENT: its own wp_post has no peepso_group_id
+        // (a secret group's comment reads as un-grouped) and its author's own
+        // §F-02 level. So a `feed_item` report on a comment under a secret
+        // group's post, a followers-only post or a page wall was FILED, where
+        // a missing id gets 404. Refused here, so no caller of canSee() can be
+        // handed one. (bcc-core #140's top-level-only read would do the same,
+        // but is not in production yet; this works on any core.)
+        if (FeedItemGate::isCommentAct($actId, $this->comments())) {
+            return false;
+        }
         if (!$this->isLive($activity)) {
             return false; // trashed/unpublished or moderation-hidden: no feed shows it
+        }
+        // A SECRET page's announcement (§4.32.8 writes it as the operator's
+        // own activity): a viewer the page does not admit gets what a missing
+        // post gets, so the delete and comment refusals and a `feed_item`
+        // report cannot tell them it exists. The feeds and the permalink
+        // apply the same rule (FeedRankingService::pageFilters()).
+        if (!AnnouncementPageAccess::mayViewerSeeRow($activity, $viewerId)) {
+            return false;
         }
 
         if (!$this->groupRuleAllows($viewerId, $postId)) {
@@ -302,7 +331,10 @@ class FeedItemReportVisibility
      * ⚠ The admin exemption is {@see ProfileAccess::postVisibilityArgs()},
      * the SAME definition the profile and feed halves use, so the three
      * cannot drift into the listed-but-unopenable state F-02 exists to
-     * remove. Safe here because every caller is a per-viewer request path.
+     * remove. Safe here because every caller is a per-viewer request path
+     * whose viewer IS the request's user. A caller asking about someone
+     * else (as `FeedRankingService::canView()` does for a mentionee) must
+     * pass that viewer's own exemption instead; see postVisibilityArgs().
      * ⛔ A globally cached, viewer-independent payload (the hot feed, warmed
      * by cron into one shared blob) must NEVER reach this method: taking
      * the exemption there would store an ungated payload and serve it to

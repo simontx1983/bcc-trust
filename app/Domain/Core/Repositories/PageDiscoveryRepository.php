@@ -710,6 +710,70 @@ final class PageDiscoveryRepository
     }
 
     /**
+     * Of the given ids, the pages that are SECRET, or whose privacy could not
+     * be read. In input order, each id once.
+     *
+     * bcc-core's shared rule decides (PeepSoPagePrivacy::notSecretSql()), so
+     * this can never disagree with discovery or with PageAccess: a page is
+     * secret when ANY of its privacy rows reads 2.
+     *
+     * For lists that show pages to one viewer: PageAccess::visibleAmong()
+     * asks this once per list, and only the ids it returns go on to the
+     * per-page member check. Single bulk SELECT, bounded by the caller's
+     * IN-list.
+     *
+     * ⚠ FAILS CLOSED. A read that did not run returns EVERY id, because a
+     * page whose privacy is unknown counts as secret. Each then gets the
+     * single-page check, which hides it again if the database is still
+     * failing.
+     *
+     * An id that names no post is never returned.
+     *
+     * @param  list<int> $pageIds
+     * @return list<int>
+     */
+    public static function findSecretOrUnknownIds(array $pageIds): array
+    {
+        $pageIds = array_values(array_unique(array_filter(
+            $pageIds,
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($pageIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
+        $notSecret    = PeepSoPagePrivacy::notSecretSql('p.ID');
+
+        /** @var list<object{ID: int|numeric-string}>|null $rows */
+        $rows = self::trustedRows($wpdb->prepare(
+            "SELECT p.ID
+               FROM {$wpdb->posts} p
+              WHERE p.ID IN ({$placeholders})
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            ...[...$pageIds, count($pageIds)]
+        ));
+
+        if ($rows === null) {
+            self::logReadFailure('secret pages by id', ['ids' => count($pageIds)]);
+
+            return $pageIds;
+        }
+
+        $secret = [];
+        foreach ($rows as $row) {
+            $secret[(int) $row->ID] = true;
+        }
+
+        return array_values(array_filter(
+            $pageIds,
+            static fn (int $id): bool => isset($secret[$id])
+        ));
+    }
+
+    /**
      * Of the given post IDs, return those whose chain meta resolves to
      * $chainId. Matches EITHER `_bcc_gate_chain_id` (NFT holder groups)
      * OR `_bcc_chain_tag` (user-created plain groups); meta_value is a

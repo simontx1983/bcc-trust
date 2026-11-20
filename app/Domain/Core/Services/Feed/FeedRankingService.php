@@ -32,10 +32,13 @@
 
 namespace BCC\Trust\Core\Services\Feed;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Feed\ActivityFeedService;
+use BCC\Core\Log\Logger;
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -45,6 +48,7 @@ use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
+use BCC\Trust\Core\ValueObjects\GroupContext;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -93,7 +97,7 @@ final class FeedRankingService
      *
      * Well under `getMutuallyBlockedSetOrUnknown()`'s own candidate cap, so
      * that cap can never silently truncate this check — see
-     * {@see dropMutuallyBlockedAuthors()}.
+     * {@see keepUnblockedOrNull()}.
      */
     private const BLOCK_PROBE_CHUNK = 100;
 
@@ -156,12 +160,14 @@ final class FeedRankingService
     ): array {
         $payload = $this->hotFeedPayload($cursor, $limit);
 
-        // ⚠⚠ PER-VIEWER FILTER, APPLIED AFTER THE SHARED CACHE AND NEVER
+        // ⚠⚠ PER-VIEWER FILTERS, APPLIED AFTER THE SHARED CACHE AND NEVER
         // WRITTEN BACK INTO IT. The payload above is built with the
         // ANONYMOUS posture (viewer 0) and cached for everyone, which is
         // what makes /feed/hot cheap and publicly cacheable. §K1 mutual
-        // invisibility still has to hold for a signed-in reader, so the
-        // block filter runs here, on this request's own copy.
+        // invisibility still has to hold for a signed-in reader, and a
+        // SECRET page's announcement for everyone the page does not admit,
+        // so every page filter ({@see pageFilters()}) runs here, on this
+        // request's own copy.
         //
         // ⚠ The cache write lives inside hotFeedPayload(), so it is
         // STRUCTURALLY impossible for a filtered, viewer-specific payload to
@@ -170,9 +176,15 @@ final class FeedRankingService
         // served to everyone else would be a far worse bug than the one
         // this fixes, and it is the reason the split exists.
         //
-        // ⚠ `$viewerId` 0 (anonymous, and the cron warm path) short-circuits
-        // inside the filter, so logged-out behaviour is byte-identical.
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+        // ⚠ The cached page still HOLDS a secret page's announcements (it is
+        // built with no viewer, and the cron warm path never filters). That
+        // is deliberate: filtering here, per request, hides a page made
+        // secret on the next request instead of after HOT_CACHE_TTL, and
+        // lets the page's members see its notices. `$viewerId` 0 skips the
+        // block filter but NOT this one: anonymous is the viewer a secret
+        // page admits least. No refill here: a short hot page is returned
+        // as it is, as before.
+        $payload['items'] = self::dropFilteredItems($payload['items'], $viewerId);
 
         return $payload;
     }
@@ -629,13 +641,23 @@ final class FeedRankingService
     }
 
     /**
-     * Personalized feed (§N6) — auth-required, three scopes.
+     * Personalized feed (§N6) — auth-required, four scopes. 'groups' ("My
+     * Groups", F-416) reads under each room's rules, see getMyGroupsFeed().
      *
-     * @param 'for_you'|'following'|'signals' $scope
+     * @param 'for_you'|'following'|'signals'|'groups' $scope
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     * @throws ActivityReadFailedException when the activity or membership read did not run
      */
     public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20): array
     {
+        // ⚠ The LITERAL, not ActivityFeedService::SCOPE_GROUPS: this line
+        // runs on EVERY scope, and against a bcc-core that predates F-416 the
+        // constant does not exist, so naming it here would turn every feed
+        // read into a fatal error instead of failing only the new scope.
+        if ($scope === 'groups') {
+            return $this->getMyGroupsFeed($viewerId, $cursor, $limit);
+        }
+
         $excluded = self::mergeExclusions(
             $this->cautionListExceptViewer($viewerId),
             // §K1 mutual-invisibility: hide both directions of any
@@ -667,7 +689,7 @@ final class FeedRankingService
 
         // ⚠ F-54: EXACT mutual-block filter over each page's authors. The
         // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors(). F-297: a page it empties is
+        // — see keepUnblockedOrNull(). F-297: a page it empties is
         // read past, see fetchPastBlockedPages().
         $payload = self::fetchPastBlockedPages(
             fn (?string $pageCursor): array => $this->activityFeed->getFeed(
@@ -688,6 +710,136 @@ final class FeedRankingService
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
+    }
+
+    /**
+     * "My Groups" (F-416, user decision 2026-11-18): the posts of every group
+     * and Hall the viewer is an ACTIVE member of. Backs `GET /feed?scope=groups`.
+     *
+     * ⭐ ONE PRINCIPLE: the union of the viewer's own rooms, each post under
+     * its ROOM's rules. It must never show more or less than the member
+     * would see by opening the room ({@see getGroupFeed()}). So:
+     *
+     *   - membership: published groups, ranked so a ban beside a stale member
+     *     row wins (F-354), at most the 200 most recently joined
+     *     ({@see PeepSoGroupRepository::getActiveMemberGroupIdsOrFail()});
+     *   - a MEMBER read: members_only posts included, no public_all gate,
+     *     both Hall channels (main and ranked — the room only splits them
+     *     into two tabs);
+     *   - §F-02 is NOT enforced, exactly as in the room. Ratified 2026-11-18
+     *     as within the 2026-11-12 decision's intent: its "/feed keeps F-02"
+     *     line is about the mixed feed surfacing group posts to NON-members,
+     *     while this scope only ever returns posts from rooms the viewer is a
+     *     member of;
+     *   - the §O4.1 shadow-limit applies except in the rooms that lift it,
+     *     decided per room by the same {@see roomLiftsShadowLimit()} the room
+     *     itself uses (NFT holder rooms today);
+     *   - blocks in both directions and the moderation-hidden list apply
+     *     everywhere, as in every feed. The module gate is the repository's
+     *     default public-feed allow-list.
+     *
+     * No groups → an empty page (has_more false), not an error. A membership
+     * read that did not run THROWS, so the endpoint answers a retryable 503
+     * instead of telling a member they are in no group.
+     *
+     * ⚠ Needs bcc-core with F-416 (deploy order: core first). An older core
+     * has none of this scope's API, so the scope answers the same retryable
+     * 503 until core deploys, never an uncaught Error (a 500 plus WordPress's
+     * recovery-mode email). Every other scope is unaffected.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     * @throws ActivityReadFailedException
+     */
+    private function getMyGroupsFeed(int $viewerId, ?string $cursor, int $limit): array
+    {
+        if (!self::coreServesMyGroups()) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: "My Groups" needs bcc-core with F-416 (ActivityFeedService::SCOPE_GROUPS); this core predates it.'
+            );
+        }
+
+        $empty = ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+        if ($viewerId <= 0) {
+            return $empty;
+        }
+
+        $groupIds = PeepSoGroupRepository::getActiveMemberGroupIdsOrFail($viewerId, ActivityFeedService::MEMBER_GROUPS_CAP);
+        if ($groupIds === null) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: the "My Groups" membership read failed. An empty result here is NOT "a member of nothing".'
+            );
+        }
+        if ($groupIds === []) {
+            return $empty;
+        }
+
+        // The room's own shadow-limit decision, asked per room.
+        $liftsShadowLimit = [];
+        foreach ($this->groupContextResolver->forManyGroups($groupIds) as $groupId => $ctx) {
+            if (self::roomLiftsShadowLimit($ctx)) {
+                $liftsShadowLimit[] = $groupId;
+            }
+        }
+
+        $blockExclusions = self::mergeExclusions(
+            PeepSoBlockRepository::getBlockedIds($viewerId),
+            PeepSoBlockRepository::getBlockerIds($viewerId)
+        );
+        $caution = $this->cautionListExceptViewer($viewerId);
+        $hidden  = $this->hiddenRepo->getAllHiddenIds();
+
+        // ⚠ F-54: EXACT mutual-block filter over each page's authors; the
+        // block list above is only the cheap pre-filter. F-297: a page it
+        // empties is read past, see fetchPastBlockedPages().
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getFeed(
+                $viewerId,
+                ActivityFeedService::SCOPE_GROUPS,
+                $pageCursor,
+                $limit,
+                $blockExclusions === [] ? null : $blockExclusions,
+                $hidden === []          ? null : $hidden,
+                onlyForGroupIds: $groupIds,
+                softExcludedAuthorIds: $caution === [] ? null : $caution,
+                softExclusionExemptGroupIds: $liftsShadowLimit === [] ? null : $liftsShadowLimit
+            ),
+            $cursor,
+            $viewerId
+        );
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
+     * Does this ROOM lift the §O4.1 reputation shadow-limit for its own
+     * posts? The ONE decision {@see getGroupFeed()},
+     * {@see getMyGroupsFeed()} and the permalink ({@see visibleActivity()},
+     * F-451) share. So a room's ACTIVE MEMBER never sees a post in the room
+     * that "My Groups" hides or that 404s by link. The permalink lifts the
+     * limit for active members only: a non-member who can read a
+     * non-secret room's feed sees the post there but still gets a 404 by
+     * link. That split is intended, the fail-safe direction.
+     *
+     * Today: NFT holder rooms. There the on-chain gate plus membership IS the
+     * moderation boundary, so a verified low-trust holder is not hidden from
+     * the fellow holders of the room they qualified for. See getGroupFeed()
+     * for the full reasoning.
+     */
+    private static function roomLiftsShadowLimit(?GroupContext $ctx): bool
+    {
+        return $ctx !== null && $ctx->isHolderGroup();
+    }
+
+    /**
+     * Does the installed bcc-core serve "My Groups" (F-416)? SCOPE_GROUPS
+     * ships in the same core change as getActiveMemberGroupIdsOrFail(),
+     * MEMBER_GROUPS_CAP and getFeed()'s three new parameters, so it stands
+     * for all of them. The same probe as AccountCredentialCheck::coreHasPurposes().
+     */
+    private static function coreServesMyGroups(): bool
+    {
+        return defined(ActivityFeedService::class . '::SCOPE_GROUPS');
     }
 
     /**
@@ -718,19 +870,150 @@ final class FeedRankingService
      */
     public function getActivityById(int $actId, int $viewerId): ?array
     {
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        // The permalink's viewer IS the request's user: the exemption is theirs.
+        $item = $this->visibleActivity($actId, $viewerId, null);
+        if ($item === null) {
+            return null;
+        }
+
+        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
+        return $hydrated[0] ?? null;
+    }
+
+    /**
+     * May $viewerId open $actId's permalink? Exactly what `getActivityById()`
+     * answers when $viewerId makes the request (every gate is in
+     * visibleActivity(); hydration only decorates and never drops an item),
+     * without paying for the hydration.
+     *
+     * For a caller that needs only the yes/no: a mention bell is owed only
+     * to a member the post's own permalink would show it to
+     * (NotificationDispatcher::dispatchMentionsFor()).
+     *
+     * ⚠ $viewerId is usually NOT the request's user: a mentionee, asked
+     * about during the author's request. So the admin exemption is the
+     * VIEWER's own, never the current user's. Taken from an admin author,
+     * it would read a member's audience unenforced (a followers-only post
+     * would bell a non-friend) and skip the group second look (a room post
+     * would bell no member at all).
+     *
+     * Throws ActivityReadFailedException, as getActivityById() does, when
+     * the read did not run: "unknown" is not "no", and each caller decides
+     * which way to fail.
+     */
+    public function canView(int $actId, int $viewerId): bool
+    {
+        return $this->visibleActivity(
+            $actId,
+            $viewerId,
+            ProfileAccess::userIsExemptFromVisibility($viewerId)
+        ) !== null;
+    }
+
+    /**
+     * The permalink's visibility gates, before hydration: the shared core of
+     * getActivityById() and canView(), so the two cannot disagree. See
+     * getActivityById() for what each gate is.
+     *
+     * @param bool|null $viewerIsExempt the viewer's admin exemption; null =
+     *        the current user's (only when the viewer is the request's user)
+     * @return array<string, mixed>|null
+     */
+    private function visibleActivity(int $actId, int $viewerId, ?bool $viewerIsExempt): ?array
+    {
+        $caution  = $this->cautionListExceptViewer($viewerId);
+        $blocked  = $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [];
+        $blockers = $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : [];
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
         // §F-02 — load-bearing HERE above all. A permalink that served
         // what the feed withholds is the whole reason bcc-core puts this
         // predicate in both readers; enforcing on the feed alone would
         // move the leak rather than close it.
-        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId, $viewerIsExempt);
 
+        $item = $this->permalinkRead(
+            $actId,
+            $viewerId,
+            self::mergeExclusions($caution, $blocked, $blockers),
+            $hidden,
+            $friendIds,
+            $enforceF02
+        );
+
+        // F-451 (main agent's decision, 2026-11-19): the room's own
+        // shadow-limit rule. A room that lifts the §O4.1 shadow-limit for
+        // its posts (roomLiftsShadowLimit(): NFT holder rooms) shows a
+        // caution-tier member's post in the room and in My Groups, so it must
+        // not 404 by link for a fellow member, and the mention gate
+        // (canView()) follows. The THIRD look re-reads without the caution
+        // list (blocks and the moderation-hidden list still apply, and so
+        // does every other gate), and keeps the post only when it is in such
+        // a room AND $viewerId is an active member there. Everywhere else the
+        // caution list's refusal stands.
+        //
+        // Taken by an exempt (admin) viewer too: it is the ROOM's rule, not
+        // the §F-02 profile rule, and it still needs the viewer's own
+        // membership. Only reachable when a caution list exists to lift.
+        if ($item === null && $caution !== []) {
+            $lifted = $this->permalinkRead(
+                $actId,
+                $viewerId,
+                self::mergeExclusions($blocked, $blockers),
+                $hidden,
+                $friendIds,
+                $enforceF02
+            );
+            if ($lifted !== null && $this->viewerIsMemberOfARoomThatLiftsTheShadowLimit($lifted, $viewerId)) {
+                $item = $lifted;
+            }
+        }
+
+        if ($item === null) {
+            return null;
+        }
+
+        // ⚠ F-54: the same exact checks, on a single row: every page filter
+        // ({@see pageFilters()}). This method's contract is already "404
+        // rather than leak", so a blocked author, and a SECRET page's
+        // announcement for a viewer the page does not admit, become a 404
+        // exactly as a missing post does. That covers both permalink routes
+        // (`/feed/{id}` and the shortcode alias share this call).
+        //
+        // ⚠ It runs on whichever look produced $item, the F-451 third look
+        // included, so no look can serve what a page filter drops.
+        //
+        // ⚠ A filter whose OWN read fails also lands here as a 404, not the
+        // F-275 503: the block read and the announcement page read fail
+        // closed by dropping. Only the activity read above throws.
+        if (self::dropFilteredItems([$item], $viewerId) === []) {
+            return null;
+        }
+
+        return $item;
+    }
+
+    /**
+     * One permalink read under the author exclusion list $excluded:
+     * bcc-core's gated read, then the §F-02 group second look when the gate
+     * ran. A refusal there may have been the author's PROFILE level
+     * withholding a post whose room shows it. Only reachable when the gate
+     * actually ran ($enforceF02), so an exempt reader costs no second query,
+     * and only a GROUP-tagged post can be recovered.
+     *
+     * @param list<int>      $excluded
+     * @param list<int>      $hidden
+     * @param list<int>|null $friendIds
+     * @return array<string, mixed>|null
+     */
+    private function permalinkRead(
+        int $actId,
+        int $viewerId,
+        array $excluded,
+        array $hidden,
+        ?array $friendIds,
+        bool $enforceF02
+    ): ?array {
         $item = $this->activityFeed->getActivityById(
             $actId,
             $viewerId,
@@ -740,28 +1023,68 @@ final class FeedRankingService
             enforcePostVisibility: $enforceF02
         );
 
-        // §F-02 group carve-out: a refusal above may have been the
-        // author's PROFILE level withholding a post whose room shows it.
-        // Only reachable when the gate actually ran ($enforceF02), so an
-        // exempt reader costs no second query, and only a GROUP-tagged
-        // post can be recovered.
         if ($item === null && $enforceF02) {
             $item = $this->groupTaggedDespiteProfileLevel($actId, $viewerId, $excluded, $hidden);
         }
 
-        if ($item === null) {
-            return null;
+        return $item;
+    }
+
+    /**
+     * F-451: is $item in a room that lifts the §O4.1 shadow-limit
+     * ({@see roomLiftsShadowLimit()}, the room's own decision) of which
+     * $viewerId is an ACTIVE member? Any of the post's rooms qualifies, as a
+     * double-tagged post is in each of them.
+     *
+     * ⚠ $viewerId, never the request's user: canView() asks on a mentionee's
+     * behalf during the author's request. The membership read is the F-354
+     * ranked one, so a ban beside a stale member row wins.
+     *
+     * ⚠ A membership read that FAILS is "not lifted" (logged), never a 503.
+     * This read is reached only for an EXISTING post in a room that lifts the
+     * limit, so a 503 here would answer differently from a missing id and
+     * tell the caller both facts (security's rule for /feed/:id, raised in
+     * F-438's design). The post answers the same 404 as a missing id, and
+     * canView() gives no bell. The fail-closed direction holds: a lift is
+     * never granted on a read that did not run.
+     *
+     * @param array<string, mixed> $item
+     */
+    private function viewerIsMemberOfARoomThatLiftsTheShadowLimit(array $item, int $viewerId): bool
+    {
+        // The room marker lives on the BACKING wp_post (external_id), never
+        // the act_id (audit H-B1).
+        $postId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+        if ($postId <= 0 || $viewerId <= 0) {
+            return false;
         }
 
-        // ⚠ F-54: the same exact check, on a single row. This method's
-        // contract is already "404 rather than leak", so a blocked author
-        // here becomes a 404 exactly as an excluded one does.
-        if (self::dropMutuallyBlockedAuthors([$item], $viewerId) === []) {
-            return null;
+        $groupIds = [];
+        foreach ((array) get_post_meta($postId, 'peepso_group_id', false) as $raw) {
+            $groupId = is_numeric($raw) ? (int) $raw : 0;
+            if ($groupId > 0) {
+                $groupIds[$groupId] = true;
+            }
         }
 
-        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
-        return $hydrated[0] ?? null;
+        foreach (array_keys($groupIds) as $groupId) {
+            if (!self::roomLiftsShadowLimit($this->groupContextResolver->forGroup($groupId))) {
+                continue;
+            }
+            $status = PeepSoGroupRepository::getMembershipStatusOrFail($viewerId, $groupId);
+            if ($status === false) {
+                Logger::warning('[FeedRankingService] room membership unreadable; shadow-limit not lifted (F-451)', [
+                    'viewer_id' => $viewerId,
+                    'group_id'  => $groupId,
+                ]);
+                continue;
+            }
+            if (is_string($status) && str_starts_with($status, 'member')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -911,23 +1234,29 @@ final class FeedRankingService
         // null = every public module, the unchanged query.
         $moduleIds = self::wallModuleIds($authorId, $viewerId);
 
-        $payload = $this->activityFeed->getActivityForAuthor(
-            $authorId,
-            $viewerId,
+        // ⚠ F-54: EXACT mutual-block filter over each page's authors (the
+        // `$excluded` list above is a cheap pre-filter and is NOT
+        // sufficient — see keepUnblockedOrNull()), and every other page
+        // filter: a SECRET page's announcements leave its operator's wall
+        // for a viewer the page does not admit. A page they empty is read
+        // past (F-297), which a wall now needs too: an operator's recent
+        // activity can be a run of notices on a secret page.
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getActivityForAuthor(
+                $authorId,
+                $viewerId,
+                $pageCursor,
+                $limit,
+                $excluded === [] ? null : $excluded,
+                $hidden === []   ? null : $hidden,
+                $excludedGroups === [] ? null : $excludedGroups,
+                viewerFriendIds: $friendIds,
+                enforcePostVisibility: $enforceF02,
+                moduleIds: $moduleIds
+            ),
             $cursor,
-            $limit,
-            $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden,
-            $excludedGroups === [] ? null : $excludedGroups,
-            viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02,
-            moduleIds: $moduleIds
+            $viewerId
         );
-
-        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
-        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors().
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -1072,10 +1401,13 @@ final class FeedRankingService
             enforcePostVisibility: $enforceF02
         );
 
-        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
-        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors().
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors (the
+        // `$excluded` list above is a cheap pre-filter and is NOT
+        // sufficient — see keepUnblockedOrNull()), through the same page
+        // filters as every other feed. A page-marked post is never an
+        // announcement, so the secret-page filter has nothing to do here;
+        // the endpoint already 404s a hidden page before this runs.
+        $payload['items'] = self::dropFilteredItems($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -1144,7 +1476,7 @@ final class FeedRankingService
         // request-cached (the feed gate already resolved this group), so the
         // lookup is free.
         $ctx        = $this->groupContextResolver->forGroup($groupId);
-        $isNftGroup = $ctx !== null && $ctx->isHolderGroup();
+        $isNftGroup = self::roomLiftsShadowLimit($ctx);
 
         $excluded = $isNftGroup
             ? $blockExclusions
@@ -1221,7 +1553,7 @@ final class FeedRankingService
         // two callers of one decision, not two decisions.
         //
         // ⚠ F-54: EXACT mutual-block filter over each page's authors. The        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors(). F-297: a page it empties is
+        // — see keepUnblockedOrNull(). F-297: a page it empties is
         // read past, see fetchPastBlockedPages().
         $payload = self::fetchPastBlockedPages(
             fn (?string $pageCursor): array => $this->activityFeed->getFeed(
@@ -1301,8 +1633,77 @@ final class FeedRankingService
     }
 
     /**
+     * THE PER-VIEWER PAGE FILTERS — the one list every feed read applies to
+     * the items it fetched, after the SQL and before hydration (and, for
+     * /feed/hot, after the shared cache).
+     *
+     * Each is `callable(list $items, int $viewerId): ?list`:
+     *   - OMIT an item to drop it; REWRITE an item to transform it (a
+     *     rewritten item is kept, and counts as kept for the refill);
+     *   - keep the input order;
+     *   - return NULL only when the filter's own read failed and the whole
+     *     page must fail closed (no items, no further reads). A filter that
+     *     can fail more narrowly does so itself (the announcement filter
+     *     drops only the notices).
+     *
+     * ⚠ ORDER IS NOT LOAD-BEARING: every filter only removes or rewrites
+     * what it is about, so any order gives the same page. Add a filter here
+     * and every surface gets it, including a page {@see fetchPastBlockedPages()}
+     * reads to refill an emptied one.
+     *
+     * @return list<callable(list<array<string, mixed>>, int): (list<array<string, mixed>>|null)>
+     */
+    private static function pageFilters(): array
+    {
+        return [
+            // §K1 mutual blocks, exact (F-54).
+            self::keepUnblockedOrNull(...),
+            // A SECRET page's announcements (§4.32.8 projection): only the
+            // page's author, admins, and its members and invitees see them.
+            AnnouncementPageAccess::keepVisible(...),
+        ];
+    }
+
+    /**
+     * Every filter in $filters over one fetched page; null when one failed
+     * closed.
+     *
+     * @param list<array<string, mixed>> $items
+     * @param list<callable(list<array<string, mixed>>, int): (list<array<string, mixed>>|null)> $filters
+     * @return list<array<string, mixed>>|null
+     */
+    private static function filterPage(array $items, int $viewerId, array $filters): ?array
+    {
+        foreach ($filters as $filter) {
+            if ($items === []) {
+                return [];
+            }
+            $items = $filter($items, $viewerId);
+            if ($items === null) {
+                return null;
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Every page filter, for a read that does not refill (the hot feed's
+     * post-cache pass, the permalink, the page feed): a page that failed
+     * closed is simply empty.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function dropFilteredItems(array $items, int $viewerId): array
+    {
+        return self::filterPage($items, $viewerId, self::pageFilters()) ?? [];
+    }
+
+    /**
      * Drop items whose author is mutually blocked with the viewer — the
-     * EXACT check, over this page's authors only.
+     * EXACT check, over this page's authors only. The first of
+     * {@see pageFilters()}.
      *
      * ⚠⚠ WHY THE PRE-FILTER IS NOT ENOUGH (F-54). Every caller above
      * merges `getBlockedIds()` and `getBlockerIds()` into an `$excluded`
@@ -1337,19 +1738,10 @@ final class FeedRankingService
      * one chunk (REST clamps `limit` to 50), so the loop runs once; what it
      * buys is that raising a page limit later cannot quietly re-open this.
      *
-     * @param list<array<string, mixed>> $items
-     * @return list<array<string, mixed>>
-     */
-    private static function dropMutuallyBlockedAuthors(array $items, int $viewerId): array
-    {
-        return self::keepUnblockedOrNull($items, $viewerId) ?? [];
-    }
-
-    /**
-     * {@see dropMutuallyBlockedAuthors()}, but a failed block read answers
-     * NULL instead of an empty page, so {@see fetchPastBlockedPages()} can
-     * tell "everything here was blocked" (read on) from "the block table is
-     * unreadable" (fail closed, read nothing more).
+     * ⚠ A failed block read answers NULL, not an empty page, so
+     * {@see fetchPastBlockedPages()} can tell "everything here was blocked"
+     * (read on) from "the block table is unreadable" (fail closed, read
+     * nothing more).
      *
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>|null
@@ -1393,30 +1785,49 @@ final class FeedRankingService
     }
 
     /**
-     * F-297: fetch a page, apply the exact block filter, and when that leaves
-     * NOTHING while the feed says there is more, read on from the page's own
-     * `next_cursor` — up to BLOCK_REFILL_PAGES more pages.
+     * F-297: fetch a page, apply EVERY page filter ({@see pageFilters()}),
+     * and when they leave NOTHING while the feed says there is more, read on
+     * from the page's own `next_cursor` — up to BLOCK_REFILL_PAGES more pages.
+     * (The name predates the second filter; callers outside this PR use it.)
      *
      * Without this, a viewer who blocks a prolific author (or more than the
-     * pre-filter's 500) could get `items: []` with `has_more: true`, which the
-     * client renders as the empty state with no way to load more, although
-     * older posts by other authors exist.
+     * pre-filter's 500), or who meets a run of a secret page's notices, could
+     * get `items: []` with `has_more: true`, which the client renders as the
+     * empty state with no way to load more, although older posts exist.
      *
-     * Only an EMPTIED page is refilled; a short page is returned as is (the
-     * client pages on). The cursor of the last page read is returned, so
-     * nothing is skipped or repeated. A failed block read stays fail-closed:
-     * an empty page, no further reads. The anonymous viewer (0) is never
-     * filtered, so this is a single fetch for them.
+     * ⚠⚠ A REFILLED PAGE PASSES EVERY FILTER, not only the one that emptied
+     * the page before it: each page read goes through the same
+     * {@see filterPage()}.
+     *
+     * Only an EMPTIED page is refilled; a short page, or one a filter only
+     * REWROTE, is returned as is (the client pages on). The cursor of the
+     * last page read is returned, so nothing is skipped or repeated. A filter
+     * that fails closed (NULL) gives an empty page and no further reads. The
+     * anonymous viewer (0) skips the block filter but not the secret-page
+     * one.
      *
      * @param callable(?string): array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} $fetch
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     private static function fetchPastBlockedPages(callable $fetch, ?string $cursor, int $viewerId): array
     {
+        return self::fetchPastFilteredPages($fetch, $cursor, $viewerId, self::pageFilters());
+    }
+
+    /**
+     * {@see fetchPastBlockedPages()} over an explicit filter list, so a test
+     * can pin the refill against filters that drop, rewrite or fail.
+     *
+     * @param callable(?string): array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} $fetch
+     * @param list<callable(list<array<string, mixed>>, int): (list<array<string, mixed>>|null)> $filters
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private static function fetchPastFilteredPages(callable $fetch, ?string $cursor, int $viewerId, array $filters): array
+    {
         $payload = $fetch($cursor);
         for ($refills = 0; ; $refills++) {
             $fetched = $payload['items'];
-            $kept    = self::keepUnblockedOrNull($fetched, $viewerId);
+            $kept    = self::filterPage($fetched, $viewerId, $filters);
             if ($kept === null) {
                 $payload['items'] = [];
                 return $payload;

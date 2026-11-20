@@ -310,4 +310,24 @@ namespace {
         {
         }
     }
+
+    // F-421 (EndorsementsGivenReadFailureIntegrationTest): the vouch rows'
+    // avatar lookup (bcc-core PeepSoMediaCache::avatarUrlBulk) and the
+    // /endorsements/mine handlers' rest_ensure_response(). Both as in
+    // page-posts-stubs.php and rest-batch-stubs.php.
+    if (!function_exists('wp_cache_get_multiple')) {
+        /** @return array<int|string, mixed> */
+        function wp_cache_get_multiple(array $keys, string $group = '', bool $force = false): array
+        {
+            return array_fill_keys($keys, false);
+        }
+    }
+
+    if (!function_exists('rest_ensure_response')) {
+        /** wp-includes/rest-api.php, minus the WP_Error and WP_HTTP_Response branches. */
+        function rest_ensure_response(mixed $response): \WP_REST_Response
+        {
+            return $response instanceof \WP_REST_Response ? $response : new \WP_REST_Response($response);
+        }
+    }
 }

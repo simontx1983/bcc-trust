@@ -50,6 +50,7 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Log\Logger;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
 use BCC\Trust\Core\Announcements\AnnouncementPostType;
 use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard;
@@ -199,13 +200,56 @@ final class ActivityStreamWriter
             return (int) $existing[0];
         }
 
-        $postId = wp_insert_post([
+        // ⚠⚠ F-361 — PINNED, because this is a BARE wp_insert_post().
+        //
+        // Three PeepSo listeners sit on `wp_insert_post` itself and read the
+        // CURRENT REQUEST to decide what to stamp on whatever post is being
+        // written, with no authorization check of their own:
+        //
+        //   PeepSoMoods::save_mood       peepso/classes/moods.php:141
+        //                                add_action(…, 100)  int('mood')
+        //   PeepSoLocation::insert_post  peepso/classes/location.php:248
+        //                                add_action(…, 30)   value('location')
+        //   PeepSo3_Anon::save_anon_op   peepso-anon anon.php:113  int('anon_id')
+        //
+        // ⚠ NEITHER OF THE TWO IN PEEPSO CORE FILTERS BY POST TYPE, so being a
+        // `peepso-post` backing row is no protection and neither is being
+        // nothing a member composed. `PeepSoLocation::insert_post` has no post
+        // type check at all, and `PeepSoMoods::save_mood` only LOOKS like it
+        // has one: it writes `if (apply_filters('peepso_moods_apply_to_post_types',
+        // array(PeepSoActivityStream::CPT_POST)))` and uses the filter's return
+        // value as a BOOLEAN — a non-empty array, always true — rather than
+        // comparing it against `$post->post_type`. Verified in the shipped
+        // source.
+        //
+        // These handlers run SYNCHRONOUSLY inside the member's own request: a
+        // review, a page claim or a watch-batch tick fires its §A3 event while
+        // `$_GET` and `$_POST` still carry whatever that member sent. So
+        // `?mood=…&location=…` on the request that publishes a review lands on
+        // the review's backing post, and with the anon add-on installed
+        // `anon_id` marks it "posted anonymously" — the one with a privacy
+        // consequence rather than a cosmetic one.
+        //
+        // ⛔ DETACHING IS NOT AVAILABLE HERE. `wp_insert_post` is a CORE
+        // WordPress hook that WordPress itself and every other plugin hang
+        // off, so emptying it around a write would break far more than it
+        // protected. {@see PeepSoAddPostGuard::pinOnly()} exists for exactly
+        // this shape: it neutralises what those listeners READ without
+        // touching what anyone RUNS, and restores the superglobals in a
+        // `finally`.
+        //
+        // `$intended` is EMPTY on purpose. A backing post is addressed to
+        // nobody: it carries no group, no page, no media and no audience of
+        // its own (the activity row holds all of that), so there is nothing
+        // this writer means to say to PeepSo and every pinned key should stay
+        // at its neutral value.
+        $postId = PeepSoAddPostGuard::pinOnly([], static fn() => wp_insert_post([
             'post_type'    => 'peepso-post',
             'post_status'  => 'publish',
             'post_author'  => $authorId,
             'post_title'   => sprintf('%s-%d-%d', $moduleId, $authorId, $sidecarId),
             'post_content' => '',
-        ], true);
+        ], true));
 
         if (is_wp_error($postId) || (int) $postId <= 0) {
             return 0;
@@ -242,7 +286,17 @@ final class ActivityStreamWriter
             return null;
         }
 
-        $updated = wp_update_post(['ID' => $postId, 'post_content' => $body], true);
+        // ⚠⚠ PINNED TOO, and this is the site that is easy to miss.
+        // `wp_update_post()` is a thin wrapper that calls `wp_insert_post()`
+        // (wp-includes/post.php), which fires the `wp_insert_post` action at
+        // :5204 on an UPDATE exactly as it does on an insert — so the three
+        // request-reading listeners above run again here. An update is not a
+        // quieter write than an insert as far as they are concerned, and this
+        // one is reached straight from a member posting a reply.
+        $updated = PeepSoAddPostGuard::pinOnly(
+            [],
+            static fn() => wp_update_post(['ID' => $postId, 'post_content' => $body], true)
+        );
         if (is_wp_error($updated) || (int) $updated <= 0) {
             wp_delete_post($postId, true);
             return null;

@@ -3,6 +3,17 @@ includes:
 
 parameters:
     level: 8
+    # Analyse for every PHP this plugin runs on (F-433): from its floor, 8.2
+    # ("Requires PHP" in bcc-trust.php; brick/math and web-token/jwt-library
+    # already need 8.2, which is why vendor/composer/platform_check.php
+    # enforces it) up to production's minor version, 8.3. This wins over
+    # composer.json's config.platform.php for analysis. That setting stays
+    # 8.2.0, the floor, because it is also the resolver's pretend-PHP: at 8.3
+    # a `composer update` could ship packages the floor cannot run. Raise `min`
+    # and the platform together with the floor. (bcc-search pins the same way.)
+    phpVersion:
+        min: 80200
+        max: 80399
     paths:
         - app/
         # ⚠ BOUNDED EXPANSION, two files, not all of includes/.

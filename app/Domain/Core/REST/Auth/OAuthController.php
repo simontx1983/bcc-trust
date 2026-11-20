@@ -443,7 +443,8 @@ final class OAuthController
         // "sign out everywhere", which moves the account's token version.
         $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
         $asked  = strtolower(trim((string) $request->get_param('handle')));
-        if ($handle === '' || $asked !== $handle || JwtToken::currentTokenVersion($userId) !== $tv) {
+        // F-462: the guarded read, refused when unknown (null !== an int).
+        if ($handle === '' || $asked !== $handle || JwtToken::tokenVersion($userId) !== $tv) {
             return self::spentProviderToken();
         }
 
@@ -550,9 +551,13 @@ final class OAuthController
         // in oauthLogin()).
         $emailProviderVerified = ($data['email_verified'] ?? false) === true
             && AuthSupport::isProviderVerifiedEmail($provider, $email, true);
-        if ($email === '' || !is_email($email)) {
+        // F-458: an address on the reserved placeholder domain is not usable,
+        // from the provider or typed.
+        if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($email)) {
+            // A typed address is never the provider's verified one.
+            $emailProviderVerified = false;
             $email = sanitize_email((string) $request->get_param('email'));
-            if ($email === '' || !is_email($email)) {
+            if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($email)) {
                 return ApiResponse::error(
                     'bcc_invalid_email',
                     'A valid email address is required.',

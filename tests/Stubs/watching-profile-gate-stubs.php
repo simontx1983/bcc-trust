@@ -98,12 +98,17 @@ namespace BCC\Trust\Core\Support {
     if (!class_exists(PageCardPrefetcher::class, false)) {
         final class PageCardPrefetcher
         {
+            /** @var list<list<int>> */
+            public static array $primed = [];
+
             /**
              * @param list<int> $pageIds
              * @return array<string, mixed>
              */
             public static function primeFor(array $pageIds, int $viewerId): array
             {
+                self::$primed[] = $pageIds;
+
                 return [];
             }
         }

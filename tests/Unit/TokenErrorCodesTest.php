@@ -41,7 +41,11 @@ final class TokenErrorCodesTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/envelope-meta-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        require_once __DIR__ . '/../Stubs/rest-request-stubs.php';
         $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => true];
+        // The bearer counts on a REST request only (BearerAuthRestOnlyTest).
+        $_SERVER['SCRIPT_NAME'] = '/index.php';
+        $_SERVER['REQUEST_URI'] = '/wp-json/bcc/v1/me/account';
         $GLOBALS['__bcc_ph'] = [
             'users'      => [self::USER => ['email' => 'u90@example.com', 'login' => 'u90', 'display' => 'U90']],
             'meta'       => [self::USER => ['bcc_handle' => 'handle90']],
@@ -127,6 +131,19 @@ final class TokenErrorCodesTest extends TestCase
         self::assertSame(401, $status);
         self::assertSame('bcc_token_invalid', $code);
         self::assertSame('Your session is no longer valid. Please sign in again.', $message);
+    }
+
+    /**
+     * F-462: a 401 whose token's state could not be read is NOT "invalid"
+     * (that signs the app out, #673). It is the 503 the door gives.
+     */
+    public function testAnUnreadableTokenStateBecomes503NotTokenInvalid(): void
+    {
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail' => true];
+
+        [$status, $code] = self::protectedRouteWith(JwtToken::encode(self::USER, 'handle90'));
+
+        self::assertSame([503, 'bcc_unavailable'], [$status, $code]);
     }
 
     public function testNoTokenOrAWorkingTokenKeepsUnauthorized(): void

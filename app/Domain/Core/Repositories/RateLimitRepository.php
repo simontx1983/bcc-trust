@@ -220,22 +220,4 @@ final class RateLimitRepository
 
         return 0;
     }
-
-    /**
-     * Read the raw option value (count|expires) for a bucket key.
-     *
-     * @param string $optionKey Full option_name.
-     * @return string|null The stored value, or null if not found.
-     */
-    public static function getBucketRaw(string $optionKey): ?string
-    {
-        global $wpdb;
-
-        $value = $wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
-            $optionKey
-        ));
-
-        return is_string($value) ? $value : null;
-    }
 }

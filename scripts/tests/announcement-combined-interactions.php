@@ -17,11 +17,18 @@
  * unprovable from any one of them alone.
  */
 
+if (!defined('ABSPATH')) {
+    fwrite(STDERR, "must run inside WordPress\n");
+    exit(1);
+}
+
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver as Caps;
 use BCC\Trust\Core\Announcements\AnnouncementModerationPolicy as Policy;
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as AUTH;
+
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
 
 global $wpdb;
 
@@ -38,7 +45,7 @@ function ck(string $label, $expected, $actual): void
 }
 function dsp(string $route, array $params = array(), int $asUser = 0): array
 {
-    wp_set_current_user($asUser);
+    bcc_harness_act_as($asUser);
     $req = new WP_REST_Request('GET', $route);
     foreach ($params as $k => $v) { $req->set_param($k, $v); }
     $res  = rest_get_server()->dispatch($req);

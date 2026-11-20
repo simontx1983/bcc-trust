@@ -9,7 +9,8 @@
  * Responsibilities:
  *  - Authentication guard
  *  - Vote-type validation
- *  - Page existence check
+ *  - Page existence check (a secret page the voter may not see counts as
+ *    missing)
  *  - Self-vote prevention
  *  - Downvote reputation gate (trusted/elite only)
  *  - Activity gate (email-verified + at least one content action)
@@ -42,6 +43,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Security\RateLimiter;
+use BCC\Trust\Core\Support\PageAccess;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -82,7 +84,7 @@ class VoteEligibilityChecker {
         $this->assertValidVoteType($voteType);
 
         // --- Page checks: always live (page-specific) ---
-        $this->assertPageExists($pageId);
+        $this->assertPageExists($pageId, $voterId);
         $this->assertNotSelfVote($voterId, $pageId);
         $this->assertNotRetaliatoryDownvote($voterId, $pageId, $voteType);
 
@@ -256,7 +258,16 @@ class VoteEligibilityChecker {
         }
     }
 
-    private function assertPageExists(int $pageId): void {
+    /**
+     * The page exists, and the voter may see it.
+     *
+     * A SECRET page the voter may not see (PageAccess: its author, then
+     * admins, then bcc-core's membership rule) gets exactly the refusal a
+     * missing page gets. Without it a review reached a secret page by id:
+     * it belled the owner, wrote a public feed item and counted as rank
+     * evidence.
+     */
+    private function assertPageExists(int $pageId, int $voterId): void {
         // Self-page (Slice 2, Architecture A): a member IS a trust subject.
         // Self-pages live only in bcc_trust_page_scores — there is no
         // peepso_pages / wp_posts row — so validate via the deterministic
@@ -269,16 +280,16 @@ class VoteEligibilityChecker {
             throw new VoteEligibilityException('Invalid page');
         }
 
-        if (\BCC\Trust\Core\Repositories\PeepSoQueryRepository::pageExists($pageId)) {
-            return;
+        // A PeepSo page, or else any standard WP post.
+        if (!\BCC\Trust\Core\Repositories\PeepSoQueryRepository::pageExists($pageId)
+            && !get_post($pageId)
+        ) {
+            throw new VoteEligibilityException('Invalid page');
         }
 
-        // Fall back to standard WP post
-        if (get_post($pageId)) {
-            return;
+        if (!PageAccess::viewerMaySeeId($pageId, $voterId)) {
+            throw new VoteEligibilityException('Invalid page');
         }
-
-        throw new VoteEligibilityException('Invalid page');
     }
 
     private function assertNotSelfVote(int $voterId, int $pageId): void {
@@ -409,13 +420,23 @@ class VoteEligibilityChecker {
             return;
         }
 
+        self::enforceLimit('downvote_daily', self::DOWNVOTE_DAILY_CAP, DAY_IN_SECONDS, 'Daily downvote limit reached.');
+    }
+
+    /**
+     * Enforce one RateLimiter limit. A refusal becomes a
+     * VoteEligibilityException with code RATE_LIMITED (F-391), so the review
+     * route answers bcc_rate_limited 429 with the time left, not a 403. Any
+     * other error is rethrown as it is.
+     *
+     * @throws VoteEligibilityException
+     */
+    private static function enforceLimit(string $action, int $limit, int $window, string $message): void {
         try {
-            RateLimiter::enforce('downvote_daily', self::DOWNVOTE_DAILY_CAP, DAY_IN_SECONDS);
+            RateLimiter::enforce($action, $limit, $window);
         } catch (\Exception $e) {
             if ($e->getCode() === 429) {
-                throw new VoteEligibilityException(
-                    'Daily downvote limit reached.'
-                );
+                throw new VoteEligibilityException($message, VoteEligibilityException::RATE_LIMITED);
             }
             throw $e; // Re-throw unexpected errors
         }
@@ -483,10 +504,14 @@ class VoteEligibilityChecker {
      *     }
      */
     protected function enforceRateLimit(): void {
-        RateLimiter::enforce(
+        // F-391: a refusal used to escape as a plain \Exception, so the
+        // review route logged it as an ERROR and told the member "Review
+        // could not be cast."
+        self::enforceLimit(
             'vote',
             BCC_TRUST_RATE_LIMIT_DEFAULT,
-            BCC_TRUST_RATE_WINDOW_DEFAULT
+            BCC_TRUST_RATE_WINDOW_DEFAULT,
+            'Too many reviews. Please wait a moment and try again.'
         );
     }
 

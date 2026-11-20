@@ -47,6 +47,8 @@ final class FeedPostVisibilityWiringTest extends TestCase
         // follower-wiring-stubs.php — all three declare
         // \BCC\Core\Permissions\Permissions. See the stub's header.
         require_once __DIR__ . '/../Stubs/feed-f02-wiring-stubs.php';
+        // F-451: the room-membership read (this suite only).
+        require_once __DIR__ . '/../Stubs/permalink-room-membership-stubs.php';
         $GLOBALS['__bcc_f02feed'] = [
             'is_admin'         => false,
             'friend_ids'       => [],
@@ -55,6 +57,8 @@ final class FeedPostVisibilityWiringTest extends TestCase
             // false explicitly. See the stub header for why that way round.
             'group_rule'       => true,
             'group_rule_calls' => [],
+            'membership_calls' => [],
+            'excluded_by_read' => [],
         ];
     }
 
@@ -564,6 +568,135 @@ final class FeedPostVisibilityWiringTest extends TestCase
         );
     }
 
+    // ── canView(): the permalink's yes/no, without the hydration ────
+
+    /**
+     * The permalink situations a mention bell must follow (N1): the cases
+     * are NAMES so they survive separate-process serialisation.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function permalinkSituations(): array
+    {
+        return [
+            'a post the viewer can open'                           => ['visible', true],
+            'a non-group post its author restricted (followers-only, only me)' => ['profile_restricted', false],
+            'a secret or closed group post, viewer not a member'   => ['group_refuses', false],
+            'a closed group post, viewer a member'                 => ['group_member', true],
+            'a group post bcc-core refuses outright'               => ['core_refuses', false],
+            'a post by an author the viewer is blocked with'       => ['mutually_blocked', false],
+            // F-451: a caution-tier author (the §O4.1 shadow-limit) in a room.
+            "a caution holder's post in an NFT room, viewer a member"       => ['nft_room_member', true],
+            "a caution holder's post in an NFT room, viewer not a member"   => ['nft_room_non_member', false],
+            "a caution holder's post in an NFT room, viewer banned there"   => ['nft_room_banned', false],
+            "a caution author's post in a plain room, viewer a member"      => ['plain_room_member', false],
+            "a caution holder in an NFT room the viewer blocked"            => ['nft_room_blocked', false],
+            "a caution holder in an NFT room who blocked the viewer"        => ['nft_room_blocker', false],
+            "a caution holder in an NFT room, viewer and author blocked"    => ['nft_room_mutually_blocked', false],
+            "a caution holder in an NFT room, viewer's join request pending" => ['nft_room_pending', false],
+            "a caution holder in an NFT room, viewer only invited"          => ['nft_room_invited', false],
+            "a caution holder in an NFT room whose group rule refuses"      => ['nft_room_group_rule_refuses', false],
+            "a caution holder's post in a plain room and an NFT room, viewer in the NFT one" => ['multi_room_member', true],
+            "a caution holder's post in two NFT rooms, viewer in the second only"           => ['two_nft_rooms_second', true],
+        ];
+    }
+
+    /** NFT holder rooms (lift the shadow-limit) and a plain user room (does not). */
+    private const NFT_ROOM   = 77;
+    private const PLAIN_ROOM = 78;
+    private const NFT_ROOM_2 = 79;
+
+    private static function room(int $groupId, \BCC\Trust\Core\ValueObjects\GroupType $type): \BCC\Trust\Core\ValueObjects\GroupContext
+    {
+        return new \BCC\Trust\Core\ValueObjects\GroupContext(
+            $groupId,
+            $type,
+            \BCC\Trust\Core\ValueObjects\PeepSoPrivacy::Closed,
+            true,
+            null,
+            null,
+            null
+        );
+    }
+
+    private function arrange(string $situation): void
+    {
+        $row = ['external_id' => 5150, 'author' => ['id' => self::AUTHOR]];
+        $f   = &$GLOBALS['__bcc_f02feed'];
+        $f['row_enforced']   = $row;
+        $f['row_unenforced'] = $row;
+        $f['group_by_post']  = [];
+        $f['group_contexts'] = [
+            self::NFT_ROOM   => self::room(self::NFT_ROOM, \BCC\Trust\Core\ValueObjects\GroupType::Nft),
+            self::PLAIN_ROOM => self::room(self::PLAIN_ROOM, \BCC\Trust\Core\ValueObjects\GroupType::User),
+            self::NFT_ROOM_2 => self::room(self::NFT_ROOM_2, \BCC\Trust\Core\ValueObjects\GroupType::Nft),
+        ];
+        $inRoom = static function (int $room, ?string $status) use (&$f): void {
+            $f['caution']       = [self::AUTHOR];
+            $f['group_by_post'] = [5150 => $room];
+            $f['membership']    = [self::VIEWER => [$room => $status]];
+        };
+        match ($situation) {
+            'visible'            => null,
+            'profile_restricted' => $f['row_enforced'] = null,
+            'group_refuses'      => [$f['row_enforced'], $f['group_by_post'], $f['group_rule']] = [null, [5150 => 1138], false],
+            'group_member'       => [$f['row_enforced'], $f['group_by_post'], $f['group_rule']] = [null, [5150 => 1138], true],
+            'core_refuses'       => [$f['row_enforced'], $f['row_unenforced'], $f['group_by_post']] = [null, null, [5150 => 1138]],
+            'mutually_blocked'   => $f['mutual_blocked'] = [self::AUTHOR],
+            'nft_room_member'           => $inRoom(self::NFT_ROOM, 'member'),
+            'nft_room_non_member'       => $inRoom(self::NFT_ROOM, null),
+            'nft_room_banned'           => $inRoom(self::NFT_ROOM, 'banned'),
+            'plain_room_member'         => $inRoom(self::PLAIN_ROOM, 'member'),
+            'nft_room_blocked'          => [$inRoom(self::NFT_ROOM, 'member'), $f['blocked'] = [self::AUTHOR]],
+            'nft_room_blocker'          => [$inRoom(self::NFT_ROOM, 'member'), $f['blockers'] = [self::AUTHOR]],
+            'nft_room_mutually_blocked' => [$inRoom(self::NFT_ROOM, 'member'), $f['mutual_blocked'] = [self::AUTHOR]],
+            'nft_room_pending'          => $inRoom(self::NFT_ROOM, 'pending_admin'),
+            'nft_room_invited'          => $inRoom(self::NFT_ROOM, 'pending_user'),
+            // The profile gate withholds it (row_enforced null), so each pass
+            // reaches the group second look, whose rule says no.
+            'nft_room_group_rule_refuses' => [$inRoom(self::NFT_ROOM, 'member'), $f['row_enforced'] = null, $f['group_rule'] = false],
+            'multi_room_member'         => [
+                $inRoom(self::NFT_ROOM, 'member'),
+                $f['group_by_post'] = [5150 => [self::PLAIN_ROOM, self::NFT_ROOM]],
+                $f['membership']    = [self::VIEWER => [self::PLAIN_ROOM => 'member', self::NFT_ROOM => 'member']],
+            ],
+            'two_nft_rooms_second'      => [
+                $inRoom(self::NFT_ROOM, null),
+                $f['group_by_post'] = [5150 => [self::NFT_ROOM, self::NFT_ROOM_2]],
+                $f['membership']    = [self::VIEWER => [self::NFT_ROOM => null, self::NFT_ROOM_2 => 'member']],
+            ],
+        };
+    }
+
+    /**
+     * canView() is the permalink's answer, in lockstep: it says yes exactly
+     * when getActivityById() returns the item, and forwards the very same
+     * reads (same viewer, friend list, gate and second look). A mention bell
+     * relies on it to reach only a member the link would show the post to.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('permalinkSituations')]
+    public function testCanViewAnswersExactlyWhatThePermalinkShows(string $situation, bool $expected): void
+    {
+        $this->arrange($situation);
+        $item = $this->service()->getActivityById(1138, self::VIEWER);
+        $permalinkCalls = $this->calls();
+        $GLOBALS['__bcc_f02feed']['calls'] = [];
+        $GLOBALS['__bcc_f02feed']['group_rule_calls'] = [];
+
+        $canView = $this->service()->canView(1138, self::VIEWER);
+
+        self::assertSame($expected, $item !== null, 'the permalink itself');
+        self::assertSame($item !== null, $canView, 'canView() agrees with the permalink');
+        self::assertSame($permalinkCalls, $this->calls(), 'the same reads, with the same arguments');
+    }
+
+    public function testCanViewAsksAboutTheGivenViewer(): void
+    {
+        $this->service()->canView(1138, self::FRIEND);
+
+        self::assertSame(self::FRIEND, $this->onlyCall()['viewer']);
+    }
+
     public function testAnExemptReaderNeverTakesTheSecondLook(): void
     {
         $GLOBALS['__bcc_f02feed']['is_admin']       = true;
@@ -574,5 +707,180 @@ final class FeedPostVisibilityWiringTest extends TestCase
 
         $call = $this->onlyCall();
         self::assertFalse($call['enforce'], 'the exemption read it unenforced the first time');
+    }
+
+    // ── canView(): the admin exemption is the VIEWER's, not the request's ──
+
+    /**
+     * A mention is checked during the AUTHOR's request, so the current user
+     * is the author, not the mentionee. An admin author must not lend the
+     * mentionee an admin's read. canView() must answer every situation as the
+     * member's own permalink request does, with the very same reads: the gate
+     * enforced, and the group second look taken when it is owed.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('permalinkSituations')]
+    public function testAnAdminRequestDoesNotLendTheViewerItsExemption(string $situation, bool $expected): void
+    {
+        $this->arrange($situation);
+        $item = $this->service()->getActivityById(1138, self::VIEWER); // the member's own request
+        $memberCalls = $this->calls();
+        $GLOBALS['__bcc_f02feed']['calls'] = [];
+        $GLOBALS['__bcc_f02feed']['group_rule_calls'] = [];
+
+        $GLOBALS['__bcc_f02feed']['is_admin'] = true; // now the request's user is an admin
+
+        self::assertSame($expected, $item !== null, 'the member\'s permalink');
+        self::assertSame($expected, $this->service()->canView(1138, self::VIEWER), 'canView() during an admin\'s request');
+        self::assertSame($memberCalls, $this->calls(), 'the same reads as the member\'s own request');
+        self::assertTrue($this->calls()[0]['enforce'], 'the viewer is no admin, so the gate runs');
+    }
+
+    /** The reverse: an admin mentionee reads as an admin, whoever makes the request. */
+    public function testAnAdminViewerIsExemptWhoeverMakesTheRequest(): void
+    {
+        $this->arrange('profile_restricted');
+        $GLOBALS['__bcc_f02feed']['admin_ids'] = [self::VIEWER];
+
+        self::assertTrue(
+            $this->service()->canView(1138, self::VIEWER),
+            'an admin opens what the profile gate withholds, as on their own permalink'
+        );
+        self::assertFalse($this->onlyCall()['enforce'], 'read unenforced, by the viewer\'s own exemption');
+    }
+
+    // ── F-451: a room that lifts the shadow-limit lifts it by link too ──
+    //
+    // The room shows a caution-tier holder's post to fellow holders
+    // (getGroupFeed(), My Groups), so its permalink must open for them, and
+    // the mention gate follows (canView() rows in permalinkSituations()).
+    // Outside such a room, or for anyone not an active member of it, the
+    // caution list's refusal stands.
+
+    /**
+     * The third look drops the caution list and nothing else: the block
+     * lists still go to bcc-core. Without this, "re-read without the
+     * caution list" could quietly become "re-read without exclusions".
+     */
+    public function testTheThirdLookDropsOnlyTheCautionList(): void
+    {
+        $this->arrange('nft_room_member');
+        $GLOBALS['__bcc_f02feed']['blocked']  = [self::FRIEND];
+        $GLOBALS['__bcc_f02feed']['blockers'] = [123];
+
+        self::assertNotNull($this->service()->getActivityById(1138, self::VIEWER));
+
+        $reads = $GLOBALS['__bcc_f02feed']['excluded_by_read'];
+        self::assertCount(3, $reads, 'the gated read, the group second look, then the third look');
+        self::assertSame([self::AUTHOR, self::FRIEND, 123], $reads[0], 'caution and blocks both ways, as before');
+        self::assertSame([self::AUTHOR, self::FRIEND, 123], $reads[1]);
+        self::assertSame([self::FRIEND, 123], $reads[2], 'the third look keeps the blocks both ways');
+    }
+
+    /** The moderation-hidden list and the §F-02 gate go to the third read exactly as to the first. */
+    public function testTheThirdLookKeepsTheHiddenListAndTheProfileGate(): void
+    {
+        $this->arrange('nft_room_member');
+        $GLOBALS['__bcc_f02feed']['hidden'] = [555];
+
+        self::assertNotNull($this->service()->getActivityById(1138, self::VIEWER));
+
+        $calls = $this->calls();
+        self::assertCount(3, $calls);
+        self::assertSame([555], $GLOBALS['__bcc_f02feed']['hidden_by_read'][2], 'the hidden list still applies');
+        self::assertTrue($calls[2]['enforce'], 'the profile gate still runs for a non-exempt viewer');
+        self::assertSame($calls[0]['friends'], $calls[2]['friends'], 'with the same friend list');
+        self::assertFalse($calls[2]['defer'], 'and the group decision is not deferred on the gated read');
+    }
+
+    /** Only a refusal reaches the third look: a post the first look shows asks nothing more. */
+    public function testTheThirdLookRunsOnlyAfterTheFirstLookRefused(): void
+    {
+        $this->arrange('visible');
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::FRIEND]; // a caution list exists, but not for this author
+
+        self::assertNotNull($this->service()->getActivityById(1138, self::VIEWER));
+        self::assertCount(1, $this->calls(), 'the first look answered');
+        self::assertSame([], $GLOBALS['__bcc_f02feed']['membership_calls']);
+    }
+
+    /**
+     * The membership asked is the VIEWER's, and only for the room that lifts
+     * the limit. canView() runs during the AUTHOR's request on a mentionee's
+     * behalf, so the current user (here an admin) must not stand in.
+     */
+    public function testTheLiftAsksAboutTheViewersOwnMembership(): void
+    {
+        $this->arrange('nft_room_member');
+        $GLOBALS['__bcc_f02feed']['is_admin'] = true;
+
+        self::assertTrue($this->service()->canView(1138, self::VIEWER));
+        self::assertSame(
+            [['user' => self::VIEWER, 'group' => self::NFT_ROOM]],
+            $GLOBALS['__bcc_f02feed']['membership_calls']
+        );
+    }
+
+    public function testARoomThatDoesNotLiftTheLimitNeverAsksForMembership(): void
+    {
+        $this->arrange('plain_room_member');
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER));
+        self::assertSame([], $GLOBALS['__bcc_f02feed']['membership_calls'], 'a plain room keeps the caution list');
+    }
+
+    /** No caution list, nothing to lift: no third read for an ordinary 404. */
+    public function testWithNoCautionListThereIsNoThirdLook(): void
+    {
+        $this->arrange('core_refuses');
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER));
+        self::assertCount(2, $this->calls(), 'the gated read and the group second look only');
+    }
+
+    /**
+     * ⚠ A membership that cannot be read answers EXACTLY like a missing post:
+     * not lifted, so 404, and no bell. Never a 503. This read is reached only
+     * for an existing post in a room that lifts the limit, so a 503 would
+     * tell the caller both (security's rule for /feed/:id). A lift is never
+     * granted on a read that did not run, and the failure is logged.
+     */
+    public function testAFailedMembershipReadAnswersLikeAMissingPost(): void
+    {
+        $this->arrange('nft_room_member');
+        $GLOBALS['__bcc_f02feed']['membership'] = [self::VIEWER => [self::NFT_ROOM => false]];
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER), 'not lifted: the same 404 as a missing id');
+        self::assertFalse($this->service()->canView(1138, self::VIEWER), 'and no mention bell');
+
+        $logs = $GLOBALS['__bcc_f02feed']['logs'] ?? [];
+        self::assertCount(2, $logs, 'logged on each read, never silent');
+        self::assertStringContainsString('room membership unreadable', $logs[0], 'the step is named in the log, and only there');
+    }
+
+    /**
+     * An exempt (admin) viewer takes the third look too: it is the ROOM's
+     * rule, not the §F-02 profile rule the exemption skips. It still needs
+     * that viewer's own membership.
+     *
+     * @return array<string, array{0: ?string, 1: bool}>
+     */
+    public static function exemptViewerMemberships(): array
+    {
+        return [
+            'an admin who is a member of the NFT room' => ['member', true],
+            'an admin who is not a member'             => [null, false],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('exemptViewerMemberships')]
+    public function testAnExemptViewerTakesTheThirdLookWithTheirOwnMembership(?string $status, bool $expected): void
+    {
+        $this->arrange('nft_room_member');
+        $GLOBALS['__bcc_f02feed']['membership'] = [self::VIEWER => [self::NFT_ROOM => $status]];
+        $GLOBALS['__bcc_f02feed']['admin_ids']  = [self::VIEWER];
+
+        self::assertSame($expected, $this->service()->canView(1138, self::VIEWER));
+        self::assertCount(2, $this->calls(), 'the exempt read, then the third look; no §F-02 second look');
+        self::assertFalse($this->calls()[1]['enforce']);
     }
 }

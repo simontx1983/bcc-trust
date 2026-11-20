@@ -708,10 +708,13 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             update_post_meta($postId, '_bcc_post_visibility', $visibility);
         }
 
+        // 204 is what PeepSoActivityWriter stamps on a blog. The name 'blog'
+        // stored 0 in the SMALLINT column, and the tab only "found" it because
+        // it asked for the name too, which MySQL also cast to 0 (F-392).
         self::assertNotFalse($wpdb->query($wpdb->prepare(
             "INSERT INTO {$wpdb->prefix}peepso_activities
                 (act_owner_id, act_module_id, act_external_id, act_access, act_comment_object_id)
-             VALUES (%d, 'blog', %d, 10, 0)",
+             VALUES (%d, 204, %d, 10, 0)",
             self::AUTHOR,
             $postId
         )), 'activity fixture: ' . $wpdb->last_error);

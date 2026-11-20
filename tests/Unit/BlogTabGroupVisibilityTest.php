@@ -368,6 +368,7 @@ final class BlogTabGroupVisibilityTest extends TestCase
         $call = $this->lastCall();
         self::assertNull($call['onlyForGroupId']);
         self::assertSame(6, $call['limit']);
-        self::assertSame(['blog'], $call['moduleIds']);
+        // F-392: the numeric blog module, as digits, never the name.
+        self::assertSame(['204'], $call['moduleIds']);
     }
 }

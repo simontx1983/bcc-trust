@@ -30,6 +30,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\GroupAttribution;
@@ -215,13 +216,23 @@ final class BlogService
 
         [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($sessionViewerId);
 
+        // F-392: ask for the NUMERIC module the writer stamps on a blog
+        // (204), not the name. The name was bound as a string, which MySQL
+        // casts to 0 against the SMALLINT column, so this tab matched legacy
+        // module-0 rows and never a blog. A string of digits binds correctly
+        // whether or not bcc-core resolves names itself.
+        $blogModule = PeepSoActivityWriter::getNumericId('blog');
+        if ($blogModule === null) {
+            return self::emptyPage();
+        }
+
         // Over-fetch by 1 to detect has_more without a separate count.
         // The group filter is applied in SQL, so the page is filled AFTER
         // exclusion and has_more stays truthful — a PHP-side filter here
         // would hand back short pages reporting has_more:false.
         $rows = PeepSoActivityRepository::getActivities(
             [$userId],
-            ['blog'],
+            [(string) $blogModule],
             $cursorTime,
             $cursorActId,
             $limit + 1,
@@ -254,8 +265,20 @@ final class BlogService
             // Stacks with the group gate rather than replacing it: a post
             // must clear BOTH its group's visibility and its author's
             // profile level. The two answer different questions.
-            viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02
+            $friendIds,   // viewerFriendIds
+            $enforceF02,  // enforcePostVisibility
+            // F-275: a read that did not run THROWS
+            // ActivityReadFailedException instead of answering [], which
+            // read as "this member has written nothing". UsersEndpoint::blog()
+            // turns it into 503 bcc_unavailable.
+            //
+            // ⚠ POSITIONAL ON PURPOSE, and so are the two above (they used
+            // to be named). A bcc-core that predates the flag ignores an
+            // extra positional argument and keeps the old answer; a named
+            // `throwOnReadFailure:` would be a fatal "unknown named
+            // parameter" on every blog read, and a named argument cannot
+            // be followed by a positional one.
+            true          // throwOnReadFailure
         );
 
         $hasMore = count($rows) > $limit;

@@ -2,8 +2,21 @@
 
 declare(strict_types=1);
 
+// CLI only. The plugin deploys ship scripts/ (scripts/.htaccess denies web
+// access), so a request for this file must never run it: it prints paths.
+if (PHP_SAPI !== 'cli') {
+    exit(1);
+}
+
 /**
  * Composer classmap guard — the committed autoload metadata must match the tree.
+ *
+ * ⚠⚠ ONE FILE, TWO REPOS. bcc-core and bcc-trust each carry this file at
+ * scripts/composer-classmap-guard.php, and the two copies must stay
+ * BYTE-IDENTICAL: keep byte-identical with the bcc-core/bcc-trust copy, and
+ * change both in the same pair of PRs. Nothing in it is repo-specific: the
+ * project's own roots come from its composer.json, and the fix command from
+ * how its vendor/ was generated.
  *
  * ── WHY THIS EXISTS ─────────────────────────────────────────────────────
  * `vendor/` is committed and shipped `--no-dev`, so the usual way to strip dev
@@ -14,28 +27,50 @@ declare(strict_types=1);
  * deleted — then PHP emits an `include(): Failed to open stream` warning from
  * inside the ClassLoader, in production, for a class that is gone.
  *
- * Measured on 2026-09-20: the committed classmap held 486 first-party mappings
- * against 551 in the tree — missing 67 first-party classes, and still pointing
- * at 2 deleted ones (`CosmwasmTickBudget`, removed by PR #261, and
- * `StargazeMarketplaceApi`, removed by PR 7.12 four days earlier). Neither
- * broke anything, and neither was noticed.
+ * Measured in bcc-trust on 2026-09-20: the committed classmap held 486
+ * first-party mappings against 551 in the tree — missing 67 first-party
+ * classes, and still pointing at 2 deleted ones (`CosmwasmTickBudget`,
+ * removed by PR #261, and `StargazeMarketplaceApi`, removed by PR 7.12 four
+ * days earlier). Neither broke anything, and neither was noticed.
+ *
+ * Measured in bcc-core on 2026-11-19 (F-435): 89 first-party mappings against
+ * 100 classes in the tree. 11 were missing, one of them loaded at boot on
+ * every request, and none was stale. The PSR-4 fallback hid all of it.
  *
  * ── WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT ───────────────────
  *   1. Every classmap entry that points INSIDE this project must point at a
  *      file that exists. A mapping to a deleted file is the failure that
- *      produces a production warning.
+ *      produces a production warning. "Inside this project" means under one
+ *      of the roots composer.json's `autoload` declares (`psr-4` and
+ *      `classmap`), never a directory name guessed from the path: a pattern
+ *      such as `/app/` also matches a checkout that merely lives under an
+ *      `app/` directory, and matches nothing in a repo whose code is in
+ *      `src/`.
  *   2. Every first-party class under the project's PSR-4 roots must appear in
  *      the classmap — but ONLY when `config.optimize-autoloader` is true,
  *      which is what makes Composer classmap those classes in the first place.
  *      Without that setting a PSR-4 class is resolved by path and has no
  *      business being in the classmap, so requiring it would be wrong.
+ *   3. autoload_static.php's `$classMap` must be the SAME map as
+ *      autoload_classmap.php, entry for entry. Checks 1 and 2 read
+ *      autoload_classmap.php, but at runtime Composer 2's autoload_real.php
+ *      loads the STATIC copy. So a hand edit or a bad merge in only one of
+ *      the two files would pass checks 1 and 2 while production loads the
+ *      other. Paths are compared after normalising `..`, because the two
+ *      files spell the same path differently (`$baseDir . '/src/…'` versus
+ *      `__DIR__ . '/../..' . '/src/…'`).
  *
- * Vendor package mappings are outside this guard; Composer generates them from
+ * Vendor package mappings are outside checks 1 and 2; Composer generates them from
  * the installed package metadata rather than from this repository's first-party
  * source tree.
  *
- * Exit 0 = the committed metadata matches the tree. Exit 1 = run
- * `composer dump-autoload --no-dev` and commit `vendor/composer/`.
+ * Exit 0 = the committed metadata matches the tree. Exit 1 = regenerate and
+ * commit `vendor/composer/`; the FAIL line prints the exact command. That is
+ * `composer dump-autoload --no-dev -o`, plus `--ignore-platform-reqs` when
+ * the committed vendor/ has no `composer/platform_check.php`. Without that
+ * flag Composer would ADD that file, and a `require` of it in
+ * autoload_real.php, to a repo that has never shipped one. Exit 2 = the
+ * guard could not run, or would have checked nothing.
  */
 
 $root = dirname(__DIR__);
@@ -60,6 +95,31 @@ $psr4 = $config['autoload']['psr-4'] ?? [];
 $optimized = ($config['config']['optimize-autoloader'] ?? false) === true;
 $note(sprintf('  psr-4 roots: %d   optimize-autoloader: %s', count($psr4), $optimized ? 'true' : 'false'));
 
+// The project's own roots: every psr-4 directory and every classmap entry
+// composer.json declares, as absolute '/'-separated prefixes.
+$firstPartyRoots = [];
+foreach ([$config['autoload']['psr-4'] ?? [], ['' => $config['autoload']['classmap'] ?? []]] as $section) {
+    foreach ($section as $dirs) {
+        foreach ((array) $dirs as $dir) {
+            $firstPartyRoots[] = rtrim(str_replace('\\', '/', $root . '/' . trim((string) $dir, '/\\')), '/') . '/';
+        }
+    }
+}
+$isFirstParty = static function (string $path) use ($firstPartyRoots): bool {
+    $path = str_replace('\\', '/', $path);
+    foreach ($firstPartyRoots as $prefix) {
+        // A directory root matches by prefix; a classmap FILE entry, exactly.
+        if (str_starts_with($path, $prefix) || $path === rtrim($prefix, '/')) {
+            return true;
+        }
+    }
+    return false;
+};
+
+// How this repo's vendor/ was generated decides the exact fix command.
+$fixCommand = 'composer dump-autoload --no-dev -o'
+    . (is_file($root . '/vendor/composer/platform_check.php') ? '' : ' --ignore-platform-reqs');
+
 $classmapFile = $root . '/vendor/composer/autoload_classmap.php';
 if (!is_file($classmapFile)) {
     $note('  FATAL: vendor/composer/autoload_classmap.php is missing — vendor is not installed');
@@ -73,9 +133,8 @@ $note(sprintf('  classmap entries: %d', count($classmap)));
 $firstParty = 0;
 $missing = [];
 foreach ($classmap as $class => $path) {
-    $real = str_replace('\\', '/', (string) $path);
     // Only this project's own files; vendor packages are Composer's to manage.
-    if (!preg_match('#/(app|includes)/#', $real) || str_contains($real, '/vendor/')) {
+    if (!$isFirstParty((string) $path)) {
         continue;
     }
     $firstParty++;
@@ -141,17 +200,79 @@ if ($optimized && $psr4 !== []) {
     $note('  resolved by path and are not required to appear in the classmap.');
 }
 
+// ── Check 3: the static map the runtime loads is the same map ───────────────
+$staticFile = $root . '/vendor/composer/autoload_static.php';
+if (!is_file($staticFile)) {
+    $note('  FATAL: vendor/composer/autoload_static.php is missing — the runtime has no classmap to load');
+    exit(2);
+}
+if (!preg_match('/^class (ComposerStaticInit\w+)/m', (string) file_get_contents($staticFile), $m)) {
+    $note('  FATAL: no ComposerStaticInit class in vendor/composer/autoload_static.php');
+    exit(2);
+}
+require $staticFile;
+$staticClass = 'Composer\\Autoload\\' . $m[1];
+/** @var array<string, string> $staticMap */
+$staticMap = $staticClass::$classMap;
+$mismatch = [];
+foreach (array_keys($classmap + $staticMap) as $class) {
+    $a = isset($classmap[$class]) ? normalisedPath((string) $classmap[$class]) : '(absent)';
+    $b = isset($staticMap[$class]) ? normalisedPath((string) $staticMap[$class]) : '(absent)';
+    if ($a !== $b) {
+        $mismatch[$class] = [$a, $b];
+    }
+}
+$note(sprintf('  static classmap entries: %d', count($staticMap)));
+if ($mismatch !== []) {
+    $fail[] = sprintf('%d entr%s between autoload_classmap.php and autoload_static.php (the one the runtime loads):', count($mismatch), count($mismatch) === 1 ? 'y differs' : 'ies differ');
+    $rootPrefix = normalisedPath($root) . '/';
+    foreach (array_slice($mismatch, 0, 25, true) as $class => [$a, $b]) {
+        $fail[] = '    ' . $class . '  classmap: ' . str_replace($rootPrefix, '', $a) . '  static: ' . str_replace($rootPrefix, '', $b);
+    }
+    if (count($mismatch) > 25) {
+        $fail[] = '    …and ' . (count($mismatch) - 25) . ' more';
+    }
+}
+
 $note('  ' . str_repeat('─', 68));
 if ($fail !== []) {
     foreach ($fail as $line) {
         echo '  ', $line, "\n";
     }
     echo "\n  FAIL: the committed Composer classmap does not match the tree.\n";
-    echo "        Run `composer dump-autoload --no-dev` and commit vendor/composer/.\n";
+    echo '        Run `' . $fixCommand . "` and commit vendor/composer/.\n";
     exit(1);
 }
-echo "  PASS: every first-party mapping resolves, and every first-party class is mapped.\n";
+echo "  PASS: every first-party mapping resolves, every first-party class is mapped,\n";
+echo "        and the static map the runtime loads is the same map.\n";
 exit(0);
+
+/**
+ * A path with `\` as `/` and its `.` and `..` segments resolved, lexically:
+ * the file need not exist, so a mapping to a deleted file still compares.
+ */
+function normalisedPath(string $path): string
+{
+    $path = str_replace('\\', '/', $path);
+    $prefix = '';
+    if (preg_match('#^(?:[A-Za-z]:)?/#', $path, $m)) {
+        $prefix = $m[0];
+        $path = substr($path, strlen($prefix));
+    }
+    $segments = [];
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '' || $segment === '.') {
+            continue;
+        }
+        if ($segment === '..') {
+            array_pop($segments);
+            continue;
+        }
+        $segments[] = $segment;
+    }
+
+    return $prefix . implode('/', $segments);
+}
 
 /**
  * Fully-qualified class/interface/trait/enum names declared in one PHP source.

@@ -61,6 +61,11 @@ final class ActivityReplayGuardTest extends TestCase
         ];
 
         require_once __DIR__ . '/../Stubs/activity-replay-stubs.php';
+        // createBackingPost() now runs its insert inside
+        // PeepSoAddPostGuard::pinOnly(). The REAL guard, so the replay
+        // assertions below run against the same code path production
+        // takes rather than an unwrapped one.
+        require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
     }
 
     protected function tearDown(): void

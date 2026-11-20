@@ -1,0 +1,111 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Core\Security;
+
+use BCC\Trust\Core\Support\FrontendRedirect;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * What WordPress's own front end on the cms host may still say to a
+ * signed-out visitor.
+ *
+ * Security review, 2026-11-19: cms served the WordPress feeds to anyone.
+ * `/feed/` carried the five newest `post` items in full with their
+ * authors' names, and `/comments/feed/` was open too. Every page's head
+ * carried a generator tag naming the exact WordPress version. BCC is
+ * headless and nothing reads these feeds: the app has no RSS, and BCC's
+ * own `/bcc/v1/feed/*` routes are REST, which core answers at
+ * `parse_request`, before any of this runs. So:
+ *
+ *   1. A feed request 301s to the app's front page.
+ *      - `template_redirect` at priority 1: before `redirect_canonical`
+ *        (10), so it is one hop; and before template-loader.php's HEAD
+ *        exit and its `do_feed()`, so a HEAD request is redirected too.
+ *      - Every feed core serves is an `is_feed()` query: posts, comments,
+ *        a post's comments, author, category, tag, term, search, and the
+ *        `?feed=` spellings of each, in every format.
+ *   2. The generator is empty everywhere `the_generator` reaches. That is
+ *      the head's meta tag and a feed's `<generator>` element alike.
+ *      `wp_generator` is also unhooked from `wp_head`, so it leaves no
+ *      empty line.
+ *   3. Neither the head nor the headers advertise anything else:
+ *      - the feeds (`feed_links`, `feed_links_extra`);
+ *      - the REST API (`rest_output_link_wp_head`, and the
+ *        `Link: <…/wp-json/>; rel="https://api.w.org/"` header from
+ *        `rest_output_link_header` on `template_redirect`);
+ *      - XML-RPC's RSD document (`rsd_link`);
+ *      - the `?p=` shortlink (`wp_shortlink_wp_head`, and its
+ *        `Link: rel=shortlink` header from `wp_shortlink_header`);
+ *      - oEmbed discovery (`wp_oembed_add_discovery_links`, which core
+ *        hooks twice: at 4, and at 10 for back-compat). The links point
+ *        at `/wp-json/oembed/…`, which RestRouteAllowlist refuses to a
+ *        signed-out caller anyway, and cms serves nothing to embed.
+ *
+ * The sitemaps need nothing here: Rank Math already 301s `/wp-sitemap.xml`
+ * to the app.
+ */
+final class WordPressFrontEndGate
+{
+    /** Before redirect_canonical (10), so a feed URL is one hop. */
+    public const REDIRECT_PRIORITY = 1;
+
+    /** The X-Redirect-By header, so a curl shows who answered. */
+    public const REDIRECT_BY = 'BCC';
+
+    public static function register(): void
+    {
+        add_action('template_redirect', [self::class, 'sendFeedsToTheApp'], self::REDIRECT_PRIORITY);
+        add_filter('the_generator', [self::class, 'noGenerator'], PHP_INT_MAX, 2);
+
+        // Core hooks these in default-filters.php, which runs before any
+        // plugin loads, so they are there to remove now.
+        remove_action('wp_head', 'wp_generator');
+        remove_action('wp_head', 'feed_links', 2);
+        remove_action('wp_head', 'feed_links_extra', 3);
+        remove_action('wp_head', 'rest_output_link_wp_head', 10);
+        remove_action('template_redirect', 'rest_output_link_header', 11);
+        remove_action('wp_head', 'rsd_link');
+        remove_action('wp_head', 'wp_shortlink_wp_head', 10);
+        remove_action('template_redirect', 'wp_shortlink_header', 11);
+        remove_action('wp_head', 'wp_oembed_add_discovery_links', 4);
+        remove_action('wp_head', 'wp_oembed_add_discovery_links', 10);
+    }
+
+    /**
+     * `template_redirect`: a feed goes to the app's front page, for good.
+     */
+    public static function sendFeedsToTheApp(): void
+    {
+        if (!is_feed()) {
+            return;
+        }
+
+        // ⚠ wp_redirect, NOT wp_safe_redirect: the same reason as
+        // WordPressSignInGate::keepMembersOutOfAdmin(). The target comes from
+        // BCC_FRONTEND_ORIGIN, never from the request, and wp_safe_redirect
+        // only trusts the frontend's host once FrontendRedirect's
+        // `allowed_redirect_hosts` filter is in place (rest_api_init, never
+        // a front-end request). Until then it would send a feed to
+        // wp-admin instead.
+        wp_redirect(FrontendRedirect::defaultReturn('/'), 301, self::REDIRECT_BY);
+        exit;
+    }
+
+    /**
+     * `the_generator`: say nothing, in every format.
+     *
+     * @param mixed $generator
+     * @param mixed $type
+     */
+    public static function noGenerator($generator = '', $type = ''): string
+    {
+        unset($generator, $type);
+
+        return '';
+    }
+}

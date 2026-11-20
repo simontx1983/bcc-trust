@@ -20,6 +20,12 @@
 
 declare(strict_types=1);
 
+namespace {
+    // F-462: JwtToken reads token state through TokenStateRepository; these
+    // suites test token behaviour, so they get its stand-in (see the file).
+    require_once __DIR__ . '/token-state-stubs.php';
+}
+
 namespace BCC\Core\Permissions {
     // F-305: every auth response carries `suspended`
     // (AuthSupport::resolveSuspended). $GLOBALS['__bcc_susp'] maps user id →
@@ -48,10 +54,13 @@ namespace BCC\Core\Security {
                 // throttle_counting set it COUNTS per bucket like the real
                 // limiter (increment, then allow while count <= limit), and
                 // like it (F-290) gives a denied call's slot back when the
-                // caller passes countDenied = false.
+                // caller passes countDenied = false. It also records each
+                // bucket's limit and window (seconds), so a test can pin them.
                 $bucket = $key ?? $action;
                 $GLOBALS['__bcc_ph']['throttle_keys'][] = $bucket;
                 $GLOBALS['__bcc_ph']['throttle_count_denied'][$bucket] = $countDenied;
+                $GLOBALS['__bcc_ph']['throttle_limits'][$bucket] = $limit;
+                $GLOBALS['__bcc_ph']['throttle_windows'][$bucket] = $window;
                 if (!empty($GLOBALS['__bcc_ph']['throttle_deny'])) {
                     return false;
                 }
@@ -351,13 +360,43 @@ namespace {
          */
         function get_users(array $args = []): array
         {
+            // Like MySQL under WordPress's default (`_ci`) collation, a
+            // meta_value match ignores letter case.
             $out = [];
             foreach ($GLOBALS['__bcc_ph']['meta'] as $id => $meta) {
-                if (($meta[(string) $args['meta_key']] ?? null) === (string) $args['meta_value']) {
+                $value = $meta[(string) $args['meta_key']] ?? null;
+                if (is_string($value) && strtolower($value) === strtolower((string) $args['meta_value'])) {
                     $out[] = (int) $id;
                 }
             }
-            return $out;
+            // Like core's WP_User_Query: `search` on `search_columns`
+            // ['user_email'], where a leading or trailing `*` is a LIKE
+            // wildcard. It's applied BEFORE `number`, as in SQL. Letter case
+            // is ignored, as under the column's `_ci` collation.
+            if (isset($args['search']) && ($args['search_columns'] ?? []) === ['user_email']) {
+                $term     = (string) $args['search'];
+                $leading  = str_starts_with($term, '*');
+                $trailing = str_ends_with($term, '*');
+                $needle   = strtolower(trim($term, '*'));
+                $out = array_values(array_filter($out, static function (int $id) use ($needle, $leading, $trailing): bool {
+                    $mail = strtolower((string) ($GLOBALS['__bcc_ph']['users'][$id]['email'] ?? ''));
+                    return match (true) {
+                        $leading && $trailing => str_contains($mail, $needle),
+                        $leading              => str_ends_with($mail, $needle),
+                        $trailing             => str_starts_with($mail, $needle),
+                        default               => $mail === $needle,
+                    };
+                }));
+            }
+            // Like core: `orderby` ID (else the seeded order) and a `number` cap.
+            if (($args['orderby'] ?? '') === 'ID') {
+                sort($out);
+                if (strtoupper((string) ($args['order'] ?? 'ASC')) === 'DESC') {
+                    $out = array_reverse($out);
+                }
+            }
+            $number = (int) ($args['number'] ?? 0);
+            return $number > 0 ? array_slice($out, 0, $number) : $out;
         }
     }
     if (!function_exists('get_user_meta')) {
@@ -371,7 +410,15 @@ namespace {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            // F-495: $GLOBALS['__bcc_ph']['fail_update'][$key] = true makes the
+            // write of that key fail (false, nothing stored), as a failed
+            // UPDATE does in core.
+            if (!empty($GLOBALS['__bcc_ph']['fail_update'][$key])) {
+                $GLOBALS['__bcc_ph']['failed_updates'][] = $key;
+                return false;
+            }
             $GLOBALS['__bcc_ph']['meta'][$userId][$key] = is_array($value) ? $value : (string) $value;
+            $GLOBALS['__bcc_ph']['updates'][] = $key;
             return true;
         }
     }

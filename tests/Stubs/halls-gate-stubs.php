@@ -55,7 +55,18 @@ namespace BCC\Trust\Core\ValueObjects {
     if (!function_exists('BCC\\Trust\\Core\\ValueObjects\\get_post_meta')) {
         function get_post_meta($id, $key, $single = false)
         {
-            return $GLOBALS['__bcc_halls_gate_fixture'][(int) $id]['meta'][$key] ?? '';
+            // ⚠ $single IS HONOURED, and must stay that way.
+            // PeepSoPrivacy::fromGroupPostId() asks for the LIST form so it
+            // can take the strictest of several privacy rows (F-429
+            // follow-up). A shim that ignored $single and returned a scalar
+            // would make `is_array()` fail there and resolve EVERY group to
+            // Open inside this suite -- every secret-group assertion would
+            // then pass for the wrong reason.
+            $value = $GLOBALS['__bcc_halls_gate_fixture'][(int) $id]['meta'][$key] ?? null;
+            if ($single) {
+                return $value ?? '';
+            }
+            return $value === null ? [] : (is_array($value) ? $value : [$value]);
         }
     }
 }
