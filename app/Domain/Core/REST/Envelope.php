@@ -161,7 +161,7 @@ final class Envelope
                 // catches a request that reached a handler without that check,
                 // such as an internal dispatch).
                 $data['error']['code']    = 'bcc_unavailable';
-                $data['error']['message'] = 'Your session could not be checked just now. Please try again.';
+                $data['error']['message'] = \BCC\Trust\Core\Support\BearerAuth::UNAVAILABLE_MESSAGE;
                 $data['error']['status']  = 503;
                 $response->set_data($data);
                 $response->set_status(503);

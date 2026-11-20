@@ -76,6 +76,9 @@ final class BearerAuth
      */
     public const TOKEN_UNAVAILABLE = 'unavailable';
 
+    /** The message of every F-462 503 `bcc_unavailable`. */
+    public const UNAVAILABLE_MESSAGE = 'Your session could not be checked just now. Please try again.';
+
     /** First: a request whose token state is unknown reaches nothing. */
     public const AUTH_ERRORS_PRIORITY = 1;
 
@@ -215,11 +218,21 @@ final class BearerAuth
 
         \BCC\Trust\Infrastructure\EdgeCache::noCache();
 
-        return new \WP_Error(
-            'bcc_unavailable',
-            'Your session could not be checked just now. Please try again.',
-            ['status' => 503]
-        );
+        return new \WP_Error('bcc_unavailable', self::UNAVAILABLE_MESSAGE, ['status' => 503]);
+    }
+
+    /**
+     * The same 503 as a handler's response (F-462), for a route that finds
+     * the token state unknown after the door, or could not record a
+     * revocation: private, never stored, and varying by token.
+     */
+    public static function unavailableResponse(): \WP_REST_Response
+    {
+        $response = ApiResponse::error('bcc_unavailable', self::UNAVAILABLE_MESSAGE, 503);
+        $response->header('Cache-Control', 'private, no-store');
+        $response->header('Vary', 'Authorization');
+
+        return $response;
     }
 
     /**
