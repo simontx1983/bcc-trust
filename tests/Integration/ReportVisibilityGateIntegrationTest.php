@@ -102,6 +102,7 @@ final class ReportVisibilityGateIntegrationTest extends TestCase
             $wpdb->query($wpdb->prepare("DELETE FROM {$members} WHERE gm_group_id = %d", self::GROUP_ID));
         }
         $this->removeFeedActivities();
+        $this->deletePrivacyRows();
     }
 
     public function testANonMemberCannotReportAClosedGroupsMembersOnlyPost(): void
@@ -215,6 +216,27 @@ final class ReportVisibilityGateIntegrationTest extends TestCase
             'post_type' => 'peepso-post',
             'meta'      => ['peepso_group_id' => (string) self::GROUP_ID, '_bcc_post_visibility' => $visibility],
         ];
+
+        // F-460: group privacy is read from the TABLE (bcc-core's
+        // PeepSoGroupPrivacy::privacyForGroup), never through get_post_meta(),
+        // so the in-memory fixture alone no longer reaches it. Seed the real
+        // row, which is where production reads it.
+        global $wpdb;
+        $this->deletePrivacyRows();
+        self::assertNotFalse($wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES (%d, 'peepso_group_privacy', %s)",
+            self::GROUP_ID,
+            (string) $privacy
+        )), $wpdb->last_error);
+    }
+
+    private function deletePrivacyRows(): void
+    {
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = 'peepso_group_privacy'",
+            self::GROUP_ID
+        ));
     }
 
     private function join(string $status): void

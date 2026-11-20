@@ -55,6 +55,12 @@ require_once __DIR__ . '/Support/PostGroupFactsWpdb.php';
 require_once __DIR__ . '/Support/GateOrder.php';
 require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
 
+// F-460: bcc-trust's group privacy now comes from bcc-core's
+// PeepSoGroupPrivacy, which this unit suite does not autoload. A double
+// answers from each test's privacy meta stub (or explicit answers); see
+// the file. The integration suite loads the REAL class.
+require_once __DIR__ . '/Stubs/core-group-privacy-double.php';
+
 // Namespace-scoped WP shims for CronService's schedule self-healing, plus the
 // bcc-core collaborators it calls by fully-qualified name.
 //

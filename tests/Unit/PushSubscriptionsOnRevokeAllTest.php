@@ -163,6 +163,53 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         self::assertSame([self::EXPECTED_DELETE], $GLOBALS['__bcc_ph']['deletes']);
     }
 
+    /**
+     * F-508: logout-everywhere audits and mails only a revocation that
+     * landed; a failed one is audited as such and claims nothing.
+     */
+    public function testAFailedRevocationIsAuditedAsFailedAndMailsNothing(): void
+    {
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        $res = (new SessionController())->logoutEverywhere(new \WP_REST_Request([]));
+
+        self::assertSame(503, $res->get_status());
+        self::assertSame(['sessions_revoke_failed'], $GLOBALS['__bcc_ph']['audit'] ?? null);
+        self::assertNotContains('sessionsRevokedAll:' . self::USER, $GLOBALS['__bcc_ph']['canary'] ?? [], 'no "sessions revoked" mail');
+    }
+
+    public function testASuccessfulRevocationIsAuditedAndMailedAfterTheRevoke(): void
+    {
+        $res = (new SessionController())->logoutEverywhere(new \WP_REST_Request([]));
+
+        self::assertSame(200, $res->get_status());
+        self::assertSame(['sessions_revoked_all'], $GLOBALS['__bcc_ph']['audit'] ?? null);
+        self::assertContains('sessionsRevokedAll:' . self::USER, $GLOBALS['__bcc_ph']['canary']);
+        self::assertSame(['bcc_token_version'], $GLOBALS['__bcc_ph']['updates'] ?? null, 'the revocation landed');
+    }
+
+    /**
+     * F-508: the password change revokes FIRST. When that write does not
+     * land, nothing changes: 503, the password stands, no fresh token.
+     */
+    public function testAPasswordChangeWhoseRevocationFailsChangesNothing(): void
+    {
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        $res = (new MyAccountEndpoint())->patchPassword(new \WP_REST_Request([
+            'current_password' => self::PASSWORD,
+            'password'         => 'a brand new long password',
+        ]));
+        $data = $res->get_data();
+
+        self::assertSame(503, $res->get_status());
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertStringContainsString('could not be changed', (string) ($data['error']['message'] ?? ''), 'its own message, not the session one');
+        self::assertSame(self::PASSWORD, $GLOBALS['__bcc_ph']['passwords'][self::USER] ?? null, 'the password is unchanged');
+        self::assertSame([], $GLOBALS['__bcc_ph']['deletes'], 'push subscriptions untouched');
+        self::assertNotContains('account_password_changed', $GLOBALS['__bcc_ph']['audit'] ?? []);
+    }
+
     public function testAWrongCurrentPasswordDeletesNothing(): void
     {
         $res = (new MyAccountEndpoint())->patchPassword(new \WP_REST_Request([
