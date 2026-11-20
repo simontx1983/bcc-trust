@@ -82,6 +82,10 @@ final class FeedItemReportVisibilityTest extends TestCase
         // suite dies with "Class PeepSoActivityRepository not found" — a
         // FATAL, not a failed assertion.
         require_once __DIR__ . '/../Stubs/activity-audience-stubs.php';
+        // A SECRET page's announcement: the page rule is
+        // AnnouncementPageAccessTest's; here only its wiring into canSee().
+        require_once __DIR__ . '/../Stubs/announcement-page-access-stub.php';
+        $GLOBALS['__bcc_apa'] = ['hidden' => [], 'calls' => []];
         $GLOBALS['__bcc_aud'] = ['hidden' => [], 'calls' => []];
         // Default: NO group is non-open, the pre-F-23 shape bcc-core's own
         // tests pin. So the matrix below exercises the GROUP gate, and the
@@ -196,6 +200,25 @@ final class FeedItemReportVisibilityTest extends TestCase
      * canSee() no longer stops there: the post's own audience is asked
      * too, which is the next two tests.
      */
+    /**
+     * A SECRET page's announcement (module 205) is not visible to a viewer
+     * the page does not admit, so the delete and comment refusals and a
+     * `feed_item` report answer it as a missing post. The SAME row, with the
+     * page admitting the viewer, is visible: the refusal is the page's.
+     */
+    public function testAHiddenNoticeIsNotVisibleAndTheSameNoticeOnAVisiblePageIs(): void
+    {
+        $this->post([]);
+        $notice = $this->activity(module: '205');
+
+        $GLOBALS['__bcc_apa']['hidden'] = [self::ACT];
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $notice), 'hidden');
+        self::assertSame([self::ACT . ':' . self::VIEWER], $GLOBALS['__bcc_apa']['calls']);
+
+        $GLOBALS['__bcc_apa']['hidden'] = [];
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $notice), 'its page admits the viewer');
+    }
+
     public function testANonGroupPostIsNotRefusedByTheGroupRule(): void
     {
         $this->post([]);
