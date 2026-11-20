@@ -133,6 +133,19 @@ final class TokenErrorCodesTest extends TestCase
         self::assertSame('Your session is no longer valid. Please sign in again.', $message);
     }
 
+    /**
+     * F-462: a 401 whose token's state could not be read is NOT "invalid"
+     * (that signs the app out, #673). It is the 503 the door gives.
+     */
+    public function testAnUnreadableTokenStateBecomes503NotTokenInvalid(): void
+    {
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail' => true];
+
+        [$status, $code] = self::protectedRouteWith(JwtToken::encode(self::USER, 'handle90'));
+
+        self::assertSame([503, 'bcc_unavailable'], [$status, $code]);
+    }
+
     public function testNoTokenOrAWorkingTokenKeepsUnauthorized(): void
     {
         self::assertSame([401, 'bcc_unauthorized', 'Sign in required.'], self::protectedRouteWith(null));

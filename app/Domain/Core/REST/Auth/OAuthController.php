@@ -443,7 +443,8 @@ final class OAuthController
         // "sign out everywhere", which moves the account's token version.
         $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
         $asked  = strtolower(trim((string) $request->get_param('handle')));
-        if ($handle === '' || $asked !== $handle || JwtToken::currentTokenVersion($userId) !== $tv) {
+        // F-462: the guarded read, refused when unknown (null !== an int).
+        if ($handle === '' || $asked !== $handle || JwtToken::tokenVersion($userId) !== $tv) {
             return self::spentProviderToken();
         }
 
