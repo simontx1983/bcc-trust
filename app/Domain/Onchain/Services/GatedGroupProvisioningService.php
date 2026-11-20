@@ -67,6 +67,7 @@ use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -1421,8 +1422,21 @@ final class GatedGroupProvisioningService {
             if ($swapped) {
                 wp_set_current_user($ownerId);
             }
-            /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
-            $group = new \PeepSoGroup(null, $data);
+            // ⚠⚠ F-361 — A PEEPSO MODEL WRITE, and this file already said so
+            // at the top: `new PeepSoGroup(null, $data)` runs
+            // `wp_insert_post()` (peepso-groups group.php:308). TWO arguments
+            // CREATE; one argument only loads, which is why the
+            // `new \PeepSoGroup($groupId)` reads elsewhere in this file are
+            // left alone.
+            //
+            // The constructor therefore reaches the `wp_insert_post`
+            // action, where third-party listeners run, so it must stay
+            // inside `pinOnly`. Rationale: F-361 (private tracker).
+            $group = PeepSoAddPostGuard::pinOnly(
+                [], // provisioning drives nothing through the request
+                /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
+                static fn () => new \PeepSoGroup(null, $data)
+            );
             /** @phpstan-ignore-next-line */
             $id = (int) $group->get('id');
             return $id > 0 ? $id : 0;

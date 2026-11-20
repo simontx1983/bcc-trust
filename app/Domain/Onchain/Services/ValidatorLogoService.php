@@ -31,6 +31,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Onchain\Contracts\LogoResolver;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -294,9 +295,18 @@ final class ValidatorLogoService
         // its URL is stored on the validator row, not pinned as a thumbnail
         // (a claimer's set_post_thumbnail would otherwise outrank the auto
         // logo at view time, which is exactly the precedence we want).
-        $attachmentId = media_handle_sideload($fileArray, 0, null, [
-            'test_form' => false,
-        ]);
+        // ⚠ F-361 — `media_handle_sideload()` calls `wp_insert_attachment()`
+        // (wp-admin/includes/media.php:64), which returns `wp_insert_post()`,
+        // so it reaches the action two hops down. Wrapped for the INVARIANT:
+        // this runs from cron / an admin action, so no member's request is in
+        // flight, but a reachability judgment is exactly what the guard
+        // exists to replace.
+        $attachmentId = PeepSoAddPostGuard::pinOnly(
+            [],
+            static fn () => media_handle_sideload($fileArray, 0, null, [
+                'test_form' => false,
+            ])
+        );
 
         if (is_wp_error($attachmentId)) {
             @unlink($tmp);

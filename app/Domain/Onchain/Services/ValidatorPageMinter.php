@@ -64,6 +64,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -372,19 +373,30 @@ final class ValidatorPageMinter
         $title   = $moniker !== '' ? $moniker : $row->operator_address;
         $slug    = self::buildSlug($moniker, $row->chain_slug, $row->operator_address);
 
-        $insert = wp_insert_post([
-            'post_type'    => 'peepso-page',
-            'post_status'  => 'publish',
-            'post_author'  => 0,
-            'post_title'   => sanitize_text_field($title),
-            'post_name'    => $slug,
-            'post_content' => '',
-            'post_excerpt' => '',
-            'meta_input'   => [
-                '_bcc_page_type'            => PageTypeMap::KIND_TO_PAGE_TYPE['validator'],
-                '_bcc_onchain_validator_id' => (string) $row->id,
-            ],
-        ], true);
+        // F-361 — wrapped for the INVARIANT, not for a live exposure: this
+        // mints from cron / an admin action, so no member's request is in
+        // flight. Wrapping it anyway is what keeps the guard test mechanical
+        // and its allowlist empty.
+        //
+        // ⚠ `post_author => 0` and `meta_input` are passed THROUGH the pin
+        // unchanged — pinOnly neutralises the REQUEST, never the arguments
+        // the writer passes.
+        $insert = PeepSoAddPostGuard::pinOnly(
+            [],
+            static fn () => wp_insert_post([
+                'post_type'    => 'peepso-page',
+                'post_status'  => 'publish',
+                'post_author'  => 0,
+                'post_title'   => sanitize_text_field($title),
+                'post_name'    => $slug,
+                'post_content' => '',
+                'post_excerpt' => '',
+                'meta_input'   => [
+                    '_bcc_page_type'            => PageTypeMap::KIND_TO_PAGE_TYPE['validator'],
+                    '_bcc_onchain_validator_id' => (string) $row->id,
+                ],
+            ], true)
+        );
 
         if (is_wp_error($insert) || (int) $insert <= 0) {
             $msg = is_wp_error($insert) ? $insert->get_error_message() : 'unknown';
