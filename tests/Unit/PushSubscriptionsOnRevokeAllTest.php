@@ -204,6 +204,7 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
 
         self::assertSame(503, $res->get_status());
         self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertStringContainsString('could not be changed', (string) ($data['error']['message'] ?? ''), 'its own message, not the session one');
         self::assertSame(self::PASSWORD, $GLOBALS['__bcc_ph']['passwords'][self::USER] ?? null, 'the password is unchanged');
         self::assertSame([], $GLOBALS['__bcc_ph']['deletes'], 'push subscriptions untouched');
         self::assertNotContains('account_password_changed', $GLOBALS['__bcc_ph']['audit'] ?? []);
