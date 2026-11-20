@@ -230,8 +230,8 @@ final class AnnouncementWriteService
         // ⚠ F-361 — pinned INSIDE withPlainTextColumns(), so that helper's
         // filter juggling still spans the write and the pin covers only the
         // write itself. Safe in either order: it reads no request input.
-        // An operator IS a member making a request, so `anon_id` here would
-        // mark the post the feed projects as posted anonymously.
+        // This write reaches the `wp_insert_post` action, where third-party
+        // listeners run, so it must stay inside `pinOnly`. Rationale: F-361 (private tracker).
         $postId = self::withPlainTextColumns(static fn () => PeepSoAddPostGuard::pinOnly([], static fn () => wp_insert_post(wp_slash([
             'post_type'     => AnnouncementPostType::POST_TYPE,
             'post_status'   => Verb::statusFor($verb),

@@ -144,11 +144,9 @@ final class BlogStatusTransitionHandler
             // ⚠ F-361 — A REVISION IS A POST INSERT.
             // `wp_save_post_revision()` calls `_wp_put_post_revision()`
             // (revision.php:99), which calls `wp_insert_post($post, true)`
-            // (revision.php:19) — so the action fires and the three
-            // request-reading listeners run on the REVISION row.
-            //
-            // Reached from a member publishing their own blog, so the
-            // request in flight is theirs.
+            // (revision.php:19) — so the `wp_insert_post` action fires on
+            // the REVISION row, where third-party listeners run. This write
+            // must stay inside `pinOnly`. Rationale: F-361 (private tracker).
             PeepSoAddPostGuard::pinOnly(
                 [], // a revision drives nothing through the request
                 static fn () => wp_save_post_revision($postId)

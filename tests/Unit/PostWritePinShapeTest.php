@@ -148,7 +148,7 @@ final class PostWritePinShapeTest extends TestCase
     /**
      * ⭐ THE CORE PROPERTY, for every shape: at the moment the write
      * runs, every key those three listeners read is neutral and the
-     * query string — which `PeepSoInput` consults FIRST — is empty.
+     * query string — which is consulted FIRST — is empty.
      */
     #[DataProvider('shapeProvider')]
     public function testTheRequestIsNeutralisedDuringEveryWriteShape(string $shape): void
@@ -159,13 +159,12 @@ final class PostWritePinShapeTest extends TestCase
 
         $write = self::onlyWrite();
 
-        self::assertSame([], $write['get'], '$_GET must be empty: PeepSoInput reads it FIRST');
+        self::assertSame([], $write['get'], '$_GET must be empty: the query string is read FIRST');
         self::assertSame([], $write['request'], '$_REQUEST must be empty too');
 
-        // ⚠ PINNED, NOT UNSET. `PeepSoInput::int()` falls back to the RAW
-        // REQUEST BODY for a key absent from $_GET and $_POST, so
-        // unsetting `mood` or `anon_id` would OPEN that leg rather than
-        // close it. Only a present key at a neutral value shuts it.
+        // ⚠ PINNED, NOT UNSET. A reader of these keys can fall back to a
+        // source that merely UNSETTING them does not cover, so only a
+        // present key at a neutral value closes the path. Rationale: F-361 (private tracker).
         foreach (['mood' => 0, 'anon_id' => 0, 'group_id' => 0, 'page_id' => 0] as $key => $neutral) {
             self::assertArrayHasKey($key, $write['post'], "{$key} must be PINNED, not merely unset");
             self::assertSame($neutral, $write['post'][$key], "{$key} must be neutral during the write");

@@ -114,18 +114,17 @@ final class PostDeleteOracleTest extends TestCase
      * ⭐ F-361 BEHAVIOURAL PIN TEST — a member trashing their OWN post.
      *
      * `wp_trash_post()` calls `wp_update_post()` in its own body, which
-     * calls `wp_insert_post()`, which fires the `wp_insert_post` action —
-     * so moods (moods.php:47), location (location.php:90) and the
-     * anonymous-OP marker all read THIS member's request on a delete.
-     *
+     * calls `wp_insert_post()`, which fires the `wp_insert_post` action,
+     * where third-party listeners run. A trash LOOKS like a delete and is
+     * a post write, so it must stay inside `pinOnly`. Rationale: F-361 (private tracker).
      * ⚠ Asserted from a snapshot taken INSIDE the write. The guard
      * restores the request in a `finally`, so an assertion after the call
      * sees the original whether the pin ran or not — the ordering is the
      * whole property.
      *
-     * ⚠ `save_mood`'s "no mood, no touch" guard does not protect a trash:
-     * the action passes `$post`, so only the DELETE-meta branch is
-     * skipped while `else if ($mood)` still fires.
+     * ⚠ A listener that appears to opt out by post type or by payload may
+     * still run on this path, so "it would not do anything here" is not a
+     * reason to leave a write unpinned.
      */
     public function testTheOwnerDeleteTrashIsPinned(): void
     {
@@ -145,10 +144,10 @@ final class PostDeleteOracleTest extends TestCase
         self::assertNotEmpty($writes, 'the write never ran — the fixture is not measuring anything');
 
         foreach ($writes as $w) {
-            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — PeepSoInput reads it FIRST');
-            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
-            // request body for an absent key, so unsetting `mood`/`anon_id`
-            // would OPEN that leg rather than close it.
+            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — the query string is read FIRST');
+            // ⚠ PINNED, NOT UNSET. A reader of these keys can fall back to
+            // a source that merely UNSETTING them does not cover, so only a
+            // present key at a neutral value closes the path. Rationale: F-361 (private tracker).
             self::assertArrayHasKey('mood', $w['post'], $w['fn'] . ': mood must be pinned, not unset');
             self::assertSame(0, $w['post']['mood'], $w['fn'] . ': mood neutral during the write');
             self::assertSame(0, $w['post']['anon_id'], $w['fn'] . ': anon_id neutral during the write');

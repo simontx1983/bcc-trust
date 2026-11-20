@@ -1429,9 +1429,9 @@ final class GatedGroupProvisioningService {
             // `new \PeepSoGroup($groupId)` reads elsewhere in this file are
             // left alone.
             //
-            // So the three request-reading listeners (moods.php:47,
-            // location.php:90, peepso-anon) see whatever the member sent on
-            // the request that triggered a holder-gated group's provisioning.
+            // The constructor therefore reaches the `wp_insert_post`
+            // action, where third-party listeners run, so it must stay
+            // inside `pinOnly`. Rationale: F-361 (private tracker).
             $group = PeepSoAddPostGuard::pinOnly(
                 [], // provisioning drives nothing through the request
                 /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */

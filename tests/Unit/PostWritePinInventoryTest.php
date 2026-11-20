@@ -34,11 +34,11 @@ use PHPUnit\Framework\TestCase;
  *
  * ── WHAT COUNTS AS A POST WRITE ─────────────────────────────────────
  *
- * Anything reaching the `wp_insert_post` ACTION, which is where
- * `PeepSoMoods::save_mood` (moods.php:47),
- * `PeepSoLocation::insert_post` (location.php:90) and
- * `PeepSo3_Anon::save_anon_op` (peepso-anon) are registered. ⚠ Every
- * entry in {@see WRITERS} was confirmed by reading WordPress's source.
+ * Anything reaching the `wp_insert_post` ACTION, which third-party
+ * listeners hook. The listener inventory itself lives in
+ * `PeepSoAddPostGuard`'s own documentation in bcc-core, not here — this
+ * repo is public. ⚠ Every entry in {@see WRITERS} was confirmed by
+ * reading WordPress's source. Rationale: F-361 (private tracker).
  *
  * ── THE THREE WAYS A NAIVE GUARD IS WRONG ───────────────────────────
  *
@@ -130,6 +130,15 @@ final class PostWritePinInventoryTest extends TestCase
         return dirname(__DIR__, 2);
     }
 
+    private static function fixtureDir(): string
+    {
+        // ⚠ CAPITAL F — `tests/Fixtures`, the directory this repo already
+        // uses (CollectionStancePanelStatusTest reads one from it). A
+        // lowercase spelling resolves on Windows and NOT on the Linux CI
+        // runner, so the fixture tests below would fail only after push.
+        return dirname(__DIR__) . '/Fixtures';
+    }
+
     /** @return list<string> */
     private static function phpFiles(): array
     {
@@ -217,9 +226,12 @@ final class PostWritePinInventoryTest extends TestCase
             }
 
             // ── main walk ──────────────────────────────────────────────
-            $depth    = 0;
-            $pins     = [];   // list<array{depth:int, armed:bool}>
-            $line     = 1;
+            $depth     = 0;
+            $pins      = [];   // list<array{depth:int}>  open pinOnly( calls
+            $bodies    = [];   // list<array{kind:string, startDepth:int, brace:int}>
+            $pendingFn = null; // 'fn'|'block' — a closure seen, body not yet open
+            $pendingAt = 0;
+            $line      = 1;
 
             for ($i = 0; $i < $count; $i++) {
                 $t = $tokens[$i];
@@ -227,21 +239,38 @@ final class PostWritePinInventoryTest extends TestCase
                 if (is_array($t)) {
                     $line = $t[2];
 
-                    // ⚠⚠ HARDENING 1 — a write is pinned ONLY inside a
-                    // closure opened within pinOnly's ARGUMENT LIST.
+                    // ⚠⚠ HARDENING 1 — a write is pinned ONLY while inside
+                    // the BODY of a closure that is one of `pinOnly`'s
+                    // arguments.
                     //
                     // `pinOnly([], wp_insert_post([...]))` is nested inside
                     // pinOnly's parens, so a paren-depth walk calls it
-                    // pinned — but PHP evaluates an ARGUMENT before the call,
-                    // so the write completes BEFORE the request is pinned.
-                    // Proved with a runnable case, not reasoned about. A
-                    // guard satisfiable by an unprotected write is worse than
-                    // no guard, because it licenses the pattern.
-                    if (($t[0] === T_FUNCTION || $t[0] === T_FN) && $pins !== []) {
-                        $top = count($pins) - 1;
-                        if ($depth > $pins[$top]['depth'] - 1) {
-                            $pins[$top]['armed'] = true;
-                        }
+                    // pinned — but PHP evaluates an ARGUMENT before the
+                    // call, so the write completes BEFORE the request is
+                    // pinned. Proved with a runnable case.
+                    //
+                    // ⚠⚠ AND "A CLOSURE APPEARED SOMEWHERE IN THE ARGUMENTS"
+                    // IS NOT ENOUGH EITHER. The first version of this
+                    // hardening set one `armed` flag per PIN, so a decoy
+                    // closure armed it and any write later in the argument
+                    // list counted as protected:
+                    //
+                    //   pinOnly([static fn () => null], wp_insert_post([…]))
+                    //
+                    // Measured: that read `pinned=YES` while the write still
+                    // ran first. So arming is tracked per closure BODY —
+                    // a block closure from its `{` to the matching `}`, an
+                    // arrow fn from its `=>` until the argument ends.
+                    if (($t[0] === T_FUNCTION || $t[0] === T_FN) && $pins !== []
+                        && $depth >= $pins[count($pins) - 1]['depth']) {
+                        $pendingFn = $t[0] === T_FN ? 'fn' : 'block';
+                        $pendingAt = $depth;
+                    }
+
+                    // An arrow fn's body begins at `=>`.
+                    if ($t[0] === T_DOUBLE_ARROW && $pendingFn === 'fn') {
+                        $bodies[] = ['kind' => 'fn', 'startDepth' => $pendingAt, 'brace' => 0];
+                        $pendingFn = null;
                     }
 
                     // HARDENING 3 — `use function` importing a writer. An
@@ -277,7 +306,7 @@ final class PostWritePinInventoryTest extends TestCase
                             $rows[] = [
                                 'site'   => $rel . ':' . $line,
                                 'fn'     => $literal . ' (as a string)',
-                                'pinned' => self::armed($pins),
+                                'pinned' => self::inPinnedClosure($bodies),
                                 'note'   => 'dispatched by name through call_user_func',
                             ];
                         }
@@ -298,7 +327,7 @@ final class PostWritePinInventoryTest extends TestCase
                                 $rows[] = [
                                     'site'   => $rel . ':' . $line,
                                     'fn'     => 'new PeepSoGroup(…, …)',
-                                    'pinned' => self::armed($pins),
+                                    'pinned' => self::inPinnedClosure($bodies),
                                     'note'   => 'PeepSo model create — group.php:308 runs wp_insert_post()',
                                 ];
                             }
@@ -306,11 +335,52 @@ final class PostWritePinInventoryTest extends TestCase
                     }
                 }
 
+                // ── closure BODY bookkeeping ─────────────────────────
+                //
+                // A block closure's body runs from its `{` to the matching
+                // `}`. An arrow fn's body runs from `=>` to the end of that
+                // argument — so it ends at a `,` at its own paren depth, or
+                // when the depth drops below it.
+                if ($t === '{') {
+                    if ($pendingFn === 'block') {
+                        $bodies[]  = ['kind' => 'block', 'startDepth' => $pendingAt, 'brace' => 1];
+                        $pendingFn = null;
+                    } elseif ($bodies !== [] && $bodies[count($bodies) - 1]['kind'] === 'block') {
+                        $bodies[count($bodies) - 1]['brace']++;
+                    }
+                    continue;
+                }
+                if ($t === '}') {
+                    if ($bodies !== [] && $bodies[count($bodies) - 1]['kind'] === 'block') {
+                        $bodies[count($bodies) - 1]['brace']--;
+                        if ($bodies[count($bodies) - 1]['brace'] <= 0) {
+                            array_pop($bodies);
+                        }
+                    }
+                    continue;
+                }
+                if ($t === ',') {
+                    // An arrow-fn body ends with its argument.
+                    while ($bodies !== []
+                        && $bodies[count($bodies) - 1]['kind'] === 'fn'
+                        && $bodies[count($bodies) - 1]['startDepth'] >= $depth) {
+                        array_pop($bodies);
+                    }
+                    continue;
+                }
+
                 if ($t === '(') {
                     $depth++;
                     continue;
                 }
                 if ($t === ')') {
+                    // Closing this paren ends any arrow-fn body that opened
+                    // inside it, and any pin whose own arg list it closes.
+                    while ($bodies !== []
+                        && $bodies[count($bodies) - 1]['kind'] === 'fn'
+                        && $bodies[count($bodies) - 1]['startDepth'] >= $depth) {
+                        array_pop($bodies);
+                    }
                     while ($pins !== [] && $pins[count($pins) - 1]['depth'] >= $depth) {
                         array_pop($pins);
                     }
@@ -348,7 +418,7 @@ final class PostWritePinInventoryTest extends TestCase
                     $rows[] = [
                         'site'   => $rel . ':' . $line,
                         'fn'     => '$group->update(…)',
-                        'pinned' => self::armed($pins),
+                        'pinned' => self::inPinnedClosure($bodies),
                         'note'   => 'PeepSo model update — group.php:355 runs wp_update_post()',
                     ];
                     continue;
@@ -359,7 +429,7 @@ final class PostWritePinInventoryTest extends TestCase
                 // a future class invents with different semantics.
                 if ($name === 'pinOnly') {
                     if (self::isRealGuardCall($tokens, $i, $src)) {
-                        $pins[] = ['depth' => $depth + 1, 'armed' => false];
+                        $pins[] = ['depth' => $depth + 1];
                     }
                     continue;
                 }
@@ -403,7 +473,7 @@ final class PostWritePinInventoryTest extends TestCase
                 $rows[] = [
                     'site'   => $rel . ':' . $line,
                     'fn'     => $name,
-                    'pinned' => self::armed($pins),
+                    'pinned' => self::inPinnedClosure($bodies),
                     'note'   => self::WRITERS[$name],
                 ];
             }
@@ -412,17 +482,20 @@ final class PostWritePinInventoryTest extends TestCase
         return $rows;
     }
 
-    /** Is any enclosing pin ARMED — i.e. did a closure open inside it? */
-    /** @param list<array{depth: int, armed: bool}> $pins */
-    private static function armed(array $pins): bool
+    /**
+     * Are we inside the BODY of a closure that is one of `pinOnly`'s
+     * arguments?
+     *
+     * ⚠ Not "is a pin open" and not "did a closure appear in its
+     * arguments" — both of those count an evaluated argument as pinned.
+     * Only a write inside the closure body runs after the request has
+     * been neutralised.
+     *
+     * @param list<array{kind: string, startDepth: int, brace: int}> $bodies
+     */
+    private static function inPinnedClosure(array $bodies): bool
     {
-        foreach ($pins as $pin) {
-            if ($pin['armed']) {
-                return true;
-            }
-        }
-
-        return false;
+        return $bodies !== [];
     }
 
     /**
@@ -695,11 +768,10 @@ final class PostWritePinInventoryTest extends TestCase
             $unpinned,
             "These post writes are NOT inside PeepSoAddPostGuard::pinOnly():\n  "
             . implode("\n  ", $unpinned)
-            . "\n\nEach reaches the `wp_insert_post` action, where three PeepSo listeners"
-            . "\nread the CURRENT REQUEST with no authorization check of their own"
-            . "\n(mood, location, anon_id). Wrap the write in pinOnly(), with the write"
-            . "\nINSIDE an arrow fn in pinOnly's argument list — a write passed as a bare"
-            . "\nargument is evaluated BEFORE the pin and is not protected."
+            . "\n\nEach reaches the `wp_insert_post` action, where third-party"
+            . "\nlisteners run. Wrap the write in pinOnly(), with the write INSIDE"
+            . "\nan arrow fn in pinOnly's argument list — a write passed as a"
+            . "\nbare argument is evaluated BEFORE the pin and is not covered."
             . "\n\nDo NOT add it to this test's allowlist: that is the failure mode this"
             . "\nguard exists to prevent."
         );
@@ -723,6 +795,147 @@ final class PostWritePinInventoryTest extends TestCase
             $pinned,
             'the walk found writes but recognised NO pin — pin detection is broken,'
             . ' which would make the guard above vacuous'
+        );
+    }
+
+
+    /**
+     * ⚠⚠ COMMENTS ARE NOT CALL SITES — asserted, not assumed.
+     *
+     * The most load-bearing property of the walk, because THREE separate
+     * incidents on F-361 had exactly this shape:
+     *
+     *   - `substr_count('…::pinOnly(')` read 3 for 2 calls, because the
+     *     comment EXPLAINING the guard named it;
+     *   - the guard flagged `function_exists('wp_save_post_revision')`,
+     *     a defensive check, because the name appeared as a string;
+     *   - a comment saying "not a PHPStan suppression comment" BECAME
+     *     one, because that tool reads comments too.
+     *
+     * ⭐ And it is live here: `pinOnly()`'s own docblock carries the WRONG
+     * form — `pinOnly([], wp_insert_post(...))` — as a worked example of
+     * what not to write. A text-matching guard would report its own
+     * documentation as an unpinned write, and the obvious "fix" would be
+     * deleting the example that prevents the mistake.
+     */
+    public function testACommentMentionIsNotACallSite(): void
+    {
+        $fixture = self::fixture('comment-only-writes.php.txt');
+
+        // Sanity: the fixture really does NAME writers, so a pass cannot
+        // come from an empty file.
+        $text = (string) file_get_contents($fixture);
+        foreach (['wp_insert_post', 'wp_update_post', 'wp_trash_post', 'PeepSoGroup', 'call_user_func'] as $needle) {
+            self::assertStringContainsString($needle, $text, "the fixture must mention {$needle}");
+        }
+
+        self::assertSame(
+            [],
+            self::callSites([$fixture]),
+            'a writer named only in a COMMENT must not be reported as a call site'
+        );
+    }
+
+    /**
+     * ⛔⛔ THE DECOY: a closure in the argument list does NOT pin a write
+     * that sits beside it.
+     *
+     * This is the hole the FIRST version of the hardening left, and it is
+     * subtle enough to be worth spelling out. Hardening form A made a
+     * write count as pinned only if a closure appeared inside
+     * `pinOnly`'s arguments. But that flag was per PIN, so:
+     *
+     *     pinOnly([static fn () => null], wp_insert_post([…]))
+     *
+     * armed the pin with a decoy closure in the FIRST argument, and the
+     * write in the second was then reported `pinned=YES` — while still
+     * being an evaluated argument that runs BEFORE the pin. Measured on
+     * the real guard before this fix.
+     *
+     * Arming is therefore tracked per closure BODY: a block closure from
+     * its `{` to the matching `}`, an arrow fn from `=>` to the end of its
+     * argument. Every write in this fixture is OUTSIDE any such body, so
+     * every one must come back unpinned.
+     */
+    public function testADecoyClosureDoesNotPinAWriteBesideIt(): void
+    {
+        $fixture = self::fixture('decoy-closure-writes.php.txt');
+
+        $rows = self::callSites([$fixture]);
+        self::assertNotEmpty($rows, 'the decoy fixture must contain writes, or this proves nothing');
+
+        $wronglyPinned = [];
+        foreach ($rows as $row) {
+            if ($row['pinned']) {
+                $wronglyPinned[] = $row['site'] . ' (' . $row['fn'] . ')';
+            }
+        }
+
+        self::assertSame(
+            [],
+            $wronglyPinned,
+            "These writes are NOT inside a closure body, so they run BEFORE the pin,\n  "
+            . implode("\n  ", $wronglyPinned)
+            . "\nbut the guard reported them as pinned. That is the decoy hole."
+        );
+    }
+
+    /** Fixtures live beside the guard, out of every scanned root. */
+    private static function fixture(string $name): string
+    {
+        $path = self::fixtureDir() . '/' . $name;
+        self::assertFileExists($path, "fixture {$name} is missing");
+
+        return $path;
+    }
+
+
+    /**
+     * ⛔ A VANISHING TEST MUST FAIL CI, not be noticed by someone counting.
+     *
+     * ⚠ This is here because it HAPPENED: regenerating this file dropped
+     * `testACommentMentionIsNotACallSite` — 21 cases became 20 — and the
+     * suite stayed GREEN. A deleted test is the one defect a passing run
+     * cannot show you, and every other assertion in this class is only
+     * worth what its continued existence is worth.
+     *
+     * ⭐ The SET is pinned, not the count: that names what disappeared and
+     * catches a silent RENAME too, which a `>= 22` floor would not.
+     *
+     * ⚠ HONEST LIMIT, stated rather than hidden: this test cannot police
+     * its own deletion. What it buys is that losing any OTHER case fails
+     * loudly, so a quiet loss now requires deleting two things — which is
+     * a deliberate act, not an accident of a build step.
+     */
+    public function testEveryNamedCaseStillExists(): void
+    {
+        $expected = [
+            'testACommentMentionIsNotACallSite',
+            'testADecoyClosureDoesNotPinAWriteBesideIt',
+            'testEveryNamedCaseStillExists',
+            'testEveryPostWriteIsPinned',
+            'testEveryWriterCarriesItsEvidence',
+            'testTheAllowlistIsEmpty',
+            'testTheGroupConstructorFileSetIsReviewed',
+            'testTheWalkFindsWritesAndSeesPins',
+            'testTheWriterSetIsPinnedAgainstSilentShrinking',
+        ];
+
+        $actual = [];
+        foreach ((new \ReflectionClass(self::class))->getMethods(\ReflectionMethod::IS_PUBLIC) as $m) {
+            if (str_starts_with($m->getName(), 'test')) {
+                $actual[] = $m->getName();
+            }
+        }
+        sort($actual);
+
+        self::assertSame(
+            $expected,
+            $actual,
+            'a test case in this guard was added, removed or renamed. REMOVING one'
+            . ' silently weakens the guard — the suite stays green while the check is'
+            . ' gone, which is exactly how this file lost a case once already. Adding'
+            . ' one is welcome: list it here too.'
         );
     }
 

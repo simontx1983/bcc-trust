@@ -11,6 +11,17 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+// F-361: the post write this suite drives is wrapped in bcc-core's
+// `PeepSoAddPostGuard::pinOnly()`, so the REAL class has to be present or
+// the service's own `catch (\Throwable)` turns a missing-class Error into an
+// ordinary "provisioning failed" — a red suite whose message names neither
+// the class nor this plugin. Loaded at FILE scope rather than in one setUp()
+// because several of these suites boot through more than one path.
+//
+// ⛔ The loader THROWS when the bcc-core sibling is absent; see its header
+// for why neither a stub nor a skip is safe here.
+require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+
 /**
  * An uploaded cover/avatar image must not publish facts about its uploader.
  *
@@ -436,7 +447,28 @@ final class CoverImagePrivacyTest extends TestCase
         $src = self::code(self::source());
 
         $strip  = strpos($src, 'if (!self::stripEmbeddedMetadata($savedPath, $savedMime))');
-        $insert = strpos($src, '$attachmentId = wp_insert_attachment(');
+        // ⚠ F-361 — the insert is now wrapped in
+        // `PeepSoAddPostGuard::pinOnly()`, so the old anchor
+        // `$attachmentId = wp_insert_attachment(` no longer exists: the
+        // assignment takes the PIN's return value and the write itself sits
+        // inside an arrow fn. The ordering this test exists for is unchanged,
+        // so the anchor moves to the call alone rather than the assignment.
+        //
+        // ⭐ And the new anchor is SELF-VERIFYING. `wp_insert_attachment(`
+        // is unique in comment-stripped source — the raw file holds four,
+        // three of them prose, which is the trap {@see code()} exists for —
+        // and the nearby `... failed` log message has no paren, so it cannot
+        // be matched. Asserting that uniqueness means a second occurrence
+        // appearing later fails HERE, loudly, instead of silently moving what
+        // strpos() finds and turning this ordering check into noise.
+        self::assertSame(
+            1,
+            substr_count($src, 'wp_insert_attachment('),
+            'the insert anchor must stay unique in stripped source, or the'
+            . ' position read below may not be the write at all'
+        );
+
+        $insert = strpos($src, 'wp_insert_attachment(');
         $meta   = strpos($src, 'wp_generate_attachment_metadata(');
 
         self::assertIsInt($strip, 'the strip call site must exist');

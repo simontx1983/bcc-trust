@@ -200,9 +200,10 @@ class PeepSoIntegration
             return;
         }
 
-        // F-361 — pinned: a claim is a member's own request, and the three
-        // request-reading listeners run on an UPDATE too (wp_update_post
-        // calls wp_insert_post, which fires the action).
+        // F-361 — pinned: `wp_update_post()` calls `wp_insert_post()`,
+        // which fires the `wp_insert_post` action, where third-party
+        // listeners run. This write must stay inside `pinOnly`.
+        // Rationale: F-361 (private tracker).
         $update = PeepSoAddPostGuard::pinOnly(
             [], // a page author change drives nothing through the request
             static fn () => wp_update_post([

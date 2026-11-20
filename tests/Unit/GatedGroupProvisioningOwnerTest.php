@@ -13,6 +13,17 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+// F-361: the post write this suite drives is wrapped in bcc-core's
+// `PeepSoAddPostGuard::pinOnly()`, so the REAL class has to be present or
+// the service's own `catch (\Throwable)` turns a missing-class Error into an
+// ordinary "provisioning failed" — a red suite whose message names neither
+// the class nor this plugin. Loaded at FILE scope rather than in one setUp()
+// because several of these suites boot through more than one path.
+//
+// ⛔ The loader THROWS when the bcc-core sibling is absent; see its header
+// for why neither a stub nor a skip is safe here.
+require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+
 /**
  * F-160 — the holder community's PeepSo owner is the administrator who
  * REQUESTED it, whoever (or whatever) runs the provisioning.

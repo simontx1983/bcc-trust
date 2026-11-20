@@ -276,8 +276,8 @@ final class ReviewReplyServiceTest extends TestCase
      * #772 pinned the reply PUBLISH (inside ActivityStreamWriter); this is
      * the EDIT, a separate `wp_update_post()` on the same post, reached
      * straight from the operator's own request. An update is not a quieter
-     * write than an insert as far as the three request-reading listeners
-     * are concerned.
+     * write than an insert: it reaches the same `wp_insert_post` action,
+     * where third-party listeners run. Rationale: F-361 (private tracker).
      *
      * ⚠ The snapshot is taken INSIDE the write, because the guard restores
      * the request in a `finally`.
@@ -305,10 +305,10 @@ final class ReviewReplyServiceTest extends TestCase
         self::assertNotEmpty($writes, 'the write never ran — the fixture is not measuring anything');
 
         foreach ($writes as $w) {
-            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — PeepSoInput reads it FIRST');
-            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
-            // request body for an absent key, so unsetting `mood`/`anon_id`
-            // would OPEN that leg rather than close it.
+            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — the query string is read FIRST');
+            // ⚠ PINNED, NOT UNSET. A reader of these keys can fall back to
+            // a source that merely UNSETTING them does not cover, so only a
+            // present key at a neutral value closes the path. Rationale: F-361 (private tracker).
             self::assertArrayHasKey('mood', $w['post'], $w['fn'] . ': mood must be pinned, not unset');
             self::assertSame(0, $w['post']['mood'], $w['fn'] . ': mood neutral during the write');
             self::assertSame(0, $w['post']['anon_id'], $w['fn'] . ': anon_id neutral during the write');

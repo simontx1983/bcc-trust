@@ -512,11 +512,12 @@ final class BlogCoverImageWriter
         $postTitle = is_string($stripped) && $stripped !== '' ? $stripped : $baseName;
 
         // ⚠ F-361 — `wp_insert_attachment()` RETURNS `wp_insert_post()`
-        // (wp-includes/post.php:6665), so it fires the action and the three
-        // request-reading listeners run. This is the one site a grep for
+        // (wp-includes/post.php:6665), so it fires the `wp_insert_post`
+        // action, where third-party listeners run. This write must stay
+        // inside `pinOnly`. It is also the one site a grep for
         // "wp_insert_post" would never have found.
         //
-        // This IS a member's own upload request, so the pin is live here.
+        // Rationale: F-361 (private tracker).
         $attachmentId = PeepSoAddPostGuard::pinOnly(
             [], // an attachment drives nothing through the request
             static fn () => wp_insert_attachment(

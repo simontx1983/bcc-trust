@@ -150,11 +150,9 @@ final class AnnouncementModerationWriteRefusalTest extends TestCase
     /**
      * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing an announcement.
      *
-     * An operator IS a member making a request, and an announcement is
-     * PROJECTED INTO FEEDS, so `anon_id` on the edit request would mark the
-     * projected item as posted anonymously, and `mood` / `location` would
-     * stamp meta nobody asked for.
-     *
+     * This edit reaches the `wp_insert_post` action, where third-party
+     * listeners run, and an announcement is PROJECTED INTO FEEDS — so the
+     * write must stay inside `pinOnly`. Rationale: F-361 (private tracker).
      * ⚠ Asserted from a snapshot taken INSIDE the write, because the guard
      * restores the request in a `finally` — an assertion after the call sees
      * the original whether the pin ran or not. The ordering IS the property.
@@ -187,10 +185,10 @@ final class AnnouncementModerationWriteRefusalTest extends TestCase
         self::assertNotEmpty($writes, 'no snapshot — the fixture is not measuring anything');
 
         foreach ($writes as $w) {
-            self::assertSame([], $w['get'], '$_GET must be empty — PeepSoInput reads it FIRST');
-            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
-            // request body for an absent key, so unsetting `mood`/`anon_id`
-            // would OPEN that leg rather than close it.
+            self::assertSame([], $w['get'], '$_GET must be empty — the query string is read FIRST');
+            // ⚠ PINNED, NOT UNSET. A reader of these keys can fall back to
+            // a source that merely UNSETTING them does not cover, so only a
+            // present key at a neutral value closes the path. Rationale: F-361 (private tracker).
             self::assertArrayHasKey('mood', $w['post'], 'mood must be pinned, not unset');
             self::assertSame(0, $w['post']['mood'], 'mood neutral during the write');
             self::assertSame(0, $w['post']['anon_id'], 'anon_id neutral during the write');

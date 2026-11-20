@@ -836,11 +836,10 @@ final class PostsService
         $postId  = (int) $activity->act_external_id;
         // ⚠⚠ F-361 — PINNED, AND A TRASH IS NOT EXEMPT. `wp_trash_post()`
         // calls `wp_update_post()` in its own body, which calls
-        // `wp_insert_post()`, which fires the action — so moods, location
-        // and the anonymous-OP marker all read this member's request here.
-        // `save_mood`'s "no mood, no touch" guard does not help: the action
-        // passes `$post`, so only the DELETE-meta branch is skipped while
-        // `else if ($mood)` still fires.
+        // `wp_insert_post()`, which fires the `wp_insert_post` action,
+        // where third-party listeners run. A trash LOOKS like a delete and
+        // is a post write, so it must stay inside `pinOnly`.
+        // Rationale: F-361 (private tracker).
         $trashed = PeepSoAddPostGuard::pinOnly(
             [], // deleting a post drives nothing through the request
             static fn () => wp_trash_post($postId)
@@ -1714,13 +1713,14 @@ final class PostsService
             // ⚠ F-361 — A REVISION IS A POST INSERT.
             // `wp_save_post_revision()` calls `_wp_put_post_revision()`
             // (revision.php:99), which calls `wp_insert_post($post, true)`
-            // (revision.php:19) — so the action fires and the three
-            // request-reading listeners run on the REVISION row.
+            // (revision.php:19) — so the `wp_insert_post` action fires on
+            // the REVISION row, where third-party listeners run. This write
+            // must stay inside `pinOnly`.
             //
-            // ⚠⚠ THIS IS THE SAME MEMBER REQUEST as the `wp_update_post` 36
-            // lines below, which F-361's first pass pinned while leaving
-            // this one open. Pinning the update and not the revision
-            // protects the post and not its history.
+            // ⚠⚠ PAIRED with the `wp_update_post` 36 lines below, which
+            // F-361's first pass pinned while leaving this one open.
+            // Pinning the update and not the revision covers the post and
+            // not its history. Rationale: F-361 (private tracker).
             PeepSoAddPostGuard::pinOnly(
                 [], // a revision drives nothing through the request
                 static fn () => wp_save_post_revision($postId)
