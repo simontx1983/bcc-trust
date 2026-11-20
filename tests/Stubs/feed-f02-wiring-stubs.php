@@ -418,9 +418,22 @@ namespace BCC\Core\Repositories {
 namespace BCC\Trust\Core\Repositories {
     final class ReputationRepository
     {
-        /** @return list<int> */
-        public function getCautionAndRiskyUserIds(): array
+        // ⚠ F-454: NO getCautionAndRiskyUserIds() here. It answers [] on a
+        // failed read and is for an inclusion-set worker only, so a feed
+        // calling it is a fatal in these suites rather than a silent pass.
+
+        /**
+         * `caution` (list<int>, default none). `caution_throws` (bool): no
+         * usable last-good list, which the real reader throws for.
+         *
+         * @return list<int>
+         */
+        public function getCautionAndRiskyUserIdsForExclusion(): array
         {
+            if (!empty($GLOBALS['__bcc_f02feed']['caution_throws'])) {
+                throw new \BCC\Trust\Core\Exceptions\RepositoryException('caution list unreadable, no usable last-good copy');
+            }
+
             return $GLOBALS['__bcc_f02feed']['caution'] ?? [];
         }
     }

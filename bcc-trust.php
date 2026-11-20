@@ -952,6 +952,11 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
     return $hooks;
 });
 
+// F-454: the caution/risky list reaching its ceiling with risky members
+// alone pages as P1 (bcc-core's DegradationAlerter reads this filter at
+// alert time); caution_list's own ceiling_reached stays P2.
+add_filter('bcc_degradation_p1_subsystems', [\BCC\Trust\Core\Repositories\ReputationRepository::class, 'withRiskyCeilingAsP1']);
+
 // V2 Phase 1b: dedupe-sweep cron handler. Bounded operationally —
 // see HeliusSeenSignaturesRepository for the cap + alarm rules.
 add_action('bcc_helius_dedupe_sweep', static function (): void {
