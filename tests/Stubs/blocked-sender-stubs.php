@@ -76,12 +76,63 @@ namespace BCC\Core\Repositories {
              */
             public static bool $readFails = false;
 
+            /**
+             * F-455: when true, ONLY the exact per-page check
+             * (getMutuallyBlockedSetOrUnknown) answers null, while the
+             * pre-filter's list reads succeed: the race between the two that
+             * the feeds answer with an empty page, never a 503.
+             */
+            public static bool $exactCheckFails = false;
+
             public static function reset(): void
             {
                 self::$blocking           = [];
                 self::$isBlockingCalls    = [];
                 self::$getBlockedSetCalls = [];
                 self::$readFails          = false;
+                self::$exactCheckFails    = false;
+            }
+
+            /**
+             * F-455: who $blockerId blocks, from `$blocking`; null while
+             * `$readFails`.
+             *
+             * @return list<int>|null
+             */
+            public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
+            {
+                unset($limit);
+                if (self::$readFails) {
+                    return null;
+                }
+                $out = [];
+                foreach (self::$blocking as [$a, $b]) {
+                    if ($a === $blockerId) {
+                        $out[] = $b;
+                    }
+                }
+                return $out;
+            }
+
+            /**
+             * F-455: who blocks $blockedId, from `$blocking`; null while
+             * `$readFails`.
+             *
+             * @return list<int>|null
+             */
+            public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
+            {
+                unset($limit);
+                if (self::$readFails) {
+                    return null;
+                }
+                $out = [];
+                foreach (self::$blocking as [$a, $b]) {
+                    if ($b === $blockedId) {
+                        $out[] = $a;
+                    }
+                }
+                return $out;
             }
 
             public static function isBlockingOrUnknown(int $blockerId, int $blockedId): ?bool
@@ -105,7 +156,7 @@ namespace BCC\Core\Repositories {
              */
             public static function getMutuallyBlockedSetOrUnknown(int $userId, array $otherIds): ?array
             {
-                if (self::$readFails) {
+                if (self::$readFails || self::$exactCheckFails) {
                     return null;
                 }
                 $out = [];

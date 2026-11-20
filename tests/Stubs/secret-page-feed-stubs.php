@@ -142,6 +142,9 @@ namespace BCC\Core\Feed {
         {
             public const SCOPE_FOR_YOU = 'for_you';
             public const SCOPE_GROUP   = 'group';
+            // F-438: "My Groups" (F-416), so that surface can be walked too.
+            public const SCOPE_GROUPS      = 'groups';
+            public const MEMBER_GROUPS_CAP = 200;
 
             /** bcc-core #158: no author name is masked in this harness. */
             public static function authorReadFailures(): int
@@ -203,14 +206,18 @@ namespace BCC\Core\Repositories {
     if (!class_exists(__NAMESPACE__ . '\\PeepSoBlockRepository', false)) {
         final class PeepSoBlockRepository
         {
-            /** @return list<int> */
-            public static function getBlockedIds(int $userId): array
+            // F-438 / F-455: the feed's pre-filter reads these (null = the
+            // read did not run). The old getBlockedIds() / getBlockerIds()
+            // are gone, so a feed calling them again is a fatal here.
+
+            /** @return list<int>|null */
+            public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
             {
                 return [];
             }
 
-            /** @return list<int> */
-            public static function getBlockerIds(int $userId): array
+            /** @return list<int>|null */
+            public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
             {
                 return [];
             }
@@ -229,6 +236,21 @@ namespace BCC\Core\Repositories {
                 }
 
                 return $set;
+            }
+        }
+    }
+}
+
+namespace BCC\Core\Repositories {
+    // F-438: "My Groups" reads the viewer's rooms first
+    // (`my_groups` => list<int>, default none).
+    if (!class_exists(__NAMESPACE__ . '\\PeepSoGroupRepository', false)) {
+        final class PeepSoGroupRepository
+        {
+            /** @return list<int>|null */
+            public static function getActiveMemberGroupIdsOrFail(int $userId, int $limit = 200): ?array
+            {
+                return $GLOBALS['__bcc_spf']['my_groups'] ?? [];
             }
         }
     }
@@ -270,6 +292,18 @@ namespace BCC\Trust\Core\Services {
             public function forGroup(int $groupId): ?object
             {
                 return null;
+            }
+
+            /**
+             * F-438: "My Groups" asks each room at once; none lifts the
+             * shadow-limit here.
+             *
+             * @param list<int> $groupIds
+             * @return array<int, null>
+             */
+            public function forManyGroups(array $groupIds): array
+            {
+                return array_fill_keys($groupIds, null);
             }
         }
     }

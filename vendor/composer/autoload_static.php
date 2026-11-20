@@ -419,6 +419,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\Feed\\PageClaimBodyHydrator' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/PageClaimBodyHydrator.php',
         'BCC\\Trust\\Core\\Services\\Feed\\PhotoBodyHydrator' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/PhotoBodyHydrator.php',
         'BCC\\Trust\\Core\\Services\\Feed\\ReviewBodyHydrator' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/ReviewBodyHydrator.php',
+        'BCC\\Trust\\Core\\Services\\Feed\\ViewerExclusions' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/ViewerExclusions.php',
         'BCC\\Trust\\Core\\Services\\Feed\\WatchBatchBodyHydrator' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/WatchBatchBodyHydrator.php',
         'BCC\\Trust\\Core\\Services\\FirstActionListener' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FirstActionListener.php',
         'BCC\\Trust\\Core\\Services\\FlagService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FlagService.php',
