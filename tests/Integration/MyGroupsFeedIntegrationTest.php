@@ -114,6 +114,10 @@ final class MyGroupsFeedIntegrationTest extends TestCase
         $this->p['blocked']     = $this->post(self::BLOCKED, self::G_OPEN, 'members_only');
         $this->p['cautionOpen'] = $this->post(self::CAUTION, self::G_OPEN, 'members_only');
         $this->p['cautionNft']  = $this->post(self::CAUTION, self::G_NFT, 'members_only');
+        // F-451: public posts in the NFT room, so a NON-member can reach one by
+        // link at all; the normal author's is the control.
+        $this->p['nftPublic']        = $this->post(self::AUTHOR, self::G_NFT, 'public_all');
+        $this->p['cautionNftPublic'] = $this->post(self::CAUTION, self::G_NFT, 'public_all');
         $this->p['onlyMe']      = $this->post(self::ONLY_ME, self::G_OPEN, 'members_only');
         $this->p['dual']        = $this->post(self::AUTHOR, self::G_OPEN, 'members_only', alsoIn: self::G_OTHER);
 
@@ -265,6 +269,40 @@ final class MyGroupsFeedIntegrationTest extends TestCase
         self::assertSame($union, $mine);
     }
 
+    // ── F-451: the permalink follows the room's shadow-limit rule ───────
+
+    /**
+     * The NFT room shows a caution-tier holder's posts to its members (above),
+     * so their permalinks open for those members too, and the mention gate
+     * (canView()) agrees. A room that keeps the shadow-limit keeps it by
+     * link, and a NON-member still gets the 404: the lift needs the viewer's
+     * own active membership.
+     */
+    public function testAnNftRoomLiftsTheShadowLimitByLinkForItsMembersOnly(): void
+    {
+        $feed = Plugin::instance()->feedRankingService();
+
+        $GLOBALS['__bcc_current_user'] = self::VIEWER;
+        foreach (['cautionNft', 'cautionNftPublic'] as $name) {
+            $act = $this->actOf($this->p[$name]);
+            self::assertNotNull($feed->getActivityById($act, self::VIEWER), "'{$name}': the room shows it, so its link opens");
+            self::assertTrue($feed->canView($act, self::VIEWER), "'{$name}': and a mention of the member reaches them");
+        }
+
+        $act = $this->actOf($this->p['cautionOpen']);
+        self::assertNull($feed->getActivityById($act, self::VIEWER), 'a plain room keeps the shadow-limit by link');
+        self::assertFalse($feed->canView($act, self::VIEWER));
+
+        $GLOBALS['__bcc_current_user'] = self::STRANGER;
+        self::assertNotNull(
+            $feed->getActivityById($this->actOf($this->p['nftPublic']), self::STRANGER),
+            'control: a public post in the room opens for a non-member'
+        );
+        $act = $this->actOf($this->p['cautionNftPublic']);
+        self::assertNull($feed->getActivityById($act, self::STRANGER), 'the lift is for the room\'s members only');
+        self::assertFalse($feed->canView($act, self::STRANGER));
+    }
+
     // ── the endpoint ────────────────────────────────────────────────────
 
     public function testTheEndpointServesTheScopeSignedInOnly(): void
@@ -314,6 +352,19 @@ final class MyGroupsFeedIntegrationTest extends TestCase
         return $this->postIdsOf(
             Plugin::instance()->feedRankingService()->getGroupFeed(self::VIEWER, $groupId, null, 50, false, $hallFeed)['items']
         );
+    }
+
+    /** The activity id of a fixture post. */
+    private function actOf(int $postId): int
+    {
+        global $wpdb;
+        $actId = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT act_id FROM {$wpdb->prefix}peepso_activities WHERE act_external_id = %d ORDER BY act_id ASC LIMIT 1",
+            $postId
+        ));
+        self::assertGreaterThan(0, $actId, 'fixture: the post has an activity row');
+
+        return $actId;
     }
 
     /**
