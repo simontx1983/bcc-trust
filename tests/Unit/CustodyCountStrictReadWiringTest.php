@@ -109,6 +109,42 @@ final class CustodyCountStrictReadWiringTest extends TestCase
     }
 
     /**
+     * ⭐⭐ THE UNKNOWN MUST LEAVE `custodyState()` AS NULL. Found by a
+     * mutant that SURVIVED both suites: keep the strict read, keep the
+     * caller's null check, and simply convert the null to 0 here —
+     *
+     *     if ($owned === null) { $owned = 0; }
+     *
+     * — and the fix is completely defeated while every other test stays
+     * green. `CapabilityMatrixTest` cannot see it because it overrides this
+     * method; the pins above cannot see it because the strict call and the
+     * caller's null check are both still present.
+     *
+     * So this asserts the branch RETURNS rather than substitutes. Collapsing
+     * "unknown" into a number at this layer is the one thing that makes it
+     * unrecoverable — by the time it reaches the comparison it is
+     * indistinguishable from a real count.
+     */
+    public function testAnUnreadableCountLeavesCustodyStateAsNull(): void
+    {
+        $at = strpos($this->code, '$owned === null');
+        self::assertNotFalse($at, 'the unreadable-count branch in custodyState() is gone');
+
+        $branch = substr($this->code, $at, 160);
+
+        self::assertStringContainsString(
+            'return null;',
+            $branch,
+            'custodyState() does not return null for an unreadable count'
+        );
+        self::assertStringNotContainsString(
+            '$owned = 0',
+            $branch,
+            'custodyState() substitutes a zero count for an unreadable one'
+        );
+    }
+
+    /**
      * The null it produces is REFUSED rather than compared.
      *
      * ⚠ A source pin on the ORDER of two statements, which is exactly as
