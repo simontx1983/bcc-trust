@@ -2,7 +2,10 @@
 /**
  * F-462: a `$wpdb` double for the REAL TokenStateRepository, plus the
  * bcc-core trait it uses. For TokenStateRepositoryTest and
- * TokenStatePoisonTest.
+ * TokenStatePoisonTest, and (H6) for the same read generalised in
+ * bcc-core's UserMetaRepository (loaded here, the REAL class):
+ * PeepSoChatPrefsTest, ChatPrefsReadFailClosedTest, ChatPrefsQueuePathTest
+ * and MessagesPrefsReadFailClosedTest.
  *
  * Load this BEFORE any stub file that brings in token-state-stubs.php (the
  * stand-in): it loads the real repository, so the stand-in's
@@ -18,7 +21,15 @@
  *   - 'error'        last_error set, last_result emptied, returns false
  *   - 'error_rows'   rows AND last_error, returns the count (an error the
  *                    return value doesn't show)
+ * $modes overrides $mode for single queries, by 0-based position (H6: a
+ * batch whose SECOND chunk fails).
  * It records every SQL string in $queries.
+ *
+ * The SELECT may name one user (`user_id = N`) or several
+ * (`user_id IN (a, b)`), and each row carries user_id, meta_key and
+ * meta_value. get_results() is core's: query(), then last_result whatever
+ * query() returned. Nothing calls it; it is there so a mutation control
+ * can swap trustedRows() for it and meet the pre-flush trap.
  */
 
 declare(strict_types=1);
@@ -26,6 +37,19 @@ declare(strict_types=1);
 namespace {
     if (!trait_exists('BCC\\Core\\Repositories\\ProbesReads', false)) {
         require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');
+    }
+    // H6: bcc-core's guarded user-meta reader, the REAL one, over this
+    // double. Required before anything asks for the class, so no test
+    // double or autoloader mapping can stand in for it.
+    if (!class_exists('BCC\\Core\\Repositories\\UserMetaRepository', false)) {
+        // bcc-core #164 moved the read itself into the ReadsMetaRows trait
+        // (shared with PostMetaRepository). Load it first when this core
+        // has it; an older core keeps the read in the class.
+        $readsMetaRows = \BCC\Trust\Tests\Support\CoreSibling::root() . '/src/Repositories/ReadsMetaRows.php';
+        if (!trait_exists('BCC\\Core\\Repositories\\ReadsMetaRows', false) && is_file($readsMetaRows)) {
+            require_once $readsMetaRows;
+        }
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/UserMetaRepository.php');
     }
     // The real class, now, so the stand-in in token-state-stubs.php is skipped.
     class_exists(\BCC\Trust\Core\Repositories\TokenStateRepository::class);
@@ -60,6 +84,8 @@ namespace {
             /** @var mixed */
             public $last_result = [];
             public string $mode = 'ok';
+            /** @var array<int, string> per-query mode, by 0-based position */
+            public array $modes = [];
             /** @var list<string> */
             public array $queries = [];
             /** @var list<array{umeta_id: int, user_id: int, meta_key: string, meta_value: string}> */
@@ -92,10 +118,11 @@ namespace {
             public function query(string $sql)
             {
                 $this->queries[] = $sql;
-                if ($this->mode === 'false_early') {
+                $mode = $this->modes[count($this->queries) - 1] ?? $this->mode;
+                if ($mode === 'false_early') {
                     return false;
                 }
-                if ($this->mode === 'error') {
+                if ($mode === 'error') {
                     $this->last_error  = 'Lost connection to MySQL server during query';
                     $this->last_result = [];
 
@@ -105,7 +132,11 @@ namespace {
                 // flush(), as core's query() does before running a query.
                 $this->last_error = '';
 
-                $userId = preg_match('/user_id = (\d+)/', $sql, $u) === 1 ? (int) $u[1] : -1;
+                $userIds = preg_match('/user_id = (\d+)/', $sql, $u) === 1
+                    ? [(int) $u[1]]
+                    : (preg_match('/user_id IN \(([^)]*)\)/', $sql, $u) === 1
+                        ? array_map('intval', explode(',', $u[1]))
+                        : []);
                 $keys   = preg_match("/meta_key IN \(([^)]*)\)/", $sql, $k) === 1
                     ? array_map(static fn(string $x): string => trim($x, " '"), explode(',', $k[1]))
                     : [];
@@ -113,7 +144,7 @@ namespace {
 
                 $out = [];
                 foreach ($this->rows as $row) {
-                    if ($row['user_id'] === $userId && in_array($row['meta_key'], $keys, true)) {
+                    if (in_array($row['user_id'], $userIds, true) && in_array($row['meta_key'], $keys, true)) {
                         $out[] = $row;
                     }
                 }
@@ -121,14 +152,28 @@ namespace {
                 $out = array_slice($out, 0, $limit);
 
                 $this->last_result = array_map(static fn(array $r): object => (object) [
+                    'user_id'    => (string) $r['user_id'],
                     'meta_key'   => $r['meta_key'],
                     'meta_value' => $r['meta_value'],
                 ], $out);
-                if ($this->mode === 'error_rows') {
+                if ($mode === 'error_rows') {
                     $this->last_error = 'Warning promoted to error';
                 }
 
                 return count($out);
+            }
+
+            /**
+             * As core: run the query and hand back last_result, ignoring
+             * what query() returned (H6 mutation controls only).
+             *
+             * @return mixed
+             */
+            public function get_results(string $sql)
+            {
+                $this->query($sql);
+
+                return $this->last_result;
             }
         }
     }
