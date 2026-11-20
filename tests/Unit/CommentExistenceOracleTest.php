@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Tests\Stubs\CommentDeleteFakes;
+use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -224,6 +225,92 @@ final class CommentExistenceOracleTest extends TestCase
             ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
             $live
         );
+    }
+
+    // ── F-461: the comment gate reads the group from the database ────
+    //
+    // Below, get_post_meta() says "no group"
+    // while the database says the post is GROUP_ID's. The gate must follow
+    // the database.
+
+    private function putThePostInTheGroupInTheDatabase(): void
+    {
+        unset(CommentDeleteFakes::$postMeta[self::PARENT_POST]);
+        CommentDeleteFakes::wpdb()->dbRows[self::PARENT_POST] = [
+            PostGroupFactsWpdb::row('peepso_group_id', (string) self::GROUP_ID),
+            PostGroupFactsWpdb::row('_bcc_post_visibility', 'members_only'),
+        ];
+    }
+
+    public function testANonMemberCannotReadAThreadTheDatabasePutsInAGroup(): void
+    {
+        $this->putThePostInTheGroupInTheDatabase();
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertSame(['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'], $result);
+        self::assertSame([], CommentDeleteFakes::$listReads, 'the thread was never read');
+    }
+
+    /**
+     * What createComment() touches after the gate (comment-permission-stubs:
+     * PeepSo's permission check allows, the Throttle records and DENIES), so a
+     * create that gets past the gate ends at bcc_rate_limited, before any write.
+     */
+    private static function loadCreateSeatbelt(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/comment-permission-stubs.php';
+        $GLOBALS['__bcc_cpr'] = ['perm' => true, 'perm_calls' => [], 'throttle_calls' => []];
+    }
+
+    public function testANonMemberCannotCommentWhereTheDatabasePutsTheThreadInAGroup(): void
+    {
+        self::loadCreateSeatbelt();
+        $this->putThePostInTheGroupInTheDatabase();
+
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
+            self::service([self::PARENT_ACT])->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello')
+        );
+        self::assertSame([], $GLOBALS['__bcc_cpr']['throttle_calls'], 'refused by the gate, before the throttle');
+    }
+
+    /** ⭐ CONTROL: the same database row with the viewer a member reads the thread. */
+    public function testAMemberStillReadsTheThreadTheDatabaseSaysIsTheirGroups(): void
+    {
+        $this->putThePostInTheGroupInTheDatabase();
+        CommentDeleteFakes::$memberships[self::VIEWER][self::GROUP_ID] = 'member';
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertTrue($result['ok'] ?? false);
+        self::assertSame([self::PARENT_POST], CommentDeleteFakes::$listReads);
+    }
+
+    /** Unreadable group facts close the thread, even an ordinary post's (which would otherwise list). */
+    public function testUnreadableGroupFactsCloseTheThread(): void
+    {
+        self::loadCreateSeatbelt();
+        unset(CommentDeleteFakes::$postMeta[self::PARENT_POST]); // an ordinary post
+        self::assertTrue(
+            self::service([self::PARENT_ACT])->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20)['ok'] ?? false,
+            'control: an ordinary visible post lists'
+        );
+        CommentDeleteFakes::$listReads = [];
+
+        CommentDeleteFakes::wpdb()->failRead = true;
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+        self::assertArrayHasKey('error', $result);
+        self::assertSame([], CommentDeleteFakes::$listReads, 'the thread was never read');
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
+            self::service([self::PARENT_ACT])->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello')
+        );
+        self::assertSame([], $GLOBALS['__bcc_cpr']['throttle_calls'], 'refused by the gate, before the throttle');
     }
 
     // ── DELETE /posts/:feed_id/comments/:comment_id ──────────────────

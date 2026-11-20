@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Tests\Support\EngagementWriteRoutes;
 use BCC\Trust\Tests\Support\GateOrder;
+use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -148,6 +149,23 @@ final class GroupInteractionGateTest extends TestCase
             'hidden'       => [self::HIDDEN_POST_ACT, self::HIDDEN_COMMENT_ACT],
             'allowlists'   => [],
         ];
+
+        // F-461: the gate reads "is this a group post" from the database
+        // (PostGroupFactsRepository), never get_post_meta(). By default the
+        // "database" agrees with the `group_of` fixture above;
+        // $this->wpdb()->dbRows overrides it.
+        $GLOBALS['wpdb'] = new PostGroupFactsWpdb(
+            static fn (int $postId, string $key): mixed => $key === 'peepso_group_id'
+                ? (string) ($GLOBALS['__bcc_gig']['group_of'][$postId] ?? '')
+                : ''
+        );
+    }
+
+    private function wpdb(): PostGroupFactsWpdb
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        self::assertInstanceOf(PostGroupFactsWpdb::class, $wpdb);
+        return $wpdb;
     }
 
     /**
@@ -641,5 +659,78 @@ final class GroupInteractionGateTest extends TestCase
     public function testCheckCommentStillAllowsAVisibleParent(): void
     {
         self::assertNull((self::GATE)::checkComment(self::USER, self::AUDIENCE_COMMENT_ACT));
+    }
+
+    // ── F-461: "is this a group post" comes from the database ───────────
+    //
+    // Below, get_post_meta() (the `group_of` fixture) says PLAIN_POST_ID has
+    // "no group", while the DATABASE says
+    // it is a members-only post in SECRET_GROUP. The gate must follow the
+    // database.
+
+    private function putThePlainPostInTheSecretGroupInTheDatabase(): void
+    {
+        $this->wpdb()->dbRows[self::PLAIN_POST_ID] = [
+            PostGroupFactsWpdb::row('peepso_group_id', (string) self::SECRET_GROUP),
+            PostGroupFactsWpdb::row('_bcc_post_visibility', 'members_only'),
+        ];
+    }
+
+    public function testReactionsFollowTheDatabasesGroupFacts(): void
+    {
+        self::assertNull((self::GATE)::check(self::USER, self::PLAIN_POST_ACT), 'control: what the cache alone describes passes');
+
+        $this->putThePlainPostInTheSecretGroupInTheDatabase();
+
+        $refused = (self::GATE)::check(self::USER, self::PLAIN_POST_ACT);
+        $unknown  = (self::GATE)::check(self::USER, self::UNKNOWN_ACT);
+        self::assertNotNull($refused);
+        self::assertNotNull($unknown);
+        self::assertSame($unknown->get_data(), $refused->get_data(), 'a secret group post, byte-identical to an unknown act');
+    }
+
+    public function testCommentStokeFollowsTheDatabasesGroupFacts(): void
+    {
+        $this->putThePlainPostInTheSecretGroupInTheDatabase();
+
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::AUDIENCE_COMMENT_ACT)));
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::PLAIN_COMMENT_ACT)),
+            'a comment act on the act-id routes is gated on its parent too'
+        );
+    }
+
+    public function testCheckPostFollowsTheDatabasesGroupFacts(): void
+    {
+        $this->putThePlainPostInTheSecretGroupInTheDatabase();
+
+        self::assertSame(
+            self::COMMENT_404,
+            self::refusal((self::GATE)::checkPost(self::USER, self::PLAIN_POST_ID, 'Comment not found.'))
+        );
+    }
+
+    /** Unreadable group facts are an unknown target, on every entry point. */
+    public function testUnreadableGroupFactsAreNotFound(): void
+    {
+        $this->wpdb()->failRead = true;
+
+        self::assertSame([404, 'bcc_not_found'], self::statusAndCode((self::GATE)::check(self::USER, self::PLAIN_POST_ACT)));
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::PLAIN_COMMENT_ACT)));
+        self::assertSame(
+            self::COMMENT_404,
+            self::refusal((self::GATE)::checkPost(self::USER, self::PLAIN_POST_ID, 'Comment not found.'))
+        );
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls'], 'refused before any membership lookup');
+    }
+
+    /** One decision, one read: the audience and membership gates share it. */
+    public function testOneGateDecisionRestsOnOneFactsRead(): void
+    {
+        $this->setMember(true);
+
+        self::assertNull((self::GATE)::check(self::USER, self::GROUP_POST_ACT));
+        self::assertSame(1, $this->wpdb()->factsReads);
     }
 }

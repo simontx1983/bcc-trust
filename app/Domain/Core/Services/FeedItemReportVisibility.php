@@ -51,6 +51,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\ProfileAccess;
 
@@ -58,6 +59,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type PostGroupFacts from PostGroupFactsRepository
+ */
 class FeedItemReportVisibility
 {
     /**
@@ -188,11 +192,19 @@ class FeedItemReportVisibility
             return false;
         }
 
-        if (!$this->groupRuleAllows($viewerId, $postId)) {
+        // F-461: the post's group facts, read ONCE for both rules below,
+        // through PostGroupFactsRepository, never get_post_meta(): a read
+        // that cannot be trusted refuses.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
             return false;
         }
 
-        return self::audienceAllows($viewerId, $actId, $postId);
+        if (!$this->groupRuleAllows($viewerId, $groupFacts)) {
+            return false;
+        }
+
+        return self::audienceAllows($viewerId, $actId, $postId, $groupFacts);
     }
 
     /**
@@ -247,7 +259,10 @@ class FeedItemReportVisibility
             return false;
         }
 
-        return $this->groupRuleAllows($viewerId, $postId);
+        // F-461: unreadable group facts are a refusal, never "no group".
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+
+        return $groupFacts !== null && $this->groupRuleAllows($viewerId, $groupFacts);
     }
 
     /**
@@ -266,14 +281,20 @@ class FeedItemReportVisibility
      * ALSO check that the post is group-tagged before letting this rescue
      * an item §F-02 refused — this method answers a group question and
      * says nothing about profile visibility.
+     *
+     * ⚠⚠ F-461: the facts come from {@see PostGroupFactsRepository}, never
+     * get_post_meta(): its read either answers or is null (refused
+     * upstream).
+     *
+     * @phpstan-param PostGroupFacts $groupFacts
      */
-    private function groupRuleAllows(int $viewerId, int $postId): bool
+    private function groupRuleAllows(int $viewerId, array $groupFacts): bool
     {
-        $groupRaw   = get_post_meta($postId, 'peepso_group_id', true);
-        $visibility = (string) get_post_meta($postId, '_bcc_post_visibility', true);
+        $groupRaw   = $groupFacts['group_raw'];
+        $visibility = $groupFacts['visibility'];
 
         // Not group-tagged at all: an ordinary global-feed post.
-        if ($groupRaw === '' || $groupRaw === false) {
+        if ($groupRaw === '') {
             return true;
         }
 
@@ -294,7 +315,7 @@ class FeedItemReportVisibility
         // fail-closed posture as `isVisibleGlobally()`. A refusal is not
         // final: it falls through to the group's own gate below, so a
         // MEMBER of the now-secret group still reads their own post.
-        if ($visibility === self::GLOBAL_VISIBILITY && self::syndicationAllows($postId)) {
+        if ($visibility === self::GLOBAL_VISIBILITY && self::syndicationAllows($groupFacts)) {
             return true;
         }
 
@@ -343,17 +364,28 @@ class FeedItemReportVisibility
      * @param int $actId The act whose `act_access` the rule reads. For a
      *        COMMENT that is its PARENT post's act, never the comment's
      *        own — a comment carries no audience of its own.
+     * @param array<string, mixed>|null $groupFacts `$postId`'s facts when
+     *        the caller already read them for its own group gate, so one
+     *        decision rests on ONE read. Null reads them here.
+     * @phpstan-param PostGroupFacts|null $groupFacts
      */
-    public static function audienceAllows(int $viewerId, int $actId, int $postId): bool
+    public static function audienceAllows(int $viewerId, int $actId, int $postId, ?array $groupFacts = null): bool
     {
         if ($actId <= 0 || $postId <= 0) {
+            return false;
+        }
+
+        // F-461: through PostGroupFactsRepository, never get_post_meta(): a
+        // read that cannot be trusted refuses.
+        $groupFacts ??= PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
             return false;
         }
 
         // Group-tagged: the group's rule governs. `(int) > 0` matches the
         // test CommentService::gateForParent uses, so a stored '0' is
         // treated as NOT group-tagged by both and gets the stricter path.
-        if ((int) get_post_meta($postId, 'peepso_group_id', true) > 0) {
+        if ((int) $groupFacts['group_raw'] > 0) {
             return true;
         }
 
@@ -389,18 +421,21 @@ class FeedItemReportVisibility
      * Reads the MULTI-VALUE form of `peepso_group_id`, as bcc-core does —
      * a post can carry more than one group id, and the single-value read
      * used for the gate below would silently consider only the first.
+     *
+     * ⚠ F-461: from the same {@see PostGroupFactsRepository} read as the
+     * group gate, never get_post_meta(): an empty list returns true below,
+     * so it must be the database's own answer.
+     *
+     * @phpstan-param PostGroupFacts $groupFacts
      */
-    private static function syndicationAllows(int $postId): bool
+    private static function syndicationAllows(array $groupFacts): bool
     {
-        $groupIds = array_values(array_filter(
-            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
-            static fn(int $id): bool => $id > 0
-        ));
+        $groupIds = $groupFacts['group_ids'];
         if ($groupIds === []) {
             return true;
         }
 
-        $privacyAtPost = get_post_meta($postId, GroupSyndicationGate::META_PRIVACY_AT_POST, true);
+        $privacyAtPost = $groupFacts['privacy_at_post'];
         if (GroupSyndicationGate::madeWhileNonOpen($privacyAtPost)) {
             // A deliberate non-open syndication passes whatever the
             // group's state is now.

@@ -165,6 +165,7 @@ return array(
     'BCC\\Trust\\Core\\Repositories\\PhotoAltRepository' => $baseDir . '/app/Domain/Core/Repositories/PhotoAltRepository.php',
     'BCC\\Trust\\Core\\Repositories\\PhotoRepository' => $baseDir . '/app/Domain/Core/Repositories/PhotoRepository.php',
     'BCC\\Trust\\Core\\Repositories\\PostEngagementRepository' => $baseDir . '/app/Domain/Core/Repositories/PostEngagementRepository.php',
+    'BCC\\Trust\\Core\\Repositories\\PostGroupFactsRepository' => $baseDir . '/app/Domain/Core/Repositories/PostGroupFactsRepository.php',
     'BCC\\Trust\\Core\\Repositories\\PostReachRepository' => $baseDir . '/app/Domain/Core/Repositories/PostReachRepository.php',
     'BCC\\Trust\\Core\\Repositories\\PostShortcodeRepository' => $baseDir . '/app/Domain/Core/Repositories/PostShortcodeRepository.php',
     'BCC\\Trust\\Core\\Repositories\\PushSubscriptionRepository' => $baseDir . '/app/Domain/Core/Repositories/PushSubscriptionRepository.php',
