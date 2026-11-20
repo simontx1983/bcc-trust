@@ -20,6 +20,12 @@
 
 declare(strict_types=1);
 
+namespace {
+    // F-462: JwtToken reads token state through TokenStateRepository; these
+    // suites test token behaviour, so they get its stand-in (see the file).
+    require_once __DIR__ . '/token-state-stubs.php';
+}
+
 namespace BCC\Core\Permissions {
     // F-305: every auth response carries `suspended`
     // (AuthSupport::resolveSuspended). $GLOBALS['__bcc_susp'] maps user id →

@@ -112,17 +112,34 @@ final class MemberSearchCandidates
         // make every caller a login probe (F-302 review). Such a member is
         // still found by their handle below. One primed batch, then cache
         // reads; the login is compared, never searched.
+        //
+        // ⚠ F-456: wpdb clears `last_error` at the start of EVERY query, so a
+        // single check after this whole step saw only its LAST query.
+        // cache_users() runs two (the usermeta prime, then the users rows),
+        // and get_userdata() may run one per id, so a failed users prime, or a
+        // failed row read for any id but the last, slipped through and dropped
+        // candidates silently. Each read is checked right after it runs:
+        //   - after cache_users(): its users-row query, the last of its two.
+        //     A failed usermeta prime is not checked; nothing below reads
+        //     user meta (display_name and user_login are wp_users columns);
+        //   - after each get_userdata() that answers false: an unreadable row
+        //     answers false too, and only a genuine miss leaves no error.
         if ($byName !== []) {
             $nameIds = array_map('intval', $byName);
             self::clearReadErrorIf($throwOnReadFailure);
             cache_users($nameIds);
-            $byName = array_values(array_filter($nameIds, static function (int $id): bool {
+            self::throwIfReadFailed($throwOnReadFailure, 'user rows prime');
+            // No reset before each get_userdata(): a row it has to read is a
+            // query, which clears last_error itself, and every earlier read
+            // was already checked.
+            $byName = array_values(array_filter($nameIds, static function (int $id) use ($throwOnReadFailure): bool {
                 $user = get_userdata($id);
-                return $user !== false
-                    && strcasecmp(trim((string) $user->display_name), trim((string) $user->user_login)) !== 0;
+                if ($user === false) {
+                    self::throwIfReadFailed($throwOnReadFailure, 'user row read');
+                    return false; // a genuine miss: no such user
+                }
+                return strcasecmp(trim((string) $user->display_name), trim((string) $user->user_login)) !== 0;
             }));
-            // A user row that could not be read drops that candidate silently.
-            self::throwIfReadFailed($throwOnReadFailure, 'display name check');
         }
 
         $byHandle = [];

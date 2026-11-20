@@ -19,6 +19,12 @@
 declare(strict_types=1);
 
 namespace {
+    // F-462: JwtToken reads token state through TokenStateRepository; these
+    // suites test token behaviour, so they get its stand-in (see the file).
+    require_once __DIR__ . '/token-state-stubs.php';
+}
+
+namespace {
     if (!class_exists('WP_User', false)) {
         final class WP_User
         {

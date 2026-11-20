@@ -153,7 +153,20 @@ final class Envelope
             && ($data['error']['code'] ?? null) === 'bcc_unauthorized'
         ) {
             $failure = \BCC\Trust\Core\Support\BearerAuth::presentedTokenFailure();
-            if ($failure !== null) {
+            if ($failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_UNAVAILABLE) {
+                // F-462: the token's revocation state could not be read. It is
+                // neither expired nor invalid, and saying "invalid" would make the
+                // app sign the member out (#673), so it is the same 503 that
+                // BearerAuth::refuseUnknownTokenState() gives at the door (this
+                // catches a request that reached a handler without that check,
+                // such as an internal dispatch).
+                $data['error']['code']    = 'bcc_unavailable';
+                $data['error']['message'] = 'Your session could not be checked just now. Please try again.';
+                $data['error']['status']  = 503;
+                $response->set_data($data);
+                $response->set_status(503);
+                $response->header('Cache-Control', 'private, no-store');
+            } elseif ($failure !== null) {
                 $expired = $failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_EXPIRED;
                 $data['error']['code']    = $expired ? 'bcc_token_expired' : 'bcc_token_invalid';
                 $data['error']['message'] = $expired
