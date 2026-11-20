@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
+use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\EdgeRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
@@ -12,7 +13,9 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\Vote\ReviewVisibilityScoreSync;
 use BCC\Trust\Core\Services\VoteService;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -205,6 +208,66 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
         (new HiddenActivityRepository())->remove(self::ACT_ID);
         $this->sync()->onVisibilityChanged(self::ACT_ID);
         self::assertSame(['weight' => 2.5, 'vote_count' => 1], $this->edge(), 'restoring (through the listener) brings it back');
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function unreadableReads(): iterable
+    {
+        yield 'the read errors'               => ['failQueriesMatching'];
+        yield 'the read bails before flush()' => ['failSilentlyMatching'];
+    }
+
+    /**
+     * The sum decides a write (a zero weight deletes the edge), so an
+     * unreadable sum is refused before anything is written, under both an
+     * error and wpdb's pre-flush() bail. Rationale: M7 (private tracker).
+     */
+    #[DataProvider('unreadableReads')]
+    public function testAnUnreadableSumNeverDeletesTheEdge(string $fault): void
+    {
+        global $wpdb;
+        $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        self::assertSame(['weight' => 2.5, 'vote_count' => 1], $this->edge(), 'precondition');
+
+        $thrown = null;
+        $wpdb->{$fault} = '/SUM\( v\.weight \)/';
+        try {
+            $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        } catch (RepositoryReadFailure $e) {
+            $thrown = $e;
+        } finally {
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertInstanceOf(RepositoryReadFailure::class, $thrown, 'an unreadable sum is refused, not read as zero');
+        self::assertSame(['weight' => 2.5, 'vote_count' => 1], $this->edge(), 'and the edge is untouched');
+    }
+
+    /**
+     * An unreadable table probe keeps the hidden-review exclusion, so the
+     * edge still withholds a hidden review's trust.
+     */
+    #[DataProvider('unreadableReads')]
+    public function testAnUnreadableTableProbeStillWithholdsAHiddenReviewsTrust(string $fault): void
+    {
+        global $wpdb;
+        $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        self::assertNotNull($this->edge(), 'precondition');
+        (new HiddenActivityRepository())->add(self::ACT_ID, 0, 'autohide_threshold');
+
+        TableRegistry::flushExistenceCache();
+        $wpdb->{$fault} = "/^SHOW TABLES LIKE '[^']*(peepso_activities|bcc_hidden_activities)'$/";
+        try {
+            $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+        } finally {
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertNull($this->edge(), 'the hidden review confers no trust');
     }
 
     private function sync(): ReviewVisibilityScoreSync
