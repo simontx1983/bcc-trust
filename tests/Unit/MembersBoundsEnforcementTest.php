@@ -90,7 +90,7 @@ final class MembersBoundsEnforcementTest extends TestCase
     /** @return iterable<string, array{string}> */
     public static function workThatMustComeLater(): iterable
     {
-        yield 'the global type-count query' => ['getGlobalOwnedPageUserCountsByType'];
+        yield 'the type-count queries'      => ['MemberDirectoryTypeCounts'];
         yield 'the member prefetcher'       => ['Prefetcher'];
         // ⚠ `PeepSoUserSearch`, not `WP_User_Query`. The directory was
         // re-routed through PeepSo's privacy-aware search, so the bare
