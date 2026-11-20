@@ -21,6 +21,8 @@ namespace BCC\Trust\Core\Repositories;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -28,6 +30,8 @@ if (!defined('ABSPATH')) {
 
 final class PostShortcodeRepository
 {
+    use GuardsReadFailures;
+
     /** Shortcode length — locked; the resolver route regex ({8}) and the
      *  frontend route both encode it. */
     public const LENGTH = 8;
@@ -149,6 +153,15 @@ final class PostShortcodeRepository
      * default collation — a case-variant URL resolves to the same
      * post, which is the forgiving (and safe) behavior since case
      * variants can never belong to different rows.
+     *
+     * ⚠ F-438: A LOOKUP THAT DID NOT RUN THROWS, never null. Null is "no
+     * such code", which the endpoint answers 404 ("this post does not
+     * exist"); `get_var()` used to give the same null on a failed query.
+     * The endpoint answers the throw with its retryable 503. The same holds
+     * for the table check before it: a SHOW TABLES that failed is not "no
+     * table".
+     *
+     * @throws RepositoryReadFailure when the lookup, or the table check before it, did not run
      */
     public function resolveActId(string $shortId): ?int
     {
@@ -158,14 +171,24 @@ final class PostShortcodeRepository
 
         global $wpdb;
         $table = TableRegistry::postShortcodes();
+        self::clearReadError();
         if (!TableRegistry::exists($table)) {
+            // Answered from the memo or the cache, the check runs no query
+            // and leaves the error clean; a failed SHOW TABLES does not.
+            self::guardReadOrThrow(__FUNCTION__ . ': table check');
             return null;
         }
 
-        $actId = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT act_id FROM {$table} WHERE short_id = %s LIMIT 1",
             $shortId
-        ));
+        );
+        if (!is_string($sql)) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'prepare() returned no query');
+        }
+
+        $rows  = self::runRead($sql, __FUNCTION__, true);
+        $actId = isset($rows[0]) && is_object($rows[0]) ? ($rows[0]->act_id ?? null) : null;
 
         return is_numeric($actId) && (int) $actId > 0 ? (int) $actId : null;
     }

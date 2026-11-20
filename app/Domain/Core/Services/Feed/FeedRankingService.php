@@ -39,6 +39,7 @@ use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
+use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -158,6 +159,14 @@ final class FeedRankingService
         int $limit = self::HOT_WARM_LIMIT,
         int $viewerId = 0
     ): array {
+        // F-455: a signed-in reader's block lists are read FIRST, so an
+        // unreadable block table answers 503 whatever the page holds. The
+        // exact filter below keeps its fail-closed empty page for the moment
+        // the same table fails after answering this (row-dependent: it
+        // answers as if the page were empty). The anonymous reader (0)
+        // reads no blocks.
+        self::blockedEitherWayOrThrow($viewerId);
+
         $payload = $this->hotFeedPayload($cursor, $limit);
 
         // ⚠⚠ PER-VIEWER FILTERS, APPLIED AFTER THE SHARED CACHE AND NEVER
@@ -357,7 +366,9 @@ final class FeedRankingService
     private function buildHotFeed(?string $cursor, int $limit): array
     {
         $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden   = $this->hiddenRepo->getAllHiddenIds();
+        // F-438: a hidden list that could not be read throws (503), and
+        // nothing is cached: hotFeedPayload() writes only what this returns.
+        $hidden   = $this->hiddenIdsOrThrow();
 
         // ⚠ NO RESTRICTED-GROUP LIST IS COMPUTED HERE, DELIBERATELY.
         //
@@ -445,8 +456,9 @@ final class FeedRankingService
      *     the subset relation holds; the hot feed has no viewer to block for.
      *     MINUS the viewer themself (F-269: an author always sees their own
      *     posts) — the same own-posts widening noted for §F-02 below.
-     *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
-     *     (§K1-C moderation hide) — IDENTICAL call.
+     *   - same `$hidden` set: $this->hiddenIdsOrThrow() (§K1-C moderation
+     *     hide, getAllHiddenIds()) — IDENTICAL call; the tag feed reaches it
+     *     through viewerExclusions().
      *   - same restricted-group posture: NEITHER method computes one, because
      *     `$excludedGroupIds` is a documented NO-OP in bcc-core. Both used to
      *     call `self::resolveRestrictedGroupIds(0)` and pass the result; both
@@ -574,12 +586,11 @@ final class FeedRankingService
         // buys is that a tag dominated by an author the viewer blocked no
         // longer reads back as an empty page (the exact filter below used to
         // be the only block filter on this surface).
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-        $hidden   = $this->hiddenRepo->getAllHiddenIds();
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        $exclusions = $this->viewerExclusions($viewerId);
+        $excluded   = $exclusions->excludedAuthorIds();
+        $hidden     = $exclusions->hiddenActivityIds();
 
         // §F-02 per-post visibility, enforced UNCONDITIONALLY here too —
         // deliberately NOT through postVisibilityArgs(), so no admin exemption
@@ -646,7 +657,7 @@ final class FeedRankingService
      *
      * @param 'for_you'|'following'|'signals'|'groups' $scope
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
-     * @throws ActivityReadFailedException when the activity or membership read did not run
+     * @throws ActivityReadFailedException when an exclusion list, the activity or the membership read did not run
      */
     public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20): array
     {
@@ -658,21 +669,21 @@ final class FeedRankingService
             return $this->getMyGroupsFeed($viewerId, $cursor, $limit);
         }
 
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            // §K1 mutual-invisibility: hide both directions of any
-            // block this viewer is part of. Users this viewer blocks
-            // disappear from the feed; users who blocked this viewer
-            // also disappear (so they can't quietly haunt the For You
-            // tab via shared-follow paths).
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-
+        // The §O4.1 caution list, plus §K1 mutual-invisibility: hide both
+        // directions of any block this viewer is part of. Users this viewer
+        // blocks disappear from the feed; users who blocked this viewer also
+        // disappear (so they can't quietly haunt the For You tab via
+        // shared-follow paths).
+        //
         // §K1 Phase C — moderation hide. Cached + bounded; merged at the
         // act_id level (not author level) so a single bad post is hidden
         // without suppressing the author's other content.
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        //
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        $exclusions = $this->viewerExclusions($viewerId);
+        $excluded   = $exclusions->excludedAuthorIds();
+        $hidden     = $exclusions->hiddenActivityIds();
 
         // §4.7.x main-feed leak gate — drop posts in closed/secret/
         // NFT-gated groups the viewer is not a member of. Subtractive:
@@ -781,12 +792,14 @@ final class FeedRankingService
             }
         }
 
-        $blockExclusions = self::mergeExclusions(
-            PeepSoBlockRepository::getBlockedIds($viewerId),
-            PeepSoBlockRepository::getBlockerIds($viewerId)
-        );
-        $caution = $this->cautionListExceptViewer($viewerId);
-        $hidden  = $this->hiddenRepo->getAllHiddenIds();
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        // The caution list stays apart here: it is the SOFT exclusion, lifted
+        // in the rooms that lift it.
+        $exclusions      = $this->viewerExclusions($viewerId);
+        $blockExclusions = $exclusions->blockedAuthorIds();
+        $caution         = $exclusions->cautionedAuthorIds();
+        $hidden          = $exclusions->hiddenActivityIds();
 
         // ⚠ F-54: EXACT mutual-block filter over each page's authors; the
         // block list above is only the cheap pre-filter. F-297: a page it
@@ -843,6 +856,43 @@ final class FeedRankingService
     }
 
     /**
+     * What $viewerId's reads exclude before any post is read: the §O4.1
+     * caution list (without the viewer), §K1 blocks both ways, and the §K1-C
+     * moderation-hidden list. Every per-viewer surface here starts with it.
+     *
+     * ⚠ F-438 / F-455: A LIST THAT COULD NOT BE READ THROWS, so the route
+     * answers 503 instead of reading without that filter. Both block reads
+     * used to answer [] on a failed query ("blocks nobody"), so the SQL
+     * pre-filter silently dropped every block. The exact per-page check
+     * (F-54) then emptied the page: a list feed answered 200 with no items
+     * and the permalink 404'd, telling the reader the post or the feed was
+     * empty. A hidden list with no last-good copy threw RepositoryException,
+     * which no route caught: a 500.
+     *
+     * ⚠ THE SAME ANSWER FOR EVERY ID. Nothing here depends on which post or page is
+     * asked for, so the 503 is the same for an id that exists and one that
+     * doesn't. Checks that run AFTER a row is read keep answering as if the
+     * row were not there (404, or an empty page), never 503 (security's rule
+     * for /feed/:id; see visibleActivity() and fetchPastBlockedPages()).
+     *
+     * PUBLIC so a caller that must answer "unavailable" before its own
+     * lookup can probe first and pass the result on to getActivityById():
+     * the shortcode permalink (so every code gets the same answer) and a
+     * repost's root check.
+     *
+     * @throws ActivityReadFailedException when a block list or the moderation-hidden list could not be read
+     */
+    public function viewerExclusions(int $viewerId): ViewerExclusions
+    {
+        return new ViewerExclusions(
+            $viewerId,
+            $this->cautionListExceptViewer($viewerId),
+            self::blockedEitherWayOrThrow($viewerId),
+            $this->hiddenIdsOrThrow()
+        );
+    }
+
+    /**
      * Single-activity permalink (post-detail). Same visibility gates as
      * `getFeed()` for the act-level/author-level channels (§O4.1
      * shadow-limit, §K1 mutual block, §K1 Phase C moderation hide) —
@@ -866,12 +916,17 @@ final class FeedRankingService
      * implements it, and `getGroupFeed()` for the matching room-side
      * carve-out. The two are deliberately consistent now; change both.
      *
+     * @param ViewerExclusions|null $exclusions this viewer's lists, when the
+     *        caller already probed them ({@see viewerExclusions()}); null reads
+     *        them here. One built for another viewer is ignored and re-read.
+     *        APPENDED, so an older bcc-trust caller is unaffected.
      * @return array<string, mixed>|null
+     * @throws ActivityReadFailedException when an exclusion list or the post read did not run
      */
-    public function getActivityById(int $actId, int $viewerId): ?array
+    public function getActivityById(int $actId, int $viewerId, ?ViewerExclusions $exclusions = null): ?array
     {
         // The permalink's viewer IS the request's user: the exemption is theirs.
-        $item = $this->visibleActivity($actId, $viewerId, null);
+        $item = $this->visibleActivity($actId, $viewerId, null, $exclusions);
         if ($item === null) {
             return null;
         }
@@ -915,16 +970,27 @@ final class FeedRankingService
      * getActivityById() and canView(), so the two cannot disagree. See
      * getActivityById() for what each gate is.
      *
+     * F-438: the lists are read first, through viewerExclusions(), and one
+     * that could not be read throws (503) before the post is looked up, so
+     * the answer cannot depend on the id. Every check after the read answers
+     * null (the same 404 as a missing id) when it cannot run: the F-54 exact
+     * block check, the §F-02 and group second look, and the F-451 room
+     * membership.
+     *
      * @param bool|null $viewerIsExempt the viewer's admin exemption; null =
      *        the current user's (only when the viewer is the request's user)
      * @return array<string, mixed>|null
+     * @throws ActivityReadFailedException when an exclusion list or the post read did not run
      */
-    private function visibleActivity(int $actId, int $viewerId, ?bool $viewerIsExempt): ?array
+    private function visibleActivity(int $actId, int $viewerId, ?bool $viewerIsExempt, ?ViewerExclusions $exclusions = null): ?array
     {
-        $caution  = $this->cautionListExceptViewer($viewerId);
-        $blocked  = $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [];
-        $blockers = $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : [];
-        $hidden   = $this->hiddenRepo->getAllHiddenIds();
+        // A caller's probe is reused only when it was read for THIS viewer:
+        // another viewer's lists would apply their blocks and miss this one's.
+        if ($exclusions === null || $exclusions->viewerId() !== $viewerId) {
+            $exclusions = $this->viewerExclusions($viewerId);
+        }
+        $caution = $exclusions->cautionedAuthorIds();
+        $hidden  = $exclusions->hiddenActivityIds();
 
         // §F-02 — load-bearing HERE above all. A permalink that served
         // what the feed withholds is the whole reason bcc-core puts this
@@ -935,7 +1001,7 @@ final class FeedRankingService
         $item = $this->permalinkRead(
             $actId,
             $viewerId,
-            self::mergeExclusions($caution, $blocked, $blockers),
+            $exclusions->excludedAuthorIds(),
             $hidden,
             $friendIds,
             $enforceF02
@@ -959,7 +1025,7 @@ final class FeedRankingService
             $lifted = $this->permalinkRead(
                 $actId,
                 $viewerId,
-                self::mergeExclusions($blocked, $blockers),
+                $exclusions->blockedAuthorIds(),
                 $hidden,
                 $friendIds,
                 $enforceF02
@@ -985,7 +1051,11 @@ final class FeedRankingService
         //
         // ⚠ A filter whose OWN read fails also lands here as a 404, not the
         // F-275 503: the block read and the announcement page read fail
-        // closed by dropping. Only the activity read above throws.
+        // closed by dropping. Only the reads BEFORE the post throw: the
+        // exclusion lists (F-438, viewerExclusions()) and the activity read.
+        // A check here is reached only for a post that exists and passed
+        // every gate above, so it answers exactly as a missing id does
+        // (security, F-438).
         if (self::dropFilteredItems([$item], $viewerId) === []) {
             return null;
         }
@@ -1209,13 +1279,11 @@ final class FeedRankingService
      */
     public function getActivityForAuthor(int $authorId, int $viewerId, ?string $cursor = null, int $limit = 20): array
     {
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        $exclusions = $this->viewerExclusions($viewerId);
+        $excluded   = $exclusions->excludedAuthorIds();
+        $hidden     = $exclusions->hiddenActivityIds();
 
         // §4.7.x author-wall leak gate — same shape as the main feed.
         // A wall is a one-author slice of the same activity stream, so
@@ -1376,13 +1444,11 @@ final class FeedRankingService
      */
     public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
     {
-        $excluded = self::mergeExclusions(
-            $this->cautionListExceptViewer($viewerId),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
-
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        $exclusions = $this->viewerExclusions($viewerId);
+        $excluded   = $exclusions->excludedAuthorIds();
+        $hidden     = $exclusions->hiddenActivityIds();
 
         // §F-02 per-post visibility. A page stream is keyed on the post
         // marker, not on who owns the page, so it carries posts by
@@ -1457,12 +1523,10 @@ final class FeedRankingService
 
         // Block + blocker exclusions apply in EVERY feed surface — a
         // personal block relationship must hold even inside a shared group.
-        $blockExclusions = $viewerId > 0
-            ? self::mergeExclusions(
-                PeepSoBlockRepository::getBlockedIds($viewerId),
-                PeepSoBlockRepository::getBlockerIds($viewerId)
-            )
-            : [];
+        // F-438 / F-455: a list that could not be read throws (503), never
+        // an unfiltered or silently emptied page; see viewerExclusions().
+        $exclusions      = $this->viewerExclusions($viewerId);
+        $blockExclusions = $exclusions->blockedAuthorIds();
 
         // §O4.1 reputation shadow-limit (caution/risky authors) is a
         // PUBLIC-FLOOR mechanism. Inside an NFT holder group the on-chain
@@ -1480,12 +1544,9 @@ final class FeedRankingService
 
         $excluded = $isNftGroup
             ? $blockExclusions
-            : self::mergeExclusions(
-                $this->cautionListExceptViewer($viewerId),
-                $blockExclusions
-            );
+            : $exclusions->excludedAuthorIds();
 
-        $hidden = $this->hiddenRepo->getAllHiddenIds();
+        $hidden = $exclusions->hiddenActivityIds();
 
         // Per-post visibility scope. Non-members ($publicOnly === true) may
         // only read posts marked `public_group` / `public_all`; null means
@@ -1712,9 +1773,11 @@ final class FeedRankingService
      * people simply does not get the 501st excluded, and sees their posts.
      * There is not even a way to tell "exactly 500" from "500 and more".
      *
-     * ⚠ AND THEY FAIL OPEN ON A DB ERROR. `$wpdb->get_col()` never
+     * ⚠ AND THEY FAILED OPEN ON A DB ERROR. `$wpdb->get_col()` never
      * returns null; a failed query returns `[]`, which reads as "blocks
      * nobody" — so an unreadable block table showed every blocked author.
+     * (F-455: the pre-filter now reads their OrUnknown twins and throws,
+     * see blockedEitherWayOrThrow().)
      *
      * ⭐ THE CAP IS WHAT MOVES, AND THAT IS THE WHOLE FIX. Asking "which
      * of THESE authors is blocked" bounds the question by PAGE SIZE (at most
@@ -1731,6 +1794,14 @@ final class FeedRankingService
      * An empty feed on a DB fault is ugly, safe, and self-correcting on the
      * next request — and in practice the feed query itself is unlikely to
      * have survived whatever broke this one.
+     *
+     * ⚠ F-455: AN OUTAGE NO LONGER REACHES THIS. The pre-filter's block
+     * reads run first and throw (503) before any page is read. What is left
+     * here is a table that fails between those reads and this one, and it
+     * stays an empty page (a 404 on the permalink), never a 503: this check
+     * only runs when the page HAD posts, so it answers as if they were not
+     * there (security, F-438 / F-455). A test pins the empty page, never
+     * the unfiltered one.
      *
      * ⚠ CHUNKED, deliberately. `getMutuallyBlockedSetOrUnknown()` caps its
      * own candidate list, and the defect being fixed here IS a silent cap,
@@ -1922,6 +1993,63 @@ final class FeedRankingService
             }
         }
         return array_keys($set);
+    }
+
+    /**
+     * §K1 mutual invisibility: everyone $viewerId blocks, and everyone who
+     * blocks $viewerId, for the SQL pre-filter. The anonymous viewer (0)
+     * blocks no one and reads nothing.
+     *
+     * ⚠ F-455: bcc-core's OrUnknown readers, because the old getBlockedIds()
+     * / getBlockerIds() answer [] on a failed read, which drops every block
+     * from the pre-filter. A null (the read did not run) throws, before any
+     * page or post is read, so every surface answers the same 503 whatever
+     * it would have held.
+     *
+     * @return list<int>
+     * @throws ActivityReadFailedException when either block list could not be read
+     */
+    private static function blockedEitherWayOrThrow(int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return [];
+        }
+
+        $blocked  = PeepSoBlockRepository::getBlockedIdsOrUnknown($viewerId);
+        $blockers = PeepSoBlockRepository::getBlockerIdsOrUnknown($viewerId);
+        if ($blocked === null || $blockers === null) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: the viewer\'s block lists could not be read. An empty list here is NOT "blocks nobody".'
+            );
+        }
+
+        return self::mergeExclusions($blocked, $blockers);
+    }
+
+    /**
+     * The §K1-C moderation-hidden act ids, or a throw the routes answer
+     * with 503.
+     *
+     * getAllHiddenIds() already serves its last-good list when a read fails,
+     * and throws RepositoryException only when it has none. No route caught
+     * that, so it was a 500 (F-438: the frontend replaced the whole page with
+     * its error screen). It is now the read-failure every feed route maps to
+     * a retryable 503.
+     *
+     * @return list<int>
+     * @throws ActivityReadFailedException when the list could not be read and no last-good copy exists
+     */
+    private function hiddenIdsOrThrow(): array
+    {
+        try {
+            return $this->hiddenRepo->getAllHiddenIds();
+        } catch (RepositoryException $e) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: the moderation-hidden list could not be read, and no last-good copy exists.',
+                0,
+                $e
+            );
+        }
     }
 
     /**

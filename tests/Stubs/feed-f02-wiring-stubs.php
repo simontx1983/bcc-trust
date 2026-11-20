@@ -93,6 +93,19 @@ namespace {
         ];
     }
 
+    /**
+     * F-455: `feed_rows` (list of rows, default none), the page a list read
+     * answers. Empty unless a test opts in, as every other suite expects.
+     *
+     * @return list<array<string, mixed>>
+     */
+    function bcc_f02feed_rows(): array
+    {
+        $rows = $GLOBALS['__bcc_f02feed']['feed_rows'] ?? [];
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
+
     /** Record one forwarded call's §F-02 arguments. */
     function bcc_f02feed_record(string $method, int $viewer, $friends, $enforce, $defer = false): void
     {
@@ -219,7 +232,9 @@ namespace BCC\Core\Feed {
 
             \bcc_f02feed_record($label, $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
-            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+            // F-455: `feed_rows` (opt-in, default none) gives the page rows,
+            // so the exact block check after the read has authors to check.
+            return ['items' => \bcc_f02feed_rows(), 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
         /** @return array<string, mixed>|null */
@@ -286,7 +301,7 @@ namespace BCC\Core\Feed {
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
-            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+            return ['items' => \bcc_f02feed_rows(), 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
@@ -312,18 +327,44 @@ namespace BCC\Core\Feed {
 namespace BCC\Core\Repositories {
     final class PeepSoBlockRepository
     {
-        /** @return list<int> */
-        public static function getBlockedIds(int $userId): array
-        {
-            unset($userId);
+        // ⚠ F-455: NO getBlockedIds() / getBlockerIds() here. They answer []
+        // on a failed read, and the feed must never call them again, so a
+        // call is a fatal in these suites rather than a silent pass.
 
-            return $GLOBALS['__bcc_f02feed']['blocked'] ?? [];
+        /**
+         * `blocked` (list<int>, default none): who the viewer blocks;
+         * `blocked_by_viewer` (viewer id => list<int>) overrides it per viewer.
+         * `blocked_fails` (bool): the read did not run (null). Every read is
+         * logged in `block_reads`.
+         *
+         * @return list<int>|null
+         */
+        public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
+        {
+            unset($limit);
+            $GLOBALS['__bcc_f02feed']['block_reads'][] = ['blocked', $blockerId];
+            if (!empty($GLOBALS['__bcc_f02feed']['blocked_fails'])) {
+                return null;
+            }
+
+            return $GLOBALS['__bcc_f02feed']['blocked_by_viewer'][$blockerId]
+                ?? $GLOBALS['__bcc_f02feed']['blocked']
+                ?? [];
         }
 
-        /** @return list<int> */
-        public static function getBlockerIds(int $userId): array
+        /**
+         * `blockers` (list<int>, default none): who blocks the viewer.
+         * `blockers_fails` (bool): the read did not run (null).
+         *
+         * @return list<int>|null
+         */
+        public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
         {
-            unset($userId);
+            unset($limit);
+            $GLOBALS['__bcc_f02feed']['block_reads'][] = ['blockers', $blockedId];
+            if (!empty($GLOBALS['__bcc_f02feed']['blockers_fails'])) {
+                return null;
+            }
 
             return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
@@ -331,12 +372,17 @@ namespace BCC\Core\Repositories {
         /**
          * `mutual_blocked` (list<int> author ids, default none): the
          * authors the viewer and they have blocked between them.
+         * `mutual_fails` (bool): the exact check did not run (null), the
+         * F-455 race after the pre-filter's reads succeeded.
          *
          * @return array<int, true>|null
          */
         public static function getMutuallyBlockedSetOrUnknown(int $viewerId, array $candidateIds): ?array
         {
             unset($viewerId);
+            if (!empty($GLOBALS['__bcc_f02feed']['mutual_fails'])) {
+                return null;
+            }
             $set = [];
             foreach ($GLOBALS['__bcc_f02feed']['mutual_blocked'] ?? [] as $id) {
                 if (in_array((int) $id, array_map('intval', $candidateIds), true)) {
@@ -364,6 +410,12 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getAllHiddenIds(): array
         {
+            // F-438: `hidden_throws` (bool): the read failed with no
+            // last-good list, which the real repository throws for.
+            if (!empty($GLOBALS['__bcc_f02feed']['hidden_throws'])) {
+                throw new \BCC\Trust\Core\Exceptions\RepositoryException('hidden list unreadable, no last-good copy');
+            }
+
             // F-451: `hidden` (list<int> act ids, default none).
             $hidden = $GLOBALS['__bcc_f02feed']['hidden'] ?? [];
 
@@ -415,6 +467,22 @@ namespace BCC\Trust\Core\Services {
             $ctx = $GLOBALS['__bcc_f02feed']['group_contexts'][$groupId] ?? null;
 
             return $ctx instanceof \BCC\Trust\Core\ValueObjects\GroupContext ? $ctx : null;
+        }
+
+        /**
+         * F-438: "My Groups" asks each of the viewer's rooms at once.
+         *
+         * @param list<int> $groupIds
+         * @return array<int, \BCC\Trust\Core\ValueObjects\GroupContext|null>
+         */
+        public function forManyGroups(array $groupIds): array
+        {
+            $out = [];
+            foreach ($groupIds as $groupId) {
+                $out[(int) $groupId] = $this->forGroup((int) $groupId);
+            }
+
+            return $out;
         }
     }
 }

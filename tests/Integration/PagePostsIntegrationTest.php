@@ -116,7 +116,7 @@ final class PagePostsIntegrationTest extends TestCase
         // needs it — dropping a shared table is the sabotage
         // BlogTabGroupVisibilityIntegrationTest::tearDown() documents at
         // length. An empty leftover table costs nothing.
-        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}peepso_activities, {$wpdb->prefix}peepso_blocks");
+        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}peepso_activities, {$wpdb->prefix}peepso_blocks, {$wpdb->prefix}bcc_post_shortcodes");
         $wpdb->query(
             "ALTER TABLE {$wpdb->posts}
                 DROP COLUMN post_author,
@@ -733,6 +733,185 @@ final class PagePostsIntegrationTest extends TestCase
         );
     }
 
+    // ── F-438 / F-455: an exclusion list that could not be read ─────────
+    //
+    // The same real wiring, with the fault on the viewer's exclusion lists
+    // instead of the activity read. Each list is read BEFORE any post or
+    // page, so an outage is the same 503 for an id that exists and one that
+    // doesn't. Before, a failed block read answered [] ("blocks nobody"):
+    // the exact per-page check then emptied the page, so a list feed said
+    // 200 with no items and the permalink said 404. A hidden list with no
+    // last-good copy threw RepositoryException, uncaught: a 500.
+
+    /** The two pre-filter reads: who the viewer blocks, who blocks the viewer. */
+    private const BLOCK_LISTS = '/SELECT\s+blk_(?:blocked|user)_id\s+FROM\s+\S*peepso_blocks\s/';
+
+    /** The exact per-page check over a page's authors (F-54), alone. */
+    private const EXACT_CHECK = '/SELECT\s+blk_user_id,\s*blk_blocked_id\s+FROM\s+\S*peepso_blocks\s/';
+
+    /** The moderation-hidden list's keyset read. */
+    private const HIDDEN_READ = '/SELECT\s+act_id\s+FROM\s+\S*bcc_hidden_activities\s+WHERE\s+act_id\s+</';
+
+    /** The shortcode lookup. */
+    private const SHORTCODE_READ = '/SELECT\s+act_id\s+FROM\s+\S*bcc_post_shortcodes\s+WHERE\s+short_id\s/';
+
+    /**
+     * ⚠ THE SAME ANSWER FOR EVERY ID: the post that exists and the id that never did
+     * get the same 503, because the block lists fail before either is looked
+     * up.
+     */
+    public function testAnUnreadableBlockListIsTheSame503ForAPostThatExistsAndOneThatDoesNot(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user']        = self::STRANGER;
+        $GLOBALS['wpdb']->failQueriesMatching = self::BLOCK_LISTS;
+
+        $endpoint = new FeedEndpoint();
+        $existing = $endpoint->feedItem(new \WP_REST_Request(['id' => $actId]));
+        $missing  = $endpoint->feedItem(new \WP_REST_Request(['id' => $actId + 1000]));
+
+        self::assertUnavailable($existing, 'This post is temporarily unavailable. Please try again.');
+        self::assertUnavailable($missing, 'This post is temporarily unavailable. Please try again.');
+        self::assertSame($existing->get_data(), $missing->get_data());
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the block read');
+    }
+
+    /**
+     * ⚠ The shortcode route reads the lists BEFORE it resolves the code, so a
+     * known code and an unknown one get the same 503. Resolving first would
+     * 404 the unknown code straight away, so the answer would depend on the
+     * code.
+     */
+    public function testTheShortcodeRouteAnswersEveryCodeAlikeWhenABlockListIsUnreadable(): void
+    {
+        $this->shortcodeTable();
+        $code = $this->shortcodeFor($this->postedActId(self::OPERATOR, self::PAGE_A));
+        $GLOBALS['__bcc_current_user'] = self::STRANGER;
+        $endpoint = new FeedEndpoint();
+
+        // The control first: no fault, the known code opens and the unknown 404s.
+        self::assertSame(200, $endpoint->feedItemByShortcode(new \WP_REST_Request(['id' => $code]))->get_status());
+        self::assertSame(404, $endpoint->feedItemByShortcode(new \WP_REST_Request(['id' => 'Qzqzqzqz']))->get_status());
+
+        $GLOBALS['wpdb']->failQueriesMatching = self::BLOCK_LISTS;
+        $known   = $endpoint->feedItemByShortcode(new \WP_REST_Request(['id' => $code]));
+        $unknown = $endpoint->feedItemByShortcode(new \WP_REST_Request(['id' => 'Qzqzqzqz']));
+
+        self::assertUnavailable($known, 'This post is temporarily unavailable. Please try again.');
+        self::assertUnavailable($unknown, 'This post is temporarily unavailable. Please try again.');
+        self::assertSame($known->get_data(), $unknown->get_data());
+    }
+
+    /** A code lookup that did not run is not "no such post". */
+    public function testAFailedShortcodeLookupIsA503NotA404(): void
+    {
+        $this->shortcodeTable();
+        $code = $this->shortcodeFor($this->postedActId(self::OPERATOR, self::PAGE_A));
+        $GLOBALS['wpdb']->failQueriesMatching = self::SHORTCODE_READ;
+
+        $response = (new FeedEndpoint())->feedItemByShortcode(new \WP_REST_Request(['id' => $code]));
+
+        self::assertUnavailable($response, 'This post is temporarily unavailable. Please try again.');
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the lookup');
+    }
+
+    /**
+     * The table check before the lookup: a SHOW TABLES that failed is not
+     * "no table", so it is not "no such post" either.
+     */
+    public function testAFailedShortcodeTableCheckIsA503NotA404(): void
+    {
+        $this->shortcodeTable();
+        $code = $this->shortcodeFor($this->postedActId(self::OPERATOR, self::PAGE_A));
+        self::forgetTableChecks('bcc_post_shortcodes');
+        $GLOBALS['wpdb']->failQueriesMatching = "/SHOW\s+TABLES\s+LIKE\s+'[^']*bcc_post_shortcodes'/";
+
+        $response = (new FeedEndpoint())->feedItemByShortcode(new \WP_REST_Request(['id' => $code]));
+
+        self::assertUnavailable($response, 'This post is temporarily unavailable. Please try again.');
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the table check');
+    }
+
+    /**
+     * A table that is really missing is still "no such code", even when an
+     * earlier, unrelated query left an error behind: the check starts clean.
+     */
+    public function testAMissingShortcodeTableIsStillNotFoundAfterAnUnrelatedError(): void
+    {
+        $shortcodes = Plugin::instance()->postShortcodeRepository();
+        self::assertNull($shortcodes->resolveActId('Qzqzqzqz'), 'no table: no such code');
+
+        // The answer "no table" is now remembered, so the next check runs no query.
+        $GLOBALS['wpdb']->last_error = 'an earlier, unrelated failure';
+        self::assertNull($shortcodes->resolveActId('Qzqzqzqz'));
+    }
+
+    /** Every signed-in list feed: a 503, never a 200 with no items. */
+    public function testAnUnreadableBlockListIsA503OnTheListFeeds(): void
+    {
+        $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user']        = self::STRANGER;
+        $GLOBALS['wpdb']->failQueriesMatching = self::BLOCK_LISTS;
+
+        $endpoint = new FeedEndpoint();
+        foreach ([
+            'page stream' => $this->feed(self::PAGE_A),
+            'for you'     => $endpoint->feed(new \WP_REST_Request(['scope' => 'for_you'])),
+            'tag'         => $endpoint->tagFeed(new \WP_REST_Request(['tag' => 'validators'])),
+            'hot'         => $endpoint->hot(new \WP_REST_Request([])),
+        ] as $surface => $response) {
+            self::assertSame(503, $response->get_status(), $surface);
+            self::assertUnavailable($response, 'The feed is temporarily unavailable. Please try again.');
+        }
+    }
+
+    /** The anonymous reader reads no block lists, so the same fault cannot fail it. */
+    public function testTheAnonymousReaderIsNotFailedByAnUnreadableBlockList(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user']        = 0;
+        $GLOBALS['wpdb']->failQueriesMatching = self::BLOCK_LISTS;
+
+        self::assertSame(['feed_' . $actId], $this->ids($this->feed(self::PAGE_A)));
+        self::assertSame(200, (new FeedEndpoint())->feedItem(new \WP_REST_Request(['id' => $actId]))->get_status());
+        self::assertSame(0, $GLOBALS['wpdb']->injectedFailures, 'no block list was read');
+    }
+
+    /**
+     * ⚠ F-455, the row-dependent half. The lists were read, then the exact
+     * check over this page's authors failed. It runs only when there ARE
+     * posts, so it answers as if there were none: an EMPTY page and a 404,
+     * never a 503 and never the page with the filter skipped.
+     */
+    public function testAFailedExactCheckAnswersAnEmptyPageAndA404NeverTheUnfilteredPost(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user'] = self::STRANGER;
+        self::assertSame(['feed_' . $actId], $this->ids($this->feed(self::PAGE_A)), 'control: the stranger sees it');
+
+        $GLOBALS['wpdb']->failQueriesMatching = self::EXACT_CHECK;
+
+        self::assertSame([], $this->ids($this->feed(self::PAGE_A)), 'empty, never the unfiltered page');
+        self::assertSame(404, (new FeedEndpoint())->feedItem(new \WP_REST_Request(['id' => $actId]))->get_status());
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the exact check');
+    }
+
+    /** A hidden list with no last-good copy: a 503 where it used to be a 500. */
+    public function testAnUnreadableHiddenListWithNoLastGoodCopyIsA503(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user']        = self::STRANGER;
+        $GLOBALS['wpdb']->failQueriesMatching = self::HIDDEN_READ;
+        self::assertFalse(get_option(\BCC\Trust\Core\Repositories\HiddenActivityRepository::LAST_GOOD_OPTION), 'no last-good copy');
+
+        self::assertUnavailable($this->feed(self::PAGE_A), 'The feed is temporarily unavailable. Please try again.');
+        self::assertUnavailable(
+            (new FeedEndpoint())->feedItem(new \WP_REST_Request(['id' => $actId])),
+            'This post is temporarily unavailable. Please try again.'
+        );
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the hidden read');
+    }
+
     // ── the card ────────────────────────────────────────────────────────
 
     /**
@@ -813,6 +992,44 @@ final class PagePostsIntegrationTest extends TestCase
     }
 
     // ── helpers ─────────────────────────────────────────────────────────
+
+    /**
+     * F-438: the permalink-code table. The suite's database has none, so it
+     * is built here (tearDown drops it), FIRST in a test: TableRegistry::
+     * exists() memoises its answer for the process, and creating a post
+     * already asks it.
+     */
+    private function shortcodeTable(): void
+    {
+        global $wpdb;
+        self::assertNotFalse($wpdb->query(
+            "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bcc_post_shortcodes (
+                act_id BIGINT UNSIGNED NOT NULL,
+                short_id CHAR(8) NOT NULL,
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (act_id),
+                UNIQUE KEY short_id (short_id)
+            ) DEFAULT CHARSET=utf8mb4"
+        ), 'shortcode table: ' . $wpdb->last_error);
+    }
+
+    /** F-438: forget TableRegistry's remembered answer for one table, so the next check queries. */
+    private static function forgetTableChecks(string $suffix): void
+    {
+        global $wpdb;
+        $memo = new \ReflectionProperty(\BCC\Trust\Core\Database\TableRegistry::class, 'existsMemo');
+        $memo->setValue(null, []);
+        wp_cache_delete('exists_' . $wpdb->prefix . $suffix, 'bcc_tables');
+    }
+
+    /** F-438: `$actId`'s permalink code (shortcodeTable() first). */
+    private function shortcodeFor(int $actId): string
+    {
+        $codes = Plugin::instance()->postShortcodeRepository()->ensureForActIds([$actId]);
+        self::assertArrayHasKey($actId, $codes, 'the code was minted');
+
+        return $codes[$actId];
+    }
 
     private function assertRefusedWithoutWrites(int $userId, int $pageId): void
     {

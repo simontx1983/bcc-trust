@@ -261,6 +261,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\Feed\\PageClaimBodyHydrator' => $baseDir . '/app/Domain/Core/Services/Feed/PageClaimBodyHydrator.php',
     'BCC\\Trust\\Core\\Services\\Feed\\PhotoBodyHydrator' => $baseDir . '/app/Domain/Core/Services/Feed/PhotoBodyHydrator.php',
     'BCC\\Trust\\Core\\Services\\Feed\\ReviewBodyHydrator' => $baseDir . '/app/Domain/Core/Services/Feed/ReviewBodyHydrator.php',
+    'BCC\\Trust\\Core\\Services\\Feed\\ViewerExclusions' => $baseDir . '/app/Domain/Core/Services/Feed/ViewerExclusions.php',
     'BCC\\Trust\\Core\\Services\\Feed\\WatchBatchBodyHydrator' => $baseDir . '/app/Domain/Core/Services/Feed/WatchBatchBodyHydrator.php',
     'BCC\\Trust\\Core\\Services\\FirstActionListener' => $baseDir . '/app/Domain/Core/Services/FirstActionListener.php',
     'BCC\\Trust\\Core\\Services\\FlagService' => $baseDir . '/app/Domain/Core/Services/FlagService.php',
