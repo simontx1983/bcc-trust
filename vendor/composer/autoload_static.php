@@ -338,6 +338,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Repositories\\TargetDivergenceStateRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/TargetDivergenceStateRepository.php',
         'BCC\\Trust\\Core\\Repositories\\TokenStateRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/TokenStateRepository.php',
         'BCC\\Trust\\Core\\Repositories\\UserInfoRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/UserInfoRepository.php',
+        'BCC\\Trust\\Core\\Repositories\\UserMetaSwapRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/UserMetaSwapRepository.php',
         'BCC\\Trust\\Core\\Repositories\\UserMiniRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/UserMiniRepository.php',
         'BCC\\Trust\\Core\\Repositories\\UserSyncRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/UserSyncRepository.php',
         'BCC\\Trust\\Core\\Repositories\\VerificationRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/VerificationRepository.php',

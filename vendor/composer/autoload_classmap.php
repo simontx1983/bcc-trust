@@ -182,6 +182,7 @@ return array(
     'BCC\\Trust\\Core\\Repositories\\TargetDivergenceStateRepository' => $baseDir . '/app/Domain/Core/Repositories/TargetDivergenceStateRepository.php',
     'BCC\\Trust\\Core\\Repositories\\TokenStateRepository' => $baseDir . '/app/Domain/Core/Repositories/TokenStateRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserInfoRepository' => $baseDir . '/app/Domain/Core/Repositories/UserInfoRepository.php',
+    'BCC\\Trust\\Core\\Repositories\\UserMetaSwapRepository' => $baseDir . '/app/Domain/Core/Repositories/UserMetaSwapRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserMiniRepository' => $baseDir . '/app/Domain/Core/Repositories/UserMiniRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserSyncRepository' => $baseDir . '/app/Domain/Core/Repositories/UserSyncRepository.php',
     'BCC\\Trust\\Core\\Repositories\\VerificationRepository' => $baseDir . '/app/Domain/Core/Repositories/VerificationRepository.php',

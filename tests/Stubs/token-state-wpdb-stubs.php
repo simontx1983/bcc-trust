@@ -30,6 +30,12 @@
  * meta_value. get_results() is core's: query(), then last_result whatever
  * query() returned. Nothing calls it; it is there so a mutation control
  * can swap trustedRows() for it and meet the pre-flush trap.
+ *
+ * H7: it also executes UserMetaSwapRepository's three guarded writes
+ * (INSERT … WHERE NOT EXISTS, UPDATE / DELETE … AND <guard>), returning
+ * MySQL's affected-row counts, and throws on any other write. putNull()
+ * stores a SQL-NULL value; $beforeWrite runs before each write (another
+ * request writing in between); writeVerbs() lists the writes run.
  */
 
 declare(strict_types=1);
@@ -88,18 +94,46 @@ namespace {
             public array $modes = [];
             /** @var list<string> */
             public array $queries = [];
-            /** @var list<array{umeta_id: int, user_id: int, meta_key: string, meta_value: string}> */
+            /** @var list<array{umeta_id: int, user_id: int, meta_key: string, meta_value: string|null}> */
             public array $rows = [];
+            /** H7: ids keep rising after a row is deleted, as AUTO_INCREMENT does. */
+            private int $lastId = 0;
+            /**
+             * H7: runs before each write statement with its 1-based number:
+             * ANOTHER REQUEST changing the row between a read and a write.
+             *
+             * @var (callable(int): void)|null
+             */
+            public $beforeWrite = null;
+            private int $writes = 0;
 
             /** Store a value as WordPress would (serialised when not scalar). */
             public function put(int $userId, string $key, mixed $value): void
             {
                 $this->rows[] = [
-                    'umeta_id'   => count($this->rows) + 1,
+                    'umeta_id'   => ++$this->lastId,
                     'user_id'    => $userId,
                     'meta_key'   => $key,
                     'meta_value' => is_array($value) || is_object($value) ? serialize($value) : (string) $value,
                 ];
+            }
+
+            /** H7: a row whose meta_value is SQL NULL (WordPress can store one). */
+            public function putNull(int $userId, string $key): void
+            {
+                $this->rows[] = ['umeta_id' => ++$this->lastId, 'user_id' => $userId, 'meta_key' => $key, 'meta_value' => null];
+            }
+
+            /** @return list<string> the write statements run, by verb: insert / update / delete */
+            public function writeVerbs(): array
+            {
+                $out = [];
+                foreach ($this->queries as $sql) {
+                    if (preg_match('/^\s*(INSERT|UPDATE|DELETE)\b/', $sql, $m) === 1) {
+                        $out[] = strtolower($m[1]);
+                    }
+                }
+                return $out;
             }
 
             /** @param mixed ...$args */
@@ -132,6 +166,10 @@ namespace {
                 // flush(), as core's query() does before running a query.
                 $this->last_error = '';
 
+                if (preg_match('/^\s*(INSERT|UPDATE|DELETE)\b/', $sql, $verb) === 1) {
+                    return $this->write(strtoupper($verb[1]), $sql);
+                }
+
                 $userIds = preg_match('/user_id = (\d+)/', $sql, $u) === 1
                     ? [(int) $u[1]]
                     : (preg_match('/user_id IN \(([^)]*)\)/', $sql, $u) === 1
@@ -161,6 +199,88 @@ namespace {
                 }
 
                 return count($out);
+            }
+
+            /**
+             * H7: the three guarded statements UserMetaSwapRepository runs,
+             * with MySQL's answers: INSERT … WHERE NOT EXISTS inserts only
+             * when no row exists; UPDATE / DELETE touch only the rows their
+             * guard matches (`meta_value <=> 'x'`, or `(meta_value = '' OR
+             * meta_value IS NULL)`), and UPDATE counts only rows it CHANGED.
+             * Returns the affected-row count. Anything else is a test error.
+             */
+            private function write(string $verb, string $sql): int
+            {
+                $this->writes++;
+                if (is_callable($this->beforeWrite)) {
+                    ($this->beforeWrite)($this->writes);
+                }
+
+                $lit = <<<'RE'
+'((?:[^'\\]|\\.)*)'
+RE;
+                $sql = (string) preg_replace('/\s+/', ' ', $sql);
+
+                if ($verb === 'INSERT') {
+                    $pattern = '~SELECT (\d+), ' . $lit . ', ' . $lit . ' FROM DUAL WHERE NOT EXISTS \( ?SELECT 1 FROM '
+                        . preg_quote($this->usermeta, '~') . ' WHERE user_id = (\d+) AND meta_key = ' . $lit . ' ?\)~';
+                    if (preg_match($pattern, $sql, $m) !== 1) {
+                        throw new \LogicException('TokenStateWpdb: unrecognised INSERT: ' . $sql);
+                    }
+                    $userId = (int) $m[1];
+                    $key    = stripslashes($m[2]);
+                    if ((int) $m[4] !== $userId || stripslashes($m[5]) !== $key) {
+                        throw new \LogicException('TokenStateWpdb: the NOT EXISTS guard is not on the inserted pair: ' . $sql);
+                    }
+                    foreach ($this->rows as $row) {
+                        if ($row['user_id'] === $userId && $row['meta_key'] === $key) {
+                            return 0;
+                        }
+                    }
+                    $this->put($userId, $key, stripslashes($m[3]));
+
+                    return 1;
+                }
+
+                $set = null;
+                if ($verb === 'UPDATE') {
+                    if (preg_match('~ SET meta_value = ' . $lit . ' WHERE ~', $sql, $s) !== 1) {
+                        throw new \LogicException('TokenStateWpdb: unrecognised UPDATE: ' . $sql);
+                    }
+                    $set = stripslashes($s[1]);
+                }
+                if (preg_match('~ WHERE user_id = (\d+) AND meta_key = ' . $lit . ' AND (.*)$~', $sql, $w) !== 1) {
+                    throw new \LogicException('TokenStateWpdb: unrecognised ' . $verb . ': ' . $sql);
+                }
+                $userId = (int) $w[1];
+                $key    = stripslashes($w[2]);
+                $guard  = trim($w[3]);
+                if ($guard === "(meta_value = '' OR meta_value IS NULL)") {
+                    $matches = static fn(?string $v): bool => $v === null || $v === '';
+                } elseif (preg_match('~^meta_value <=> ' . $lit . '$~', $guard, $g) === 1) {
+                    $expected = stripslashes($g[1]);
+                    $matches  = static fn(?string $v): bool => $v === $expected;
+                } else {
+                    throw new \LogicException('TokenStateWpdb: unrecognised guard: ' . $guard);
+                }
+
+                $affected = 0;
+                foreach ($this->rows as $i => $row) {
+                    if ($row['user_id'] !== $userId || $row['meta_key'] !== $key || !$matches($row['meta_value'])) {
+                        continue;
+                    }
+                    if ($verb === 'DELETE') {
+                        unset($this->rows[$i]);
+                    } elseif ($row['meta_value'] === $set) {
+                        continue;
+                    } else {
+                        $this->rows[$i]['meta_value'] = $set;
+                    }
+                    $affected++;
+                }
+                $this->rows = array_values($this->rows);
+
+                return $affected;
             }
 
             /**

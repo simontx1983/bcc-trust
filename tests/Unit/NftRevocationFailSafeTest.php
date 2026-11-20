@@ -1121,6 +1121,34 @@ final class NftRevocationFailSafeTest extends TestCase
         self::assertTrue($svc->isPermanentOptOut(self::USER, self::GROUP));
     }
 
+    /**
+     * H7: the join door reads the opt-out map through the TRUSTED read. A
+     * map it cannot read is the transient 503, never "not evicted".
+     */
+    public function testAJoinWhileTheOptOutMapCannotBeReadIs503AndWritesNothing(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 5);
+        $svc = new NftGroupGateService();
+        $svc->recordPermanentOptOut(self::USER, self::GROUP);
+        $GLOBALS['__bcc_trusted_meta_fails'] = true;
+
+        self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, $svc->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame([], \BccRevokeWorld::$joins, 'an evicted holder is never written back in');
+    }
+
+    /** H7: an auto-join pass that cannot read the map adds nobody. */
+    public function testAnAutoJoinPassThatCannotReadTheOptOutMapOffersNothing(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
+        $GLOBALS['__bcc_trusted_meta_fails'] = true;
+
+        self::assertSame([], (new NftGroupGateService())->findEligibleGroups(self::USER));
+    }
+
     public function testAVoluntaryOptOutStillSuppressesAutoAdd(): void
     {
         // Auto-add (reconcile → findEligibleGroups) must keep honouring
