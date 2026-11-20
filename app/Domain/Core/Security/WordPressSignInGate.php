@@ -36,10 +36,11 @@ if (!defined('ABSPATH')) {
  *    doors, plus wp-admin.
  *    - admin-ajax.php: a signed-in non-admin gets a bare 403 unless the
  *      action is in MEMBER_AJAX_ACTIONS (empty: the app needs none). A
- *      signed-out caller gets the same unless the action is in
- *      SIGNED_OUT_AJAX_ACTIONS, which keeps LiteSpeed's async loopback
- *      (it sends no cookies), core's heartbeat and the reset form's
- *      password generator working.
+ *      signed-out caller gets the same for a denied action
+ *      (deniesSignedOutAjax()): PeepSo's, and a few others' that no
+ *      signed-out caller needs. Every other signed-out action stays open:
+ *      admin sign-in (2FA, passkeys), loopbacks and schedulers run there,
+ *      and a miss would lock admins out.
  *    - PeepSo's ajax router: every non-admin, signed out included, gets a
  *      bare 403. It is matched the way PeepSo itself routes (see
  *      isPeepSoAjax()); that matcher must stay a superset of PeepSo's.
@@ -112,17 +113,29 @@ final class WordPressSignInGate
     public const MEMBER_AJAX_ACTIONS = [];
 
     /**
-     * The admin-ajax actions a SIGNED-OUT caller may still call (F-496).
-     * Exact names, each kept for a reason:
-     *   - `async_litespeed`: LiteSpeed's async loopback, which sends no
-     *     cookies, so it always arrives signed out;
-     *   - `heartbeat`: core's keep-alive;
-     *   - `generate-password`: core's reset-password form.
+     * Signed-out admin-ajax actions starting with this are refused (F-496):
+     * PeepSo names its actions so, and the app needs none of them. Matched
+     * case-sensitively, as WordPress matches hook names.
+     */
+    public const SIGNED_OUT_DENIED_PREFIX = 'peepso';
+
+    /**
+     * Other signed-out admin-ajax actions refused by exact name (F-496): bulk
+     * write and migration actions, anonymous image processing, and a local
+     * debug plugin's logger. A DENY-list on purpose: an allowlist would break
+     * sign-in and background work whenever a plugin update adds an action.
      * An entry needs a reason and a test of its own.
      *
      * @var list<string>
      */
-    public const SIGNED_OUT_AJAX_ACTIONS = ['async_litespeed', 'heartbeat', 'generate-password'];
+    public const SIGNED_OUT_DENIED_ACTIONS = [
+        'wp_convert_aioseo_blocks',
+        'wp_convert_yoast_blocks',
+        'wp_bulk_edit_seo_meta',
+        'wp_bulk_image_alt',
+        'rank_math_overlay_thumb',
+        'log_js_errors',
+    ];
 
     /**
      * Path words no member handle or group slug may take (F-496). Door 2
@@ -224,7 +237,7 @@ final class WordPressSignInGate
             // asked again here in case that hook was taken away. Signed-out
             // wp-admin visits are WordPress's own business (its login page).
             if (wp_doing_ajax()) {
-                self::refuseAjaxUnlessListed(self::SIGNED_OUT_AJAX_ACTIONS);
+                self::refuseSignedOutAjaxIfDenied();
             }
             return;
         }
@@ -255,9 +268,9 @@ final class WordPressSignInGate
      * `init`, first: WordPress's and PeepSo's ajax doors (see the class
      * note, door 2). Admins are untouched.
      *   - PeepSo's router: refused to every non-admin, signed out included;
-     *   - admin-ajax.php: refused to every non-admin unless the action is
-     *     listed: MEMBER_AJAX_ACTIONS for a signed-in member,
-     *     SIGNED_OUT_AJAX_ACTIONS for a signed-out caller (F-496).
+     *   - admin-ajax.php: refused to a signed-in non-admin unless the
+     *     action is in MEMBER_AJAX_ACTIONS, and to a signed-out caller for a
+     *     denied action (deniesSignedOutAjax(), F-496).
      */
     public static function refuseWordPressAjax(): void
     {
@@ -272,7 +285,11 @@ final class WordPressSignInGate
         }
 
         if (wp_doing_ajax()) {
-            self::refuseAjaxUnlessListed($userId > 0 ? self::MEMBER_AJAX_ACTIONS : self::SIGNED_OUT_AJAX_ACTIONS);
+            if ($userId > 0) {
+                self::refuseAjaxUnlessListed(self::MEMBER_AJAX_ACTIONS);
+            } else {
+                self::refuseSignedOutAjaxIfDenied();
+            }
         }
     }
 
@@ -321,10 +338,29 @@ final class WordPressSignInGate
         self::refuseBare();
     }
 
+    /** admin-ajax.php signed out: a bare 403 for a denied action, else through. */
+    private static function refuseSignedOutAjaxIfDenied(): void
+    {
+        $action = $_REQUEST['action'] ?? null;
+        if (is_string($action) && self::deniesSignedOutAjax($action)) {
+            self::refuseBare();
+        }
+    }
+
+    /**
+     * Is this admin-ajax action refused to a signed-out caller? It starts
+     * with SIGNED_OUT_DENIED_PREFIX, or is exactly one of
+     * SIGNED_OUT_DENIED_ACTIONS. Case-sensitive, as hook names are.
+     */
+    public static function deniesSignedOutAjax(string $action): bool
+    {
+        return str_starts_with($action, self::SIGNED_OUT_DENIED_PREFIX)
+            || in_array($action, self::SIGNED_OUT_DENIED_ACTIONS, true);
+    }
+
     /**
      * Is this admin-ajax action in the list? Only an exact entry: no prefix,
-     * no case folding. The default list is the signed-in one; the
-     * signed-out door passes SIGNED_OUT_AJAX_ACTIONS.
+     * no case folding.
      *
      * @param list<string> $allowed MEMBER_AJAX_ACTIONS; a test passes its own
      */
