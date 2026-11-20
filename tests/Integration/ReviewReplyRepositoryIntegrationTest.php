@@ -242,6 +242,40 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
         self::assertTrue($row['hidden']);
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function unreadableProbes(): iterable
+    {
+        yield 'the probe errors'               => ['failQueriesMatching'];
+        yield 'the probe bails before flush()' => ['failSilentlyMatching'];
+    }
+
+    /**
+     * An unreadable existence probe for the hidden-activities table keeps the
+     * hidden check, so a moderation-hidden reply still reads as hidden.
+     * Rationale: L7 (private tracker).
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('unreadableProbes')]
+    public function testAnUnreadableTableProbeStillFlagsAHiddenReply(string $fault): void
+    {
+        global $wpdb;
+        $vote    = $this->vote();
+        [, $act] = $this->post('review_reply', $vote, 'reply');
+        self::assertTrue($this->hidden->add($act, 0, 'admin_action'));
+
+        \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+        $wpdb->{$fault} = "/^SHOW TABLES LIKE '[^']*bcc_hidden_activities'$/";
+        try {
+            $row   = $this->replies->findForVoteByAuthor($vote, self::OWNER);
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+        } finally {
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertNotNull($row);
+        self::assertTrue($row['hidden'], 'still flagged hidden');
+    }
+
     public function testTrashedOtherModuleAndHalfWrittenPostsAreNotReplies(): void
     {
         $trashed = $this->vote();
