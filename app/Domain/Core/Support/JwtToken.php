@@ -184,9 +184,13 @@ final class JwtToken
      * Use cases: admin "kill all sessions" action, password change,
      * account compromise response. Cheap (single update_user_meta).
      *
-     * Returns the new version number (post-increment).
+     * Returns the new version number (post-increment), or NULL when the
+     * write did not land (logged here): nothing was revoked, and every
+     * outstanding token still works. A caller whose whole job is the
+     * revocation answers 503; the others log, because their own change has
+     * already been written.
      */
-    public static function revokeAllForUser(int $userId): int
+    public static function revokeAllForUser(int $userId): ?int
     {
         // F-462: +1 on the GUARDED read. +1 on a failed or poisoned read
         // (tv 0) wrote tv 1 over, say, 5: a LOWER version, under which a
@@ -196,7 +200,16 @@ final class JwtToken
         // and never goes backwards.
         $known = self::tokenVersion($userId);
         $next  = $known !== null ? $known + 1 : self::versionNoTokenCanHold();
-        update_user_meta($userId, self::TOKEN_VERSION_META_KEY, $next);
+
+        // update_user_meta() answers false for a failed write (and for an
+        // unchanged value, which can't happen: $next is above every stored
+        // version). A lost revocation must not pass for a done one.
+        if (update_user_meta($userId, self::TOKEN_VERSION_META_KEY, $next) === false) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] token revocation write failed; tokens NOT revoked', [
+                'user_id' => $userId,
+            ]);
+            return null;
+        }
         return $next;
     }
 
@@ -430,7 +443,8 @@ final class JwtToken
      *
      * F-462: returns false, and writes NOTHING, when the current list cannot
      * be read. Writing then would replace the user's whole denylist with
-     * this one entry, bringing every other signed-out token back.
+     * this one entry, bringing every other signed-out token back. Also false
+     * when the write itself did not land (writeList()).
      *
      * @param array<string, mixed> $payload a payload returned by decode()/decodeForRefresh()
      * @return bool true when the token is signed out (or there was nothing to do)
@@ -476,9 +490,8 @@ final class JwtToken
                 asort($list);
                 $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
             }
-            update_user_meta($userId, self::DENYLIST_META_KEY, $list);
 
-            return true;
+            return self::writeList($userId, self::DENYLIST_META_KEY, $list, $state['denylist']);
         } finally {
             if ($locked) {
                 \BCC\Core\DB\AdvisoryLock::release($lockKey);
@@ -514,8 +527,8 @@ final class JwtToken
      * Same per-user lock and pruning as logOut(); best-effort like it.
      *
      * F-462: returns false, and writes NOTHING, when the current list cannot
-     * be read (writing would drop every other retired token). The refresh
-     * then mints nothing.
+     * be read (writing would drop every other retired token), or when the
+     * write itself did not land (writeList()). The refresh then mints nothing.
      *
      * @param array<string, mixed> $payload a payload returned by decodeForRefresh()
      * @return bool true when the token is retired (or there was nothing to do)
@@ -560,9 +573,8 @@ final class JwtToken
                 uasort($list, static fn (array $a, array $b): int => $a['until'] <=> $b['until']);
                 $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
             }
-            update_user_meta($userId, self::RETIRED_META_KEY, $list);
 
-            return true;
+            return self::writeList($userId, self::RETIRED_META_KEY, $list, $state['retired']);
         } finally {
             if ($locked) {
                 \BCC\Core\DB\AdvisoryLock::release($lockKey);
@@ -582,21 +594,65 @@ final class JwtToken
     }
 
     /**
-     * @param mixed $raw the stored retired list, as read
+     * The union of every stored retired list (TokenStateRepository returns
+     * one per row, duplicates included). A token in two of them is retired
+     * over the widest window: the earliest `from`, the latest `until`.
+     *
+     * @param list<mixed> $raws each stored retired list, as read
      * @return array<string, array{from: int, until: int}>
      */
-    private static function retiredFrom($raw): array
+    private static function retiredFrom(array $raws): array
     {
-        if (!is_array($raw)) {
-            return [];
-        }
         $out = [];
-        foreach ($raw as $hash => $entry) {
-            if (is_array($entry) && isset($entry['from'], $entry['until'])) {
-                $out[(string) $hash] = ['from' => (int) $entry['from'], 'until' => (int) $entry['until']];
+        foreach ($raws as $raw) {
+            if (!is_array($raw)) {
+                continue;
+            }
+            foreach ($raw as $hash => $entry) {
+                if (!is_array($entry) || !isset($entry['from'], $entry['until'])) {
+                    continue;
+                }
+                $hash  = (string) $hash;
+                $from  = (int) $entry['from'];
+                $until = (int) $entry['until'];
+                if (isset($out[$hash])) {
+                    $from  = min($from, $out[$hash]['from']);
+                    $until = max($until, $out[$hash]['until']);
+                }
+                $out[$hash] = ['from' => $from, 'until' => $until];
             }
         }
         return $out;
+    }
+
+    /**
+     * Store a sign-out or retired list, and say whether it is stored.
+     *
+     * update_user_meta() answers false both for a failed write and for an
+     * unchanged value, so an unchanged list is not written at all (true:
+     * nothing to record). Any other false is a write that did not land:
+     * logged, and false, so the caller never claims a sign-out or a
+     * retirement that is not there.
+     *
+     * Writing updates EVERY row of the key, so it also folds a duplicate row
+     * (see TokenStateRepository) back into one value.
+     *
+     * @param array<string, mixed> $list the list to store
+     * @param array<string, mixed> $read the list as read before the change
+     */
+    private static function writeList(int $userId, string $metaKey, array $list, array $read): bool
+    {
+        if ($list === $read) {
+            return true;
+        }
+        if (update_user_meta($userId, $metaKey, $list) === false) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] jwt list write failed; not recorded', [
+                'user_id'  => $userId,
+                'meta_key' => $metaKey,
+            ]);
+            return false;
+        }
+        return true;
     }
 
     private const DENYLIST_LOCK_PREFIX = 'bcc_jwt_deny_';
@@ -618,17 +674,24 @@ final class JwtToken
     }
 
     /**
-     * @param mixed $raw the stored denylist, as read
+     * The union of every stored denylist (TokenStateRepository returns one
+     * per row, duplicates included). A token in two of them stays signed out
+     * until the later `until`.
+     *
+     * @param list<mixed> $raws each stored denylist, as read
      * @return array<string, int>
      */
-    private static function denylistFrom($raw): array
+    private static function denylistFrom(array $raws): array
     {
-        if (!is_array($raw)) {
-            return [];
-        }
         $out = [];
-        foreach ($raw as $hash => $until) {
-            $out[(string) $hash] = (int) $until;
+        foreach ($raws as $raw) {
+            if (!is_array($raw)) {
+                continue;
+            }
+            foreach ($raw as $hash => $until) {
+                $hash       = (string) $hash;
+                $out[$hash] = max((int) $until, $out[$hash] ?? PHP_INT_MIN);
+            }
         }
         return $out;
     }

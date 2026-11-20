@@ -250,17 +250,14 @@ final class SessionController
      * must never be cached or served to a different Authorization.
      */
     /**
-     * F-462: the token's state could not be read. 503 `bcc_unavailable`,
-     * private and never stored: the client keeps its session and tries
-     * again, instead of signing the member out on a database blip.
+     * F-462: the token's state could not be read (or, F-495, a revocation
+     * could not be recorded). 503 `bcc_unavailable`, private and never
+     * stored: the client keeps its session and tries again, instead of
+     * signing the member out on a database blip.
      */
     private static function stateUnavailable(): WP_REST_Response
     {
-        $response = ApiResponse::error('bcc_unavailable', 'Your session could not be checked just now. Please try again.', 503);
-        $response->header('Cache-Control', 'private, no-store');
-        $response->header('Vary', 'Authorization');
-
-        return $response;
+        return BearerAuth::unavailableResponse();
     }
 
     private static function sessionHeaders(WP_REST_Response $response): WP_REST_Response
@@ -318,8 +315,11 @@ final class SessionController
 
         // Mutation: bump the token-version meta. Every outstanding JWT
         // for this user fails ERR_REVOKED on next use, including the
-        // bearer that authenticated THIS request.
-        JwtToken::revokeAllForUser($userId);
+        // bearer that authenticated THIS request. F-495: when that write
+        // does not land, nothing was revoked, so the answer is 503 (try
+        // again), never 200. The WordPress-side credentials and the push
+        // subscriptions below are still cut: each is its own write.
+        $revoked = JwtToken::revokeAllForUser($userId) !== null;
 
         // ...and every WordPress-side credential of the account (security
         // review 2026-11-18, H3): its cookie sessions (an admin's wp-admin;
@@ -335,6 +335,10 @@ final class SessionController
         // notification text to) the very devices it was meant to cut off.
         // Each device re-registers on its next sign-in. [F-76]
         (new PushSubscriptionRepository())->deleteAllForUser($userId);
+
+        if (!$revoked) {
+            return self::stateUnavailable();
+        }
 
         $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');

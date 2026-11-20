@@ -89,6 +89,21 @@ final class TokenStatePoisonTest extends TestCase
         return $decoded['payload'];
     }
 
+    /**
+     * A token's claims, read WITHOUT checking it (it may be revoked).
+     *
+     * @return array<string, mixed>
+     */
+    private function payloadOfAny(string $token): array
+    {
+        $parts = explode('.', $token);
+        $json  = base64_decode(strtr($parts[1] ?? '', '-_', '+/'), true);
+        $data  = is_string($json) ? json_decode($json, true) : null;
+        self::assertIsArray($data);
+
+        return $data;
+    }
+
     // ── The poisoned cache no longer accepts dead tokens ──────────────────
 
     public function testARevokedTokenIsRefusedThoughTheCacheSaysNeverRevoked(): void
@@ -289,5 +304,114 @@ final class TokenStatePoisonTest extends TestCase
         $written = $GLOBALS['__bcc_ph']['meta'][self::USER]['bcc_jwt_denylist'] ?? [];
         self::assertArrayHasKey('someone-else', $written, 'built on the DATABASE list, not the poisoned cache');
         self::assertArrayHasKey(self::hash((string) $payload['jti']), $written);
+    }
+
+    // ── F-495: a duplicated row never hides a revocation or a sign-out ─────
+    //
+    // update_metadata() inserts a SECOND row when its look-up of the first
+    // fails. The newer row holds the write; the first row is the stale one.
+
+    public function testARevocationInADuplicatedVersionRowStands(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5); // the original row
+        $old = JwtToken::encodeNewSession(self::USER, 'h' . self::USER);
+        $this->db->put(self::USER, 'bcc_token_version', 6); // the revoke, inserted beside it
+        $new = JwtToken::encodeNewSession(self::USER, 'h' . self::USER);
+
+        self::assertSame(5, $this->payloadOfAny($old)['tv']);
+        self::assertSame(6, $this->payloadOf($new)['tv'], 'minted with the revoked-to version');
+        self::assertSame(JwtToken::ERR_REVOKED, JwtToken::decode($old)['error'] ?? null);
+        self::assertTrue(JwtToken::decode($new)['ok'], 'the token minted after the revocation works');
+        self::assertSame(6, JwtToken::tokenVersion(self::USER));
+    }
+
+    public function testASignOutInADuplicatedDenylistRowStands(): void
+    {
+        $token = self::tokenWithTv(self::USER, 0);
+        $jti   = (string) $this->payloadOf($token)['jti'];
+        $this->db->put(self::USER, 'bcc_jwt_denylist', ['someone-else' => time() + 3600]);
+        $this->db->put(self::USER, 'bcc_jwt_denylist', [self::hash($jti) => time() + 3600]);
+
+        self::assertSame(JwtToken::ERR_LOGGED_OUT, JwtToken::decode($token)['error'] ?? null);
+    }
+
+    public function testARetirementInADuplicatedRetiredRowStands(): void
+    {
+        $token = self::tokenWithTv(self::USER, 0);
+        $jti   = (string) $this->payloadOf($token)['jti'];
+        $this->db->put(self::USER, 'bcc_jwt_retired', ['someone-else' => ['from' => 1, 'until' => time() + 3600]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() + 3600]]);
+
+        self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null);
+    }
+
+    /** The same token in two rows: signed out until the LATER of the two. */
+    public function testADenylistEntryInTwoRowsLastsUntilTheLater(): void
+    {
+        $token = self::tokenWithTv(self::USER, 0);
+        $jti   = (string) $this->payloadOf($token)['jti'];
+        $this->db->put(self::USER, 'bcc_jwt_denylist', [self::hash($jti) => time() + 3600]);
+        $this->db->put(self::USER, 'bcc_jwt_denylist', [self::hash($jti) => time() - 3600]);
+
+        self::assertSame(JwtToken::ERR_LOGGED_OUT, JwtToken::decode($token)['error'] ?? null);
+    }
+
+    /** The same token in two rows: retired over the WIDEST window (earliest from, latest until). */
+    public function testARetiredEntryInTwoRowsTakesTheWidestWindow(): void
+    {
+        $token = self::tokenWithTv(self::USER, 0);
+        $jti   = (string) $this->payloadOf($token)['jti'];
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() + 600, 'until' => time() + 3600]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() + 60]]);
+
+        self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null, 'the earlier from');
+
+        $this->db->rows = [];
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 600, 'until' => time() - 300]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() + 3600]]);
+
+        self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null, 'the later until');
+    }
+
+    // ── F-495: a write that did not land is never claimed ────────────────
+
+    public function testARevokeWhoseWriteFailsAnswersNull(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        self::assertNull(JwtToken::revokeAllForUser(self::USER), 'nothing was revoked, so no version is claimed');
+        self::assertSame(['bcc_token_version'], $GLOBALS['__bcc_ph']['failed_updates'] ?? null);
+    }
+
+    public function testALogOutWhoseWriteFailsAnswersFalse(): void
+    {
+        $payload = $this->payloadOf(self::tokenWithTv(self::USER, 0));
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_jwt_denylist'] = true;
+
+        self::assertFalse(JwtToken::logOut($payload));
+    }
+
+    public function testARetireWhoseWriteFailsAnswersFalse(): void
+    {
+        $payload = $this->payloadOf(self::tokenWithTv(self::USER, 0));
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_jwt_retired'] = true;
+
+        self::assertFalse(JwtToken::retireAfterRefresh($payload));
+    }
+
+    /**
+     * update_user_meta() answers false for an UNCHANGED value too. Retiring
+     * a token that is already retired changes nothing, so nothing is written
+     * and that is not a failure.
+     */
+    public function testRetiringAnAlreadyRetiredTokenWritesNothingAndSucceeds(): void
+    {
+        $payload = $this->payloadOf(self::tokenWithTv(self::USER, 0));
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash((string) $payload['jti']) => ['from' => time() + 60, 'until' => time() + 3600]]);
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_jwt_retired'] = true;
+
+        self::assertTrue(JwtToken::retireAfterRefresh($payload));
+        self::assertArrayNotHasKey('failed_updates', $GLOBALS['__bcc_ph'], 'no write was attempted');
     }
 }

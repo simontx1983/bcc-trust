@@ -410,7 +410,15 @@ namespace {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            // F-495: $GLOBALS['__bcc_ph']['fail_update'][$key] = true makes the
+            // write of that key fail (false, nothing stored), as a failed
+            // UPDATE does in core.
+            if (!empty($GLOBALS['__bcc_ph']['fail_update'][$key])) {
+                $GLOBALS['__bcc_ph']['failed_updates'][] = $key;
+                return false;
+            }
             $GLOBALS['__bcc_ph']['meta'][$userId][$key] = is_array($value) ? $value : (string) $value;
+            $GLOBALS['__bcc_ph']['updates'][] = $key;
             return true;
         }
     }

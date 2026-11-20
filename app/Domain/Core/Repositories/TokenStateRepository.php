@@ -46,19 +46,25 @@ final class TokenStateRepository
     public const RETIRED_KEY       = 'bcc_jwt_retired';
 
     /**
-     * Rows read at most. Each key normally has one row; WordPress allows
-     * duplicates, and the first one (lowest umeta_id) is what
-     * get_user_meta(…, true) would have answered, so that is the one used.
+     * Rows read at most. Each key normally has one row, so a FULL read means
+     * rows may be missing, and read() answers null (unknown) rather than
+     * decide on part of the state.
      */
     private const MAX_ROWS = 30;
 
     /**
      * The user's token state, or null when it could not be read.
      *
-     * Values are as stored: tv as an int, each list unserialised as
-     * get_user_meta() would have given it (JwtToken validates the shape).
+     * ⚠ DUPLICATE ROWS. update_metadata() looks for the key's existing rows
+     * with a get_col(); when that SELECT fails it falls through to
+     * add_metadata() and INSERTS a second row. Reading the first row only
+     * (what get_user_meta(…, true) does) would then silently drop a
+     * revocation or sign-out whose insert landed. So every row counts:
+     *   - tv is the HIGHEST stored value: a revocation only ever raises it;
+     *   - each list comes back as EVERY stored value, oldest row first, and
+     *     JwtToken takes their union.
      *
-     * @return array{tv: int, denylist: mixed, retired: mixed}|null null = the read failed
+     * @return array{tv: int, denylist: list<mixed>, retired: list<mixed>}|null null = the read failed, or was full
      */
     public static function read(int $userId): ?array
     {
@@ -80,22 +86,25 @@ final class TokenStateRepository
         }
 
         $rows = self::trustedRows($sql);
-        if ($rows === null) {
+        if ($rows === null || count($rows) >= self::MAX_ROWS) {
             return null;
         }
 
-        $first = [];
+        $tv       = 0;
+        $denylist = [];
+        $retired  = [];
         foreach ($rows as $row) {
-            $key = isset($row->meta_key) ? (string) $row->meta_key : '';
-            if ($key !== '' && !array_key_exists($key, $first)) {
-                $first[$key] = $row->meta_value ?? null;
+            $key   = isset($row->meta_key) ? (string) $row->meta_key : '';
+            $value = maybe_unserialize($row->meta_value ?? '');
+            if ($key === self::TOKEN_VERSION_KEY) {
+                $tv = max($tv, (int) $value);
+            } elseif ($key === self::DENYLIST_KEY) {
+                $denylist[] = $value;
+            } elseif ($key === self::RETIRED_KEY) {
+                $retired[] = $value;
             }
         }
 
-        return [
-            'tv'       => (int) maybe_unserialize($first[self::TOKEN_VERSION_KEY] ?? '0'),
-            'denylist' => maybe_unserialize($first[self::DENYLIST_KEY] ?? ''),
-            'retired'  => maybe_unserialize($first[self::RETIRED_KEY] ?? ''),
-        ];
+        return ['tv' => $tv, 'denylist' => $denylist, 'retired' => $retired];
     }
 }

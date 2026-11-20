@@ -41,7 +41,7 @@ final class TokenStateRepositoryTest extends TestCase
         $this->db->put(self::USER, 'bcc_handle', 'alice');
 
         self::assertSame(
-            ['tv' => 5, 'denylist' => ['abc' => 1900000000], 'retired' => ['def' => ['from' => 1, 'until' => 2]]],
+            ['tv' => 5, 'denylist' => [['abc' => 1900000000]], 'retired' => [['def' => ['from' => 1, 'until' => 2]]]],
             TokenStateRepository::read(self::USER)
         );
         self::assertCount(1, $this->db->queries);
@@ -70,16 +70,63 @@ final class TokenStateRepositoryTest extends TestCase
     /** A real "no rows" is the right answer for a user never revoked. */
     public function testNoRowsIsTvZeroAndEmptyLists(): void
     {
-        self::assertSame(['tv' => 0, 'denylist' => '', 'retired' => ''], TokenStateRepository::read(self::USER));
+        self::assertSame(['tv' => 0, 'denylist' => [], 'retired' => []], TokenStateRepository::read(self::USER));
     }
 
-    /** As get_user_meta(…, true): the first row (lowest umeta_id) of a duplicated key. */
-    public function testTheFirstRowOfADuplicatedKeyWins(): void
+    /**
+     * F-495: update_metadata() INSERTS a second row when its look-up of the
+     * existing one fails. The revocation is in that newer row, so the first
+     * row (get_user_meta(…, true)'s answer) must not win: the highest does,
+     * whichever row it is in.
+     */
+    public function testADuplicatedVersionReadsAsTheHighest(): void
     {
         $this->db->put(self::USER, 'bcc_token_version', 3);
         $this->db->put(self::USER, 'bcc_token_version', 9);
+        $this->db->put(self::USER, 'bcc_token_version', 4);
 
-        self::assertSame(3, TokenStateRepository::read(self::USER)['tv'] ?? null);
+        self::assertSame(9, TokenStateRepository::read(self::USER)['tv'] ?? null);
+    }
+
+    /** F-495: every stored list comes back, oldest row first; JwtToken takes the union. */
+    public function testEveryRowOfADuplicatedListComesBack(): void
+    {
+        $this->db->put(self::USER, 'bcc_jwt_denylist', ['old' => 1900000000]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', ['r1' => ['from' => 1, 'until' => 2]]);
+        $this->db->put(self::USER, 'bcc_jwt_denylist', ['new' => 1900000001]);
+
+        $state = TokenStateRepository::read(self::USER);
+
+        self::assertSame([['old' => 1900000000], ['new' => 1900000001]], $state['denylist'] ?? null);
+        self::assertSame([['r1' => ['from' => 1, 'until' => 2]]], $state['retired'] ?? null);
+    }
+
+    /**
+     * F-495: a FULL read may have left rows out (the tv row among them, if
+     * older list rows stacked up), so it is unknown, not a partial answer.
+     */
+    public function testAFullReadIsNull(): void
+    {
+        for ($i = 0; $i < 30; $i++) {
+            $this->db->put(self::USER, 'bcc_jwt_denylist', ['h' . $i => 1900000000]);
+        }
+        $this->db->put(self::USER, 'bcc_token_version', 6);
+
+        self::assertNull(TokenStateRepository::read(self::USER));
+    }
+
+    /** One row under the cap is still a whole answer. */
+    public function testOneRowUnderTheCapIsRead(): void
+    {
+        for ($i = 0; $i < 28; $i++) {
+            $this->db->put(self::USER, 'bcc_jwt_denylist', ['h' . $i => 1900000000]);
+        }
+        $this->db->put(self::USER, 'bcc_token_version', 6);
+
+        $state = TokenStateRepository::read(self::USER);
+
+        self::assertSame(6, $state['tv'] ?? null);
+        self::assertCount(28, $state['denylist'] ?? []);
     }
 
     /**
