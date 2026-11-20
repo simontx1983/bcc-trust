@@ -251,6 +251,40 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
         );
     }
 
+    /**
+     * The lookup picks the page a hide recalculates, so it must be this
+     * query's own answer: a read that did not run (an error, or the
+     * pre-flush bail with an earlier query's rows left behind) throws
+     * RepositoryReadFailure rather than naming some other page or none.
+     */
+    #[DataProvider('unreadableProbes')]
+    public function testAnUnreadableReviewLookupThrowsRatherThanNamingAPage(string $fault): void
+    {
+        global $wpdb;
+        $act = $this->actByVote[$this->voteIds[1]];
+        // An earlier query's row, left in last_result for the silent mode.
+        $wpdb->get_results('SELECT 1 AS page_id, 2 AS voter_user_id');
+
+        $thrown = null;
+        $wpdb->{$fault} = '/v\.id = CAST\(pm_sc\.meta_value AS UNSIGNED\)/';
+        try {
+            $this->votes->findReviewVoteByActivity($act);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            $thrown = $e;
+        } finally {
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertInstanceOf(\BCC\Trust\Onchain\Repositories\RepositoryReadFailure::class, $thrown);
+        self::assertSame(
+            ['page_id' => $this->page, 'voter_id' => self::VOTER_B],
+            $this->votes->findReviewVoteByActivity($act),
+            'control: healthy again, the right page'
+        );
+    }
+
     public function testANonReviewActivityIsIgnored(): void
     {
         global $wpdb;

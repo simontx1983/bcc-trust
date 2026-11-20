@@ -212,6 +212,41 @@ class VoteJobDispatcher {
         self::enqueue( 'bcc_trust_async_edge_recalculate', [ $voterId, $pageId ] );
     }
 
+    /**
+     * The `bcc_trust_async_edge_recalculate` job ({@see dispatchRemoval()}):
+     * recalculate the voter → page-owner trust edge after a vote removal.
+     * Registered in Plugin::registerAsyncJobs with 2 accepted args.
+     *
+     * The owner is resolved here: recalculateVoteEdge() takes
+     * (source_user_id, target_user_id), never the page id.
+     *
+     * A failure is recorded and logged, and the job ends normally, as
+     * handlePostVote() treats its sub-tasks. An escaping throw would end a
+     * wp-cron tick and skip that tick's later events. The edge keeps its last
+     * value (its read throws before it writes) until the pair is next
+     * recalculated. Same metric event as handlePostVote(), so the bcc-core
+     * subsystem map and its docs stay as they are.
+     */
+    public static function handleEdgeRecalculate( int $voterId, int $pageId ): void {
+        try {
+            $ownerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId( $pageId );
+            if ( $ownerId > 0 && $ownerId !== $voterId ) {
+                \BCC\Trust\Core\Plugin::instance()->edgeRepository()->recalculateVoteEdge( $voterId, $ownerId );
+            }
+        } catch ( \Throwable $e ) {
+            if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
+                \BCC\Core\Observability\DegradationMetrics::record( 'post_commit_task', 'vote_subtask_failed' );
+            }
+            if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
+                \BCC\Core\Log\Logger::error( '[BCC Trust] Edge recalculation after a vote removal failed', [
+                    'voter_id' => $voterId,
+                    'page_id'  => $pageId,
+                    'error'    => $e->getMessage(),
+                ] );
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------

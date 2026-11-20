@@ -1340,7 +1340,8 @@ class VoteRepository {
      * vote has since been removed still warrants a recalculation of its page.
      *
      * @return array{page_id: int, voter_id: int}|null
-     * @throws RepositoryException on database failure
+     * @throws RepositoryException when prepare() produced no statement
+     * @throws RepositoryReadFailure when the lookup did not run
      */
     public function findReviewVoteByActivity(int $actId): ?array
     {
@@ -1376,14 +1377,16 @@ class VoteRepository {
             throw new RepositoryException('VoteRepository::findReviewVoteByActivity: wpdb::prepare() produced no statement');
         }
 
-        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string}|null $row */
-        $row = $wpdb->get_row($sql);
-        if ($wpdb->last_error !== '') {
-            throw new RepositoryException('VoteRepository::findReviewVoteByActivity failed: ' . $wpdb->last_error);
-        }
-        if (!is_object($row)) {
+        // The answer picks the page to recalculate, so it must be this query's:
+        // runRead() throws on a read that did not run, the pre-flush() bail
+        // included, rather than handing back an earlier query's row.
+        $rows = self::runRead($sql, __FUNCTION__, true);
+        if (!isset($rows[0])) {
             return null;
         }
+        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string} $row */
+        $row = $rows[0];
+
         return ['page_id' => (int) $row->page_id, 'voter_id' => (int) $row->voter_user_id];
     }
 
