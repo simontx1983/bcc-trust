@@ -361,14 +361,16 @@ final class TokenStatePoisonTest extends TestCase
     {
         $token = self::tokenWithTv(self::USER, 0);
         $jti   = (string) $this->payloadOf($token)['jti'];
-        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() + 600, 'until' => time() + 3600]]);
+        // The NEWER row alone would not retire it yet (its from is ahead).
         $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() + 60]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() + 600, 'until' => time() + 3600]]);
 
         self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null, 'the earlier from');
 
+        // The NEWER row alone would have let it go (its until is past).
         $this->db->rows = [];
-        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 600, 'until' => time() - 300]]);
-        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() + 3600]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 600, 'until' => time() + 3600]]);
+        $this->db->put(self::USER, 'bcc_jwt_retired', [self::hash($jti) => ['from' => time() - 10, 'until' => time() - 5]]);
 
         self::assertSame(JwtToken::ERR_SUPERSEDED, JwtToken::decode($token)['error'] ?? null, 'the later until');
     }
