@@ -83,8 +83,15 @@ class FeedItemReportVisibility
     public function __construct(
         private readonly GroupsService $groups,
         private readonly HiddenActivityRepository $hidden,
-        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null
+        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null,
+        private ?\BCC\Trust\Core\Repositories\CommentRepository $comments = null
     ) {
+    }
+
+    /** Injected by tests; built lazily in production, as $votes is. */
+    private function comments(): \BCC\Trust\Core\Repositories\CommentRepository
+    {
+        return $this->comments ??= \BCC\Trust\Core\Plugin::instance()->commentRepository();
     }
 
     /**
@@ -154,6 +161,19 @@ class FeedItemReportVisibility
         // closed on any module added later. Blog posts reach the feed as
         // module 204 (blog_excerpt), which is on the list.
         if (!FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
+            return false;
+        }
+        // ⚠ A COMMENT act is not a feed item, and nothing above can tell.
+        // PeepSo gives a comment's activity row the SAME module a status post
+        // carries, so it passes the allowlist, and every rule below would then
+        // be asked about the COMMENT: its own wp_post has no peepso_group_id
+        // (a secret group's comment reads as un-grouped) and its author's own
+        // §F-02 level. So a `feed_item` report on a comment under a secret
+        // group's post, a followers-only post or a page wall was FILED, where
+        // a missing id gets 404. Refused here, so no caller of canSee() can be
+        // handed one. (bcc-core #140's top-level-only read would do the same,
+        // but is not in production yet; this works on any core.)
+        if (FeedItemGate::isCommentAct($actId, $this->comments())) {
             return false;
         }
         if (!$this->isLive($activity)) {
