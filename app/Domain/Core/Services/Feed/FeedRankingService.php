@@ -49,7 +49,6 @@ use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
-use BCC\Trust\Core\Support\RestrictedGroups;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 
 if (!defined('ABSPATH')) {
@@ -403,8 +402,8 @@ final class FeedRankingService
 
         // ⚠ NO RESTRICTED-GROUP LIST IS COMPUTED HERE, DELIBERATELY.
         //
-        // This used to call `resolveRestrictedGroupIds(0)` and pass the
-        // result as `$excludedGroupIds`. That parameter is a DOCUMENTED
+        // This used to compute a restricted-group list and pass it as
+        // `$excludedGroupIds`. That parameter is a DOCUMENTED
         // NO-OP in bcc-core — an exclusion passed there filters NOTHING
         // (see the `@param $excludedGroupIds` entry on
         // PeepSoActivityRepository::getActivities, and the "live
@@ -492,8 +491,7 @@ final class FeedRankingService
      *     through viewerExclusions().
      *   - same restricted-group posture: NEITHER method computes one, because
      *     `$excludedGroupIds` is a documented NO-OP in bcc-core. Both used to
-     *     call `self::resolveRestrictedGroupIds(0)` and pass the result; both
-     *     now pass null. ⚠ The parity still holds and still matters — what
+     *     pass a restricted-group list; neither does now. ⚠ The parity still holds and still matters — what
      *     holds it is the `public_all` gate on the next bullet, NOT an
      *     exclusion list. Neither method may start passing a REAL
      *     `$restrictedGroupIds`/`$groupGateMode` without the other, or the
@@ -716,11 +714,12 @@ final class FeedRankingService
         $excluded   = $exclusions->excludedAuthorIds();
         $hidden     = $exclusions->hiddenActivityIds();
 
-        // §4.7.x main-feed leak gate — drop posts in closed/secret/
-        // NFT-gated groups the viewer is not a member of. Subtractive:
-        // (non-open groups) - (viewer's memberships). Empty list
-        // short-circuits the SQL exclude branch entirely.
-        $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
+        // Group posts: no exclusion list is computed here. The gate is in
+        // bcc-core's getActivities(): a group-tagged post reaches this
+        // non-group read only with `_bcc_post_visibility = 'public_all'`,
+        // and the F-23 syndication gate (on the STRICT non-open set) drops
+        // one made while its group was open once the group closes. The
+        // `$excludedGroupIds` parameter there is inert; see its @param.
 
         // §F-02 per-post visibility — a post is readable only at the
         // STRICTER of its own act_access and its author's profile level,
@@ -741,8 +740,6 @@ final class FeedRankingService
                 $limit,
                 $excluded === [] ? null : $excluded,
                 $hidden === []   ? null : $hidden,
-                null,
-                $excludedGroups === [] ? null : $excludedGroups,
                 viewerFriendIds: $friendIds,
                 enforcePostVisibility: $enforceF02
             ),
@@ -931,8 +928,8 @@ final class FeedRankingService
      * `ActivityFeedService::getActivityById()` as a post-fetch check,
      * since a single-row-by-id lookup has no SQL `NOT IN` list to narrow.
      *
-     * The group-leak gate (`resolveRestrictedGroupIds`) is deliberately
-     * NOT recomputed here: on the non-group path it's already inert in
+     * No group exclusion list is computed here either: on the non-group
+     * path such a list is inert in
      * `PeepSoActivityRepository::getActivities()` (the per-post
      * `_bcc_post_visibility` gate supersedes it — see that method's
      * docblock), and bcc-core's `getActivityById()` enforces that same
@@ -1316,11 +1313,9 @@ final class FeedRankingService
         $excluded   = $exclusions->excludedAuthorIds();
         $hidden     = $exclusions->hiddenActivityIds();
 
-        // §4.7.x author-wall leak gate — same shape as the main feed.
-        // A wall is a one-author slice of the same activity stream, so
-        // posts the wall owner made inside a closed/secret/NFT-gated
-        // group the viewer can't see must be filtered out here too.
-        $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
+        // Group posts: as on the main feed, no exclusion list. A wall is a
+        // one-author slice of the same stream, gated in bcc-core's
+        // getActivities() by `public_all` and the F-23 syndication gate.
 
         // §F-02 per-post visibility. The wall is where the setting is
         // most likely to be TESTED by its owner — and note that this gate
@@ -1348,7 +1343,6 @@ final class FeedRankingService
                 $limit,
                 $excluded === [] ? null : $excluded,
                 $hidden === []   ? null : $hidden,
-                $excludedGroups === [] ? null : $excludedGroups,
                 viewerFriendIds: $friendIds,
                 enforcePostVisibility: $enforceF02,
                 moduleIds: $moduleIds
@@ -1452,9 +1446,8 @@ final class FeedRankingService
      * `GET /bcc/v1/pages/{id}/feed`.
      *
      * Shares the author wall's hydration chain and its two user-level
-     * exclusion lists, but NOT its third: the author wall also passes
-     * `resolveRestrictedGroupIds($viewerId)` (the §4.7.x leak gate) and this
-     * path deliberately passes no group exclusion at all.
+     * exclusion lists. Neither passes a group exclusion list (on these
+     * reads it would be inert; see getActivityForAuthor()).
      *
      * ⚠ That is safe by construction, not by oversight, and the construction
      * is what carries it: `PostsService::createStatus()` refuses a
@@ -1672,57 +1665,6 @@ final class FeedRankingService
     // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * §4.7.x main-feed group-leak gate — compute the list of group IDs
-     * the viewer must NOT see posts from. Subtractive composition:
-     *
-     *   (every non-open group on the install) - (viewer's memberships)
-     *
-     * NB: this canonical seam is only invoked from the §F3 single brain
-     * here; bcc-core stays unaware of WHY group IDs are excluded —
-     * same coupling-avoidance pattern as the existing `excludedAuthorIds`
-     * (caution/risky tier) and `excludedActIds` (moderation hide) channels.
-     *
-     * Anon viewers (id<=0) get the full non-open list back — they
-     * cannot be a member of anything, so every closed/secret/NFT-gated
-     * group is restricted. Authed viewers get their membership list
-     * subtracted out so their own gated-group posts surface in the
-     * main feed normally.
-     *
-     * Both inputs are bounded:
-     *  - `getNonOpenGroupIds()` caps at 500 (V1 scale; ~hundreds of
-     *    groups across the install)
-     *  - `getUserMemberGroupIds()` caps at 1000 here (looser than the
-     *    default 200; we want to subtract every membership the viewer
-     *    has, not just their first 200, otherwise gated groups they
-     *    belong to but happen to fall outside the cap re-leak).
-     *
-     * Caller passes `null` to bcc-core when this returns `[]` — empty
-     * lists short-circuit the SQL exclude branch entirely.
-     *
-     * Caching posture (2026-06-18 perf audit P1-A, closed 2026-07-16):
-     *  - the non-open half is generation-cached in bcc-core
-     *    (`PeepSoGroupRepository::getNonOpenGroupIds`, busted by the
-     *    `peepso_group_privacy` post-meta hooks wired in bcc-core.php)
-     *  - the membership half is INTENTIONALLY UNCACHED — see the leak
-     *    invariant on `getUserMemberGroupIds`. Do not memoize this
-     *    method across requests; a request-scoped memo would be dead
-     *    code too (each request calls it at most once per viewer id —
-     *    the authed cold-start double-call uses two DIFFERENT ids).
-     *
-     * @return list<int>
-     */
-    private static function resolveRestrictedGroupIds(int $viewerId): array
-    {
-        // Extracted to Support\RestrictedGroups so the profile Blog tab can
-        // ask the same question (§11 — one definition of "restricted", not
-        // two). This method stays as the feed's call-site name; the five
-        // call sites above are untouched. forViewer() is the behaviour that
-        // used to live here, byte for byte, including passing the
-        // repository's default 500 bound explicitly.
-        return RestrictedGroups::forViewer($viewerId);
-    }
 
     /**
      * THE PER-VIEWER PAGE FILTERS — the one list every feed read applies to
