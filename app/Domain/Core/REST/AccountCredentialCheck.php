@@ -359,6 +359,11 @@ final class AccountCredentialCheck
 
         $token   = BearerAuth::readBearerToken();
         $decoded = $token !== null ? JwtToken::decode($token) : null;
+        if ($decoded !== null && $decoded['ok'] !== true && $decoded['error'] === JwtToken::ERR_STATE_UNAVAILABLE) {
+            // F-495: the token's state could not be read on this second look.
+            // Unknown, not invalid: the same 503 as the door, never a 401.
+            return BearerAuth::unavailableResponse();
+        }
         if ($decoded === null || $decoded['ok'] !== true) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in again to confirm with a wallet.', 401);
         }

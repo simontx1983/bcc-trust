@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
+use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
@@ -12,6 +13,7 @@ use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\Vote\ReviewVisibilityScoreSync;
 use BCC\Trust\Core\Services\VoteService;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -55,6 +57,9 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
     private const VOTER_B   = 986002;
     private const ACT_BASE  = 2600000500;
     private const POST_BASE = 2600000600;
+
+    /** The two existence probes behind hiddenReviewExclusion(), and nothing else. */
+    private const PROBE_FAULT = "/^SHOW TABLES LIKE '[^']*(peepso_activities|bcc_hidden_activities)'$/";
 
     private int $page;
     private bool $activitiesWasOurs = false;
@@ -199,6 +204,84 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
             ['bcc_trust_activity_visibility_changed', 'bcc_trust_activity_visibility_changed'],
             array_values(array_filter($this->firedHooks(), static fn (string $h): bool => $h === 'bcc_trust_activity_visibility_changed')),
             'one signal per real hide and per real unhide'
+        );
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function unreadableProbes(): iterable
+    {
+        yield 'the probe errors'               => ['failQueriesMatching'];
+        yield 'the probe bails before flush()' => ['failSilentlyMatching'];
+    }
+
+    /**
+     * An unreadable table probe keeps the hidden-review exclusion, and the
+     * real tables prove it: the saved score, the tallies and the
+     * hide-trigger lookup all agree with the healthy-database answer. The
+     * silent mode is wpdb's pre-flush() bail (no last_error, the previous
+     * query's rows still in last_result). Rationale: M7 (private tracker).
+     */
+    #[DataProvider('unreadableProbes')]
+    public function testAnUnreadableTableProbeStillKeepsTheHiddenReviewOutOfTheScore(string $fault): void
+    {
+        global $wpdb;
+        $act = $this->actByVote[$this->voteIds[1]];
+        self::assertTrue($this->hidden->add($act, 0, 'autohide_threshold'));
+
+        TableRegistry::flushExistenceCache();
+        $wpdb->{$fault} = self::PROBE_FAULT;
+        try {
+            $this->voteService()->recalculateScore($this->page);
+            $active  = $this->votes->countActiveForPage($this->page);
+            $upvotes = $this->votes->getVoteCountsByType($this->page)['upvotes'];
+            $review  = $this->votes->findReviewVoteByActivity($act);
+            $fired   = $wpdb->injectedFailures + $wpdb->silentFailures;
+        } finally {
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertSame(1, $this->score()['vote_count'], 'the SAVED score leaves the hidden review out');
+        self::assertSame(1, $active);
+        self::assertSame(1, $upvotes);
+        self::assertSame(
+            ['page_id' => $this->page, 'voter_id' => self::VOTER_B],
+            $review,
+            'an unknown probe is not "not a review": the hide still finds its page'
+        );
+    }
+
+    /**
+     * The lookup picks the page a hide recalculates, so it must be this
+     * query's own answer: a read that did not run (an error, or the
+     * pre-flush bail with an earlier query's rows left behind) throws
+     * RepositoryReadFailure rather than naming some other page or none.
+     */
+    #[DataProvider('unreadableProbes')]
+    public function testAnUnreadableReviewLookupThrowsRatherThanNamingAPage(string $fault): void
+    {
+        global $wpdb;
+        $act = $this->actByVote[$this->voteIds[1]];
+        // An earlier query's row, left in last_result for the silent mode.
+        $wpdb->get_results('SELECT 1 AS page_id, 2 AS voter_user_id');
+
+        $thrown = null;
+        $wpdb->{$fault} = '/v\.id = CAST\(pm_sc\.meta_value AS UNSIGNED\)/';
+        try {
+            $this->votes->findReviewVoteByActivity($act);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            $thrown = $e;
+        } finally {
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+        self::assertInstanceOf(\BCC\Trust\Onchain\Repositories\RepositoryReadFailure::class, $thrown);
+        self::assertSame(
+            ['page_id' => $this->page, 'voter_id' => self::VOTER_B],
+            $this->votes->findReviewVoteByActivity($act),
+            'control: healthy again, the right page'
         );
     }
 

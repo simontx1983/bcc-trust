@@ -607,6 +607,67 @@ final class AnnouncementRepository
     }
 
     /**
+     * The page each of these announcements belongs to (`post_parent`), in ONE
+     * query: the read behind the feed's secret-page filter
+     * ({@see \BCC\Trust\Core\Announcements\AnnouncementPageAccess}).
+     *
+     * A feed activity for an announcement names the announcement's wp_post
+     * (its `external_id`) and nothing else; the page is only here.
+     *
+     * ⚠ An id that is not an announcement, or whose post has no parent, is
+     * ABSENT from the map. The caller reads absent as "do not show", never
+     * as an open page.
+     *
+     * ⚠ Bounded by its input, and the LIMIT says so: the feed passes the
+     * announcements on ONE page (REST clamps a page to 50 items).
+     *
+     * @param list<int> $announcementIds
+     * @return array<int, int> announcement id => page id
+     * @throws RepositoryException when the read fails
+     */
+    public function pageIdsFor(array $announcementIds): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $announcementIds),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $idIn = implode(', ', array_fill(0, count($ids), '%d'));
+        $sql  = 'SELECT p.ID AS announcement_id, p.post_parent AS page_id
+                   FROM ' . $this->postsTable . ' p
+                  WHERE p.ID IN (' . $idIn . ')
+                    AND p.post_type = %s
+                    AND p.post_parent > 0
+                  LIMIT ' . count($ids);
+
+        $wpdb->last_error = '';
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...array_merge($ids, [AnnouncementPostType::POST_TYPE])));
+
+        if (strlen((string) $wpdb->last_error) > 0 || !is_array($rows)) {
+            throw new RepositoryException('announcement_page_ids_failed');
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->announcement_id, $row->page_id)) {
+                continue;
+            }
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[(int) $row->announcement_id] = $pageId;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Every currently pinned announcement id on a page.
      *
      * ⚠ THIS LIVES HERE BECAUSE §1 PUTS IT HERE. The A3 write layer needs it to

@@ -37,6 +37,15 @@ final class ModerationService
     /** @var (\Closure(int): void)|null re-evaluates a page's elite flag; null = Plugin's service */
     private ?\Closure $eliteRecompute;
 
+    /**
+     * F-508: members whose suspension committed but whose bearer-token
+     * revocation did not land, this request (user id => true). The admin is
+     * told, so they can retry; the log alone was not enough.
+     *
+     * @var array<int, true>
+     */
+    private array $revokeFailed = [];
+
     public function __construct(
         ScoreRepository $scoreRepository,
         UserInfoRepository $userInfoRepository,
@@ -65,6 +74,7 @@ final class ModerationService
         'already_suspended' => 'already suspended',
         'unverifiable'      => 'could not check whether they are already suspended; try again',
         'not_suspended'     => 'was not suspended',
+        'revoke_failed'     => 'suspended, but their existing sign-ins could not be ended; unsuspend and suspend them again to retry',
     ];
 
     /** Per-admin, short-lived: the names a bulk or ring suspend skipped, for the next page view. */
@@ -272,6 +282,11 @@ final class ModerationService
         EdgeCache::purge(EdgeCache::TAG_MEMBERS);
 
         echo '<div class="notice notice-success"><p>User suspended. Reason: ' . esc_html($reason) . '</p></div>';
+        if (isset($this->revokeFailed[$userId])) {
+            $warning = 'Their existing sign-ins could not be ended. Unsuspend and suspend them again to retry.';
+            echo '<div class="notice notice-warning"><p>' . esc_html($warning) . '</p></div>';
+            return ['success' => true, 'message' => 'User suspended. Reason: ' . $reason . '. ' . $warning];
+        }
         return ['success' => true, 'message' => 'User suspended. Reason: ' . $reason];
     }
 
@@ -934,6 +949,9 @@ final class ModerationService
                     try {
                         $this->suspendAtomically($uid, $adminId, 'vote_ring', $note);
                         $suspended++;
+                        if (isset($this->revokeFailed[$uid])) {
+                            $skipped[$uid] = 'revoke_failed';
+                        }
                         // F-315 (L2): per-member audit, as a single suspend.
                         $this->logAction('admin_suspend', $uid, ['reason' => 'vote_ring', 'notes' => $note, 'via' => 'ring']);
                     } catch (\Throwable $e) {
@@ -1076,6 +1094,9 @@ final class ModerationService
                         $this->suspendAtomically($uid, $adminId, 'manual_suspension', '');
                         $processed++;
                         $membersChanged = true;
+                        if (isset($this->revokeFailed[$uid])) {
+                            $skipped[$uid] = 'revoke_failed';
+                        }
                         // F-315 (L2): the same per-member audit row a single
                         // suspend writes, not only the aggregate below.
                         $this->logAction('admin_suspend', $uid, ['reason' => 'manual_suspension', 'notes' => '', 'via' => 'bulk']);
@@ -1261,7 +1282,11 @@ final class ModerationService
      */
     private function revokeSessions(int $userId): void
     {
-        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
+        // F-508: a revocation that did not land is logged by JwtToken and
+        // flagged here, so the admin is told and can retry.
+        if (\BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId) === null) {
+            $this->revokeFailed[$userId] = true;
+        }
     }
 
     /**

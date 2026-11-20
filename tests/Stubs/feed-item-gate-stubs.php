@@ -17,11 +17,33 @@ namespace BCC\Core\Repositories {
                 $map = $GLOBALS['__bcc_fig_module_by_act'] ?? [];
                 return $map[$actId] ?? null;
             }
+
+            /**
+             * Only the announcement arm reads the row (for its notice id),
+             * so the row is built from the module map.
+             *
+             * @param mixed ...$rest
+             */
+            public static function getById(int $actId, ...$rest): ?object
+            {
+                $module = $GLOBALS['__bcc_fig_module_by_act'][$actId] ?? null;
+
+                return $module === null
+                    ? null
+                    : (object) ['act_id' => $actId, 'act_module_id' => $module, 'act_external_id' => $actId + 1, 'act_user_id' => (int) ($GLOBALS['__bcc_fig_author'] ?? 0)];
+            }
         }
     }
 }
 
 namespace {
+    if (!function_exists('get_current_user_id')) {
+        function get_current_user_id(): int
+        {
+            return (int) ($GLOBALS['__bcc_fig_viewer'] ?? 0);
+        }
+    }
+
     if (!class_exists('WP_REST_Response', false)) {
         class WP_REST_Response
         {

@@ -703,7 +703,8 @@ final class WalletAuthController
         $typedEmail = '';
         if ($emailRaw !== '') {
             $typedEmail = sanitize_email($emailRaw);
-            if ($typedEmail === '' || !is_email($typedEmail)) {
+            // F-458: the reserved placeholder domain is refused too.
+            if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($typedEmail)) {
                 return ApiResponse::error('bcc_invalid_request', 'Email is not a valid format.', 400);
             }
         }

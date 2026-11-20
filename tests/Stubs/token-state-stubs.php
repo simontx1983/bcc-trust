@@ -35,7 +35,7 @@ namespace BCC\Trust\Core\Repositories {
             public const DENYLIST_KEY      = 'bcc_jwt_denylist';
             public const RETIRED_KEY       = 'bcc_jwt_retired';
 
-            /** @return array{tv: int, denylist: mixed, retired: mixed}|null */
+            /** @return array{tv: int, denylist: list<mixed>, retired: list<mixed>}|null */
             public static function read(int $userId): ?array
             {
                 $GLOBALS['__bcc_token_state']['reads'][] = $userId;
@@ -51,10 +51,12 @@ namespace BCC\Trust\Core\Repositories {
                     ? 'BCC\Trust\Core\Support\get_user_meta'
                     : 'get_user_meta';
 
+                // One stored value per list, in the real class's shape (a
+                // list of every row's value; F-495).
                 return [
                     'tv'       => (int) $get($userId, self::TOKEN_VERSION_KEY, true),
-                    'denylist' => $get($userId, self::DENYLIST_KEY, true),
-                    'retired'  => $get($userId, self::RETIRED_KEY, true),
+                    'denylist' => [$get($userId, self::DENYLIST_KEY, true)],
+                    'retired'  => [$get($userId, self::RETIRED_KEY, true)],
                 ];
             }
         }

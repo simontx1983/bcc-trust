@@ -238,4 +238,51 @@ final class OAuthCompleteRetryTest extends TestCase
         self::assertSame('second', $other['data']['handle']);
         self::assertCount(2, $GLOBALS['__bcc_ph']['users']);
     }
+
+    // ── F-458: the reserved placeholder domain is never an account's address ──
+
+    /** @return array{status: int, data: array<string, mixed>, code: string} */
+    private static function completeTyping(string $token, string $handle, string $typedEmail): array
+    {
+        $resp = (new OAuthController())->oauthComplete(new \WP_REST_Request(['provider_token' => $token, 'handle' => $handle, 'email' => $typedEmail]));
+        $body = $resp->get_data();
+        return [
+            'status' => $resp->get_status(),
+            'data'   => is_array($body) ? (array) ($body['data'] ?? []) : [],
+            'code'   => is_array($body) ? (string) ($body['error']['code'] ?? '') : '',
+        ];
+    }
+
+    public function testATypedAddressOnTheReservedDomainIsRefusedAndNoAccountIsMade(): void
+    {
+        AuthSupport::storeOauthProviderToken('x-token', [
+            'provider' => 'twitter', 'provider_id' => 'x-1', 'email' => '', 'display_name' => 'Birdie',
+        ]);
+
+        $res = self::completeTyping('x-token', 'birdie', 'birdie@NoReply.BCC.Local');
+
+        self::assertSame(422, $res['status']);
+        self::assertSame('bcc_invalid_email', $res['code']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['users'], 'no account');
+    }
+
+    /**
+     * A provider address on the reserved domain is not used, and the typed
+     * address that replaces it is never taken as provider-verified, whatever
+     * the provider's claim said.
+     */
+    public function testAProviderAddressOnTheReservedDomainFallsBackToAnUnverifiedTypedOne(): void
+    {
+        AuthSupport::storeOauthProviderToken('odd-token', [
+            'provider' => 'google', 'provider_id' => 'google-odd', 'email' => 'odd@noreply.bcc.local',
+            'email_verified' => true, 'display_name' => 'Odd',
+        ]);
+
+        $res = self::completeTyping('odd-token', 'oddone', 'odd@example.test');
+
+        self::assertSame(201, $res['status']);
+        $id = (int) $res['data']['user_id'];
+        self::assertSame('odd@example.test', $GLOBALS['__bcc_ph']['users'][$id]['email']);
+        self::assertSame('0', $GLOBALS['__bcc_ph']['meta'][$id][AuthSupport::META_EMAIL_VERIFIED] ?? null, 'the typed address still has to be proven');
+    }
 }

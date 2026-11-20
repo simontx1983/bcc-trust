@@ -17,6 +17,11 @@
  * unprovable from any one of them alone.
  */
 
+if (!defined('ABSPATH')) {
+    fwrite(STDERR, "must run inside WordPress\n");
+    exit(1);
+}
+
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver as Caps;
 use BCC\Trust\Core\Announcements\AnnouncementModerationPolicy as Policy;
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;

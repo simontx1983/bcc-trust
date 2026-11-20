@@ -288,7 +288,8 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
      * It fails the way WPDB actually fails — `query()` returns false and
      * `last_error` is set, while `get_col()` still returns an array — which
      * is precisely the behaviour a previous version of this work assumed
-     * wrongly.
+     * wrongly. And it fails only on EXECUTION, as WPDB does: `prepare()`
+     * always passes through, whatever its template contains.
      */
     public function testAFailedNonOpenLookupLeaksNothing(): void
     {
@@ -312,8 +313,12 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             {
                 $sql = $args[0] ?? '';
 
-                // The non-open-groups lookup, and only that one.
-                if (is_string($sql) && str_contains($sql, 'peepso_group_privacy')) {
+                // The non-open-groups lookup, and only that one, failing where
+                // wpdb fails: when the statement RUNS. prepare() never fails,
+                // and the lookup's SQL template may carry the meta key itself
+                // (bcc-core's shared privacy predicate embeds it), so a
+                // prepare() call must pass through to the real handle.
+                if ($name !== 'prepare' && is_string($sql) && str_contains($sql, 'peepso_group_privacy')) {
                     $this->last_error = 'WordPress database error: simulated failure';
 
                     return $name === 'query' ? false : [];

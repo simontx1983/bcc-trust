@@ -153,6 +153,21 @@ class CapabilityResolver
         }
 
         $custody = $this->custodyState($userId);
+
+        // ⛔ FAIL CLOSED ON AN UNREADABLE COUNT, and before the comparison.
+        // This gate decides a DURABLE write: both keys that reach here —
+        // CREATE_COMMUNITY and RECEIVE_COMMUNITY — grant custody of a
+        // community, and what it admits stays granted after the fault
+        // clears. "We could not count" is not "under the cap".
+        //
+        // ⚠ Deliberately a DENY and not an `unknown()` decision: callers
+        // treat unknown as deferred-to-a-live-gate (see the
+        // `deferred_to_live_gate` branch in can()), and there is no live
+        // gate behind this one to defer to.
+        if ($custody === null) {
+            return CapabilityDecision::denied('unavailable', 'community_custody');
+        }
+
         if ($custody['owned'] >= $custody['cap']) {
             return CapabilityDecision::denied('cap_reached', 'community_custody');
         }
@@ -350,9 +365,13 @@ class CapabilityResolver
      * (resolveCustodyAcquisition / cooldownActive) so the matrix test
      * exercises the real math against faked facts.
      *
-     * @return array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}
+     * ⚠ NULL means the owned-group count could not be READ (F-503). It is
+     * not "owns none" and not "no cap" — the caller must refuse rather than
+     * compare against a number it does not have.
+     *
+     * @return array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null
      */
-    protected function custodyState(int $userId): array
+    protected function custodyState(int $userId): ?array
     {
         $plugin = \BCC\Trust\Core\Plugin::instance();
         $config = $plugin->rankScoringConfig();
@@ -373,8 +392,25 @@ class CapabilityResolver
             $lastTs = $parsed === false ? null : $parsed;
         }
 
+        // ⚠⚠ THE STRICT TWIN, and the difference is the whole point.
+        // `countOwnedUserGroups()` returns `int`, and `get_var()` answers
+        // null for a read that did not run — which `(int)` turns into 0.
+        // A cap comparison then reads a failed read as "owns none", the
+        // most permissive answer available, and admits a write that stays
+        // granted after the fault clears.
+        //
+        // `countOwnedUserGroupsOrFail()` answers null instead, and null
+        // travels out of here as null so the CALLER refuses. "Unknown" must
+        // never be collapsed into a number here — a 0 substituted at this
+        // layer would be indistinguishable from a real count by the time it
+        // reached the comparison.
+        $owned = \BCC\Core\Repositories\PeepSoGroupRepository::countOwnedUserGroupsOrFail($userId);
+        if ($owned === null) {
+            return null;
+        }
+
         return [
-            'owned'            => \BCC\Core\Repositories\PeepSoGroupRepository::countOwnedUserGroups($userId),
+            'owned'            => $owned,
             'cap'              => $cap,
             'last_event_ts'    => $lastTs,
             'cooldown_seconds' => $config->communityCooldownDays * 86400,

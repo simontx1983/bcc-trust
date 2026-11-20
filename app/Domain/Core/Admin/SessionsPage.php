@@ -39,6 +39,7 @@ final class SessionsPage
         'account_password_changed',
         'account_deleted',
         'sessions_revoked_all',
+        'sessions_revoke_failed', // F-508: a sign-out-everywhere whose revocation did not land
         'wallet_linked',
         'wallet_unlinked',
     ];
@@ -181,7 +182,8 @@ final class SessionsPage
 
             $actionTone = match (true) {
                 $action === 'account_deleted',
-                $action === 'sessions_revoked_all'    => AdminUi::BAD,
+                $action === 'sessions_revoked_all',
+                $action === 'sessions_revoke_failed'  => AdminUi::BAD,
                 $action === 'account_password_changed',
                 $action === 'account_email_changed'   => AdminUi::WARN,
                 $action === 'wallet_unlinked'         => AdminUi::WARN,

@@ -95,6 +95,16 @@ final class OnboardingEndpoint
         'creators'   => ['page_type' => 'nft',       'card_kind' => 'creator'],
     ];
 
+    /**
+     * F-439: the only bucket `?chain=` can re-rank. A validator page carries
+     * its chain (`_bcc_onchain_validator_id` → the validator's chain), which
+     * PageDiscoveryService's `chain_slug` filter joins through. Builder pages
+     * carry no chain at all, and an NFT creator's chain is only reachable
+     * through collection claims, so neither is biased: claiming they were
+     * would be false.
+     */
+    private const CHAIN_BIASED_BUCKET = 'validators';
+
     public static function register(): void
     {
         $instance = new self();
@@ -124,6 +134,14 @@ final class OnboardingEndpoint
                 'methods'             => WP_REST_Server::READABLE,
                 'callback'            => [$instance, 'suggestions'],
                 'permission_callback' => '__return_true',
+                'args' => [
+                    // F-439: optional home-chain bias for the validators bucket.
+                    'chain' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                ],
             ]
         );
 
@@ -277,6 +295,19 @@ final class OnboardingEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // F-439: optional `?chain=` (a home-chain slug, the same allowlist
+        // as POST /me/onboarding/complete). Unknown → 400, never a silent
+        // unbiased answer to a typo.
+        $chain    = null;
+        $chainRaw = $request->get_param('chain');
+        if (is_string($chainRaw) && trim($chainRaw) !== '') {
+            $candidate = strtolower(trim($chainRaw));
+            if (!in_array($candidate, self::HOME_CHAINS, true)) {
+                return ApiResponse::error('bcc_invalid_request', 'chain must be a known home chain.', 400);
+            }
+            $chain = $candidate;
+        }
+
         $cardSvc   = Plugin::instance()->cardViewService();
         $discovery = Plugin::instance()->pageDiscoveryService();
 
@@ -287,52 +318,131 @@ final class OnboardingEndpoint
         ];
 
         // Two passes: collect every bucket's page ids first, then prime
-        // ONE PageCardPrefetcher bundle across all 12 candidates so the
+        // ONE PageCardPrefetcher bundle across all candidates so the
         // per-card hydration below doesn't N+1 (all three buckets are
         // page kinds — the bundle groups by target_kind internally).
+        //
+        // F-439: with `?chain=`, the biased bucket's candidates are that
+        // chain's pages first, then its plain ranking. The plain query is
+        // the very one the unbiased path runs (same args, same cache key).
         $bucketPageIds = [];
+        $chainPageIds  = [];
         foreach (self::BUCKETS as $bucket => $spec) {
-            $bucketPageIds[$bucket] = [];
-
-            $result = $discovery->query([
-                'types'         => [$spec['page_type']],
-                'sort'          => 'trust',
-                'verified_only' => false,
-                'limit'         => self::SUGGESTIONS_LIMIT_PER_TYPE,
-                'page'          => 1,
-            ]);
-
-            $items = is_array($result['results'] ?? null) ? $result['results'] : [];
-            foreach ($items as $item) {
-                if (!is_array($item)) {
-                    continue;
-                }
-                $pageId = (int) ($item['page_id'] ?? 0);
-                if ($pageId <= 0) {
-                    continue;
-                }
-                $bucketPageIds[$bucket][] = $pageId;
+            $bucketPageIds[$bucket] = self::suggestionPageIds(
+                $discovery->query(self::suggestionQuery($spec['page_type'], self::SUGGESTIONS_LIMIT_PER_TYPE))
+            );
+            if ($chain !== null && $bucket === self::CHAIN_BIASED_BUCKET) {
+                $chainPageIds           = self::chainFirstPageIds($discovery, $spec['page_type'], $chain);
+                $bucketPageIds[$bucket] = array_merge($chainPageIds, $bucketPageIds[$bucket]);
             }
         }
 
-        $allPageIds = array_merge(...array_values($bucketPageIds));
+        // Decided from the cards actually built, not from the ids asked
+        // for: a page can build no card for this viewer.
+        $biasApplied = false;
+        $fromChain   = array_flip($chainPageIds);
+        $allPageIds  = array_values(array_unique(array_merge(...array_values($bucketPageIds))));
         if ($allPageIds !== []) {
             $prefetched = PageCardPrefetcher::primeFor($allPageIds, $userId);
             foreach (self::BUCKETS as $bucket => $spec) {
+                // In order, skipping repeats and pages that build no card,
+                // until the bucket is full. Chain pages come first, so a
+                // biased bucket holds every chain card that was built and
+                // then the plain cards, and is never smaller than the plain
+                // bucket alone.
+                $seen = [];
                 foreach ($bucketPageIds[$bucket] as $pageId) {
+                    if (count($out[$bucket]) >= self::SUGGESTIONS_LIMIT_PER_TYPE) {
+                        break;
+                    }
+                    if (isset($seen[$pageId])) {
+                        continue;
+                    }
+                    $seen[$pageId] = true;
                     $card = $cardSvc->getPageCardForList($spec['card_kind'], $pageId, $userId, $prefetched);
-                    if ($card !== null) {
-                        $out[$bucket][] = $card;
+                    if ($card === null) {
+                        continue;
+                    }
+                    $out[$bucket][] = $card;
+                    if ($bucket === self::CHAIN_BIASED_BUCKET && isset($fromChain[$pageId])) {
+                        $biasApplied = true;
                     }
                 }
             }
         }
 
+        // F-439: what the bias actually did, so the wizard can say so.
+        // null without `?chain=`. With one, `applied_to` names the buckets the
+        // chain really re-ranked: empty when discovery could not filter by
+        // chain (legacy fallback) or no card from that chain made the cut.
+        $out['bias'] = $chain === null ? null : [
+            'chain'      => $chain,
+            'applied_to' => $biasApplied ? [self::CHAIN_BIASED_BUCKET] : [],
+        ];
+
         $resp = ApiResponse::ok($out);
         // Suggestions are per-user (viewer state baked into card permissions)
         // but stable enough for short browser caching during the wizard.
+        // `?chain=` is part of the URL, so each chain caches separately.
         $resp->header('Cache-Control', 'private, max-age=60');
         return $resp;
+    }
+
+    /**
+     * F-439: `$chain`'s pages of a type, by the same trust ranking, up to
+     * the bucket size. Empty when discovery could not filter by chain: its
+     * legacy fallback ignores chain_slug, so those rows are the plain
+     * ranking, and counting them as "chain first" would lie.
+     *
+     * @return list<int>
+     */
+    private static function chainFirstPageIds(
+        \BCC\Trust\Core\Services\PageDiscoveryService $discovery,
+        string $pageType,
+        string $chain
+    ): array {
+        $result = $discovery->query(
+            self::suggestionQuery($pageType, self::SUGGESTIONS_LIMIT_PER_TYPE) + ['chain_slug' => $chain]
+        );
+        return ($result['chain_applied'] ?? false) === true ? self::suggestionPageIds($result) : [];
+    }
+
+    /**
+     * The discovery query every bucket uses (§F1 trust ranker).
+     *
+     * @return array<string, mixed>
+     */
+    private static function suggestionQuery(string $pageType, int $limit): array
+    {
+        return [
+            'types'         => [$pageType],
+            'sort'          => 'trust',
+            'verified_only' => false,
+            'limit'         => $limit,
+            'page'          => 1,
+        ];
+    }
+
+    /**
+     * Positive page ids from a PageDiscoveryService::query() result.
+     *
+     * @param array<string, mixed> $result
+     * @return list<int>
+     */
+    private static function suggestionPageIds(array $result): array
+    {
+        $ids   = [];
+        $items = is_array($result['results'] ?? null) ? $result['results'] : [];
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $pageId = (int) ($item['page_id'] ?? 0);
+            if ($pageId > 0) {
+                $ids[] = $pageId;
+            }
+        }
+        return $ids;
     }
 
     public function onboardingStatus(WP_REST_Request $request): WP_REST_Response

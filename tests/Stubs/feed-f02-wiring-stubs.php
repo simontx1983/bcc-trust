@@ -233,7 +233,10 @@ namespace BCC\Core\Feed {
             bool $deferGroupVisibilityToCaller = false
         ): ?array {
             $GLOBALS['__bcc_f02feed']['excluded']['getActivityById'] = $excludedAuthorIds;
-            unset($actId, $excludedAuthorIds, $excludedActIds);
+            // F-451: every permalink read's exclusion list, in call order.
+            $GLOBALS['__bcc_f02feed']['excluded_by_read'][] = $excludedAuthorIds;
+            $GLOBALS['__bcc_f02feed']['hidden_by_read'][]   = $excludedActIds;
+            unset($actId, $excludedActIds);
             \bcc_f02feed_record(
                 'getActivityById',
                 $viewerId,
@@ -247,9 +250,19 @@ namespace BCC\Core\Feed {
             // The only stub method whose RETURN is load-bearing: the
             // permalink's second look is driven entirely by the first
             // call answering null.
-            return $enforcePostVisibility
+            $row = $enforcePostVisibility
                 ? $fixture['row_enforced']
                 : $fixture['row_unenforced'];
+
+            // As bcc-core does: a row whose author is on the exclusion list
+            // is not returned (F-451's caution and block lists). Rows with
+            // no `author` key are never excluded, as before.
+            $authorId = is_array($row) && is_array($row['author'] ?? null) ? (int) ($row['author']['id'] ?? 0) : 0;
+            if ($authorId > 0 && in_array($authorId, array_map('intval', $excludedAuthorIds ?? []), true)) {
+                return null;
+            }
+
+            return $row;
         }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
@@ -351,7 +364,10 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getAllHiddenIds(): array
         {
-            return [];
+            // F-451: `hidden` (list<int> act ids, default none).
+            $hidden = $GLOBALS['__bcc_f02feed']['hidden'] ?? [];
+
+            return is_array($hidden) ? array_values(array_map('intval', $hidden)) : [];
         }
 
         public static function getGeneration(): int
@@ -388,11 +404,17 @@ namespace BCC\Trust\Core\Services {
 
     final class GroupContextResolver
     {
-        public function forGroup(int $groupId): ?object
+        /**
+         * `group_contexts` (array<int, GroupContext>, default none): the
+         * room each group id resolves to. F-451's third look asks it whether
+         * the room lifts the shadow-limit.
+         */
+        public function forGroup(int $groupId): ?\BCC\Trust\Core\ValueObjects\GroupContext
         {
-            unset($groupId);
+            // ⚠ Default none: a suite that never sets it gets null, as before.
+            $ctx = $GLOBALS['__bcc_f02feed']['group_contexts'][$groupId] ?? null;
 
-            return null;
+            return $ctx instanceof \BCC\Trust\Core\ValueObjects\GroupContext ? $ctx : null;
         }
     }
 }
@@ -450,15 +472,22 @@ namespace BCC\Trust\Core\Services\Feed {
         /** @return mixed */
         function get_post_meta(int $postId, string $key = '', bool $single = false)
         {
-            unset($single);
             if ($key !== 'peepso_group_id') {
-                return '';
+                return $single ? '' : [];
             }
 
-            // '' for an unmapped post — what WordPress returns for absent
-            // meta, and what `(int)` then turns into the 0 that means
-            // "not a group post".
-            return \bcc_f02feed_fixture()['group_by_post'][$postId] ?? '';
+            // `group_by_post` maps a post to one group id, or (F-451) to a
+            // list of them for a post tagged into several rooms. As
+            // WordPress answers: $single gives the FIRST value ('' for an
+            // unmapped post, which `(int)` turns into the 0 that means
+            // "not a group post"); otherwise every value, as strings.
+            $mapped = \bcc_f02feed_fixture()['group_by_post'][$postId] ?? null;
+            $values = $mapped === null ? [] : (is_array($mapped) ? array_values($mapped) : [$mapped]);
+            if ($single) {
+                return $values === [] ? '' : $values[0];
+            }
+
+            return array_map('strval', $values);
         }
     }
 

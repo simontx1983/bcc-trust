@@ -290,8 +290,9 @@ final class NotificationViewService
             return null;
         }
 
-        $actor = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
-        $link  = self::resolveLink($type, $externalId, $actId, $actor['handle']);
+        $actor   = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
+        $link    = self::resolveLink($type, $externalId, $actId, $actor['handle']);
+        $message = self::withCurrentActorHandle($message, $actor['handle']);
 
         if ($type === NotificationType::DELEGATOR_GROUP_REMOVED && isset($removalNotices[$externalId])) {
             $message = $removalNotices[$externalId]['message'];
@@ -311,6 +312,46 @@ final class NotificationViewService
             // for every other row, and when availability could not be read.
             'target_available' => !(in_array($type, self::POST_LINKED_TYPES, true) && isset($goneActIds[$actId])),
         ];
+    }
+
+    /** The most a rendered message holds: PeepSo's column width, which it cuts stored messages to. */
+    public const MESSAGE_MAX_LENGTH = 200;
+
+    /**
+     * F-412: name a message's actor by their CURRENT @handle.
+     *
+     * NotificationDispatcher writes the actor's handle into the stored text
+     * ("@handle reacted to your post."). After a handle change, the bell
+     * showed that old handle beside `actor.handle`, which is resolved now, and
+     * the digest mailed it. Either way, the old and new handles were linked
+     * for every member who saw the row. A rename retires the old handle
+     * precisely so the two are not tied together publicly.
+     *
+     * Every dispatcher message that starts with "@" starts with its
+     * from-user's handle; system messages (rank, welcome, claims, disputes,
+     * announcements) never start with "@". So only a leading "@token" is
+     * replaced, and only when the actor's current handle is known. An actor
+     * that no longer resolves keeps the stored text.
+     *
+     * The result is cut to MESSAGE_MAX_LENGTH as PeepSo cuts the stored one,
+     * since a longer new handle can push a full-length message past it.
+     */
+    public static function withCurrentActorHandle(string $message, string $actorHandle): string
+    {
+        if ($actorHandle === '' || preg_match('/^@\S+/u', $message, $m) !== 1) {
+            return $message;
+        }
+        $rendered = '@' . $actorHandle . substr($message, strlen($m[0]));
+
+        return mb_strlen($rendered, 'UTF-8') > self::MESSAGE_MAX_LENGTH
+            ? mb_substr($rendered, 0, self::MESSAGE_MAX_LENGTH, 'UTF-8')
+            : $rendered;
+    }
+
+    /** The current public @handle the bell shows for $userId ('' when the account no longer resolves). */
+    public static function actorHandle(int $userId): string
+    {
+        return self::resolveActor($userId, '')['handle'];
     }
 
     /**

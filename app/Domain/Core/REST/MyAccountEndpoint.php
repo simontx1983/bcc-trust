@@ -75,6 +75,9 @@ final class MyAccountEndpoint
     /** Confirmation token the client must echo back on DELETE. */
     private const DELETE_CONFIRMATION_TOKEN = 'DELETE';
 
+    /** F-508: the change could not revoke the other sessions, so nothing was changed. */
+    private const PASSWORD_UNAVAILABLE_MESSAGE = 'Your password could not be changed just now. Please try again.';
+
     public static function register(): void
     {
         $instance = new self();
@@ -152,7 +155,8 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Field `email` is required.', 422);
         }
         $email = sanitize_email($emailRaw);
-        if ($email === '' || !is_email($email)) {
+        // F-458: the reserved placeholder domain is refused too.
+        if (!AccountRecoveryService::isUsableEmail($email)) {
             return ApiResponse::error('bcc_invalid_request', 'Email address is not valid.', 422);
         }
 
@@ -347,22 +351,29 @@ final class MyAccountEndpoint
         if ($confirmedBy instanceof WP_REST_Response) {
             return $confirmedBy;
         }
+        // Revoke every outstanding bearer JWT (bump the token-version counter)
+        // so a token from before this rotation can't outlive the password
+        // change — the bearer analogue of wp_set_password clearing WP sessions.
+        // Order matters:
+        //   - revoke BEFORE the password write (F-508): a revocation that did
+        //     not land changes nothing, so the answer is 503 and the member
+        //     retries with the same current password;
+        //   - revoke before the mint, so the fresh token carries the bumped
+        //     version and survives; every OTHER token now fails ERR_REVOKED.
+        // The new token is returned below so the caller's own session stays
+        // alive. [audit H-2] It CONTINUES this session (F-253): read when it
+        // began before the revoke.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
+        if (\BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId) === null) {
+            return \BCC\Trust\Core\Support\BearerAuth::unavailableResponse(self::PASSWORD_UNAVAILABLE_MESSAGE);
+        }
+
         // wp_set_password rotates the hash AND destroys every WordPress
         // cookie session of the user. Nothing is re-issued: the caller's
         // session is its bearer token, continued below (no client ever
         // stored a WordPress cookie from this route).
         wp_set_password($newPassword, $userId);
 
-        // Revoke every outstanding bearer JWT (bump the token-version counter)
-        // so a token stolen before this rotation can't outlive the password
-        // change — the bearer analogue of wp_set_password clearing WP sessions.
-        // Order matters: revoke FIRST, then mint, so the fresh token carries
-        // the bumped version and survives; every OTHER token now fails
-        // ERR_REVOKED. The new token is returned below so the caller's own
-        // session stays alive. [audit H-2] It CONTINUES this session (F-253):
-        // read when it began before the revoke.
-        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
-        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
         $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
 

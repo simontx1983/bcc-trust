@@ -268,6 +268,28 @@ final class PendingEmailSignupTest extends TestCase
         self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
     }
 
+    /**
+     * F-508: the reset revokes the old sessions FIRST. When that write does
+     * not land, nothing changes: 503, the old password stands, the key is
+     * unspent, and the same link works once the store is back.
+     */
+    public function testAResetWhoseRevocationFailsChangesNothingAndTheLinkStillWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $GLOBALS['__bcc_ph']['passwords'][self::STALE] = 'the old password';
+        $GLOBALS['__bcc_ph']['fail_update']['bcc_token_version'] = true;
+
+        self::assertSame(503, self::reset(self::STALE));
+        self::assertSame('the old password', $GLOBALS['__bcc_ph']['passwords'][self::STALE], 'unchanged');
+        self::assertSame('k-' . self::STALE, $GLOBALS['__bcc_ph']['reset_keys'][self::STALE] ?? null, 'the key is not spent');
+        self::assertNotContains('password_reset_completed', $GLOBALS['__bcc_ph']['audit'] ?? []);
+
+        unset($GLOBALS['__bcc_ph']['fail_update']);
+        self::assertSame(200, self::reset(self::STALE));
+        self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
+        self::assertSame('1', (string) ($GLOBALS['__bcc_ph']['meta'][self::STALE]['bcc_token_version'] ?? ''), 'revoked on the retry');
+    }
+
     public function testAnInvalidResetKeyCostsNoBreachLookup(): void
     {
         self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
@@ -335,5 +357,33 @@ final class PendingEmailSignupTest extends TestCase
 
         self::assertCount(1, $GLOBALS['__bcc_ph']['mail']);
         self::assertStringContainsString('Only the most recent link works', (string) $GLOBALS['__bcc_ph']['mail'][0]['html']);
+    }
+
+    // ── F-458: the reserved placeholder domain is never a typed address ──
+
+    /** @return iterable<string, array{0: string, 1: bool}> */
+    public static function typedAddresses(): iterable
+    {
+        yield 'a real address'                   => ['alice@example.test', true];
+        yield 'the reserved domain'              => ['alice@' . AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN, false];
+        yield 'the reserved domain, any case'    => ['alice@NoReply.BCC.Local', false];
+        yield 'a subdomain is a different domain' => ['alice@x.noreply.bcc.local.example.test', true];
+        yield 'not an address'                   => ['not-an-email', false];
+        yield 'empty'                            => ['', false];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('typedAddresses')]
+    public function testTheSharedRuleForATypedAddress(string $email, bool $usable): void
+    {
+        self::assertSame($usable, AccountRecoveryService::isUsableEmail($email));
+    }
+
+    public function testPasswordSignupRefusesAnAddressOnTheReservedDomain(): void
+    {
+        $out = self::signup('alice', 'alice@NoReply.BCC.Local');
+
+        self::assertSame(400, $out['status']);
+        self::assertSame('A valid email is required.', $out['message'], 'the same answer as any unusable address');
+        self::assertSame([], $GLOBALS['__bcc_ph']['users'], 'no account');
     }
 }

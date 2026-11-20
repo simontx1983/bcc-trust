@@ -73,10 +73,17 @@ final class CapabilityMatrixTest extends TestCase
         ?string $rank = null,
         string $tier = 'neutral',
         bool $inRecovery = false,
-        ?array $custody = null
+        ?array $custody = null,
+        bool $custodyUnavailable = false
     ): CapabilityResolver {
-        return new class ($writeReview, $attestationThrows, $notSuspended, $ownsPage, $rank, $tier, $inRecovery, $custody) extends CapabilityResolver {
+        return new class ($writeReview, $attestationThrows, $notSuspended, $ownsPage, $rank, $tier, $inRecovery, $custody, $custodyUnavailable) extends CapabilityResolver {
             /**
+             * ⚠ `$fakeCustody === null` means "use the default facts" — it is
+             * NOT the unreadable-count case. That one needs
+             * `$fakeCustodyUnavailable`, because `custodyState()` returning
+             * null is a distinct state from "the test did not specify facts",
+             * and `?? [...]` below would otherwise collapse the two.
+             *
              * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null $fakeCustody
              */
             public function __construct(
@@ -87,7 +94,8 @@ final class CapabilityMatrixTest extends TestCase
                 private readonly ?string $fakeRank,
                 private readonly string $fakeTier,
                 private readonly bool $fakeInRecovery,
-                private readonly ?array $fakeCustody
+                private readonly ?array $fakeCustody,
+                private readonly bool $fakeCustodyUnavailable = false
             ) {
             }
 
@@ -134,8 +142,14 @@ final class CapabilityMatrixTest extends TestCase
                 return $this->fakeInRecovery;
             }
 
-            protected function custodyState(int $userId): array
+            protected function custodyState(int $userId): ?array
             {
+                // F-503: the owned count could not be READ. Distinct from
+                // every set of facts, including zero-owned.
+                if ($this->fakeCustodyUnavailable) {
+                    return null;
+                }
+
                 return $this->fakeCustody ?? [
                     'owned'            => 0,
                     'cap'              => 2,
@@ -409,6 +423,77 @@ final class CapabilityMatrixTest extends TestCase
             custody: ['owned' => 0, 'cap' => 2, 'last_event_ts' => null, 'cooldown_seconds' => 30 * self::DAY]
         )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
         self::assertTrue($never->isAllowed());
+    }
+
+    // ── F-503 — an unreadable owned count must REFUSE, not allow ─────
+
+    /**
+     * ⛔ Both keys that reach the custody gate grant a DURABLE write, so an
+     * owned count that could not be read must deny. `countOwnedUserGroups()`
+     * answered 0 for a failed read, which is "owns none" — the most
+     * permissive input a cap comparison can take — and what it admitted
+     * stayed granted after the fault cleared.
+     *
+     * Covers both CREATE and RECEIVE because they share
+     * `resolveCustodyAcquisition()`; if that ever stops being true, this
+     * loop is what notices.
+     */
+    public function testAnUnreadableOwnedCountDeniesEveryCapGatedWrite(): void
+    {
+        foreach ([CapabilityCatalog::CREATE_COMMUNITY, CapabilityCatalog::RECEIVE_COMMUNITY] as $key) {
+            $decision = $this->resolver(
+                rank: 'journeyman',
+                tier: 'neutral',
+                custodyUnavailable: true
+            )->can(7, $key);
+
+            self::assertFalse($decision->isAllowed(), "key {$key} was allowed on an unreadable count");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
+    }
+
+    /**
+     * ⭐ THE ANTI-VACUITY CONTROL. The member below is fully eligible — the
+     * ONLY difference from an allowed case is that the count could not be
+     * read. Without this, the test above would also pass for a gate that
+     * denied everyone, and "unknown" would look handled while actually
+     * being indistinguishable from any other denial.
+     */
+    public function testAnUnreadableCountIsNotTreatedAsUnderTheCap(): void
+    {
+        $allowed = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custody: ['owned' => 0, 'cap' => 5, 'last_event_ts' => null, 'cooldown_seconds' => 30 * self::DAY]
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+        self::assertTrue($allowed->isAllowed(), 'the control: this member is otherwise eligible');
+
+        $unknown = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertFalse($unknown->isAllowed(), '"could not count" was read as "under the cap"');
+        self::assertNotSame('cap_reached', $unknown->reason, 'and it is not a cap denial — it is an unknown');
+    }
+
+    /**
+     * ⚠ SCOPE CONTROL: relinquishing custody is NOT blocked by an
+     * unreadable count. The giver's gate has no cap check by design — the
+     * cooldown blocks ACQUIRING custody, never giving it away — so a
+     * fail-closed count must not strand someone's ability to hand a
+     * community over.
+     */
+    public function testTransferAwayIsUnaffectedByAnUnreadableCount(): void
+    {
+        $decision = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::TRANSFER_COMMUNITY);
+
+        self::assertTrue($decision->isAllowed(), 'an unreadable count must not block transfer-away');
     }
 
     // ── Rank Phase 7 — §21.2 transfer-away (the GIVER's gate) ────────
