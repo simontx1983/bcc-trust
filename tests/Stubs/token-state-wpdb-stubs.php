@@ -48,6 +48,13 @@ namespace {
     // double. Required before anything asks for the class, so no test
     // double or autoloader mapping can stand in for it.
     if (!class_exists('BCC\\Core\\Repositories\\UserMetaRepository', false)) {
+        // bcc-core #164 moved the read itself into the ReadsMetaRows trait
+        // (shared with PostMetaRepository). Load it first when this core
+        // has it; an older core keeps the read in the class.
+        $readsMetaRows = \BCC\Trust\Tests\Support\CoreSibling::root() . '/src/Repositories/ReadsMetaRows.php';
+        if (!trait_exists('BCC\\Core\\Repositories\\ReadsMetaRows', false) && is_file($readsMetaRows)) {
+            require_once $readsMetaRows;
+        }
         require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/UserMetaRepository.php');
     }
     // The real class, now, so the stand-in in token-state-stubs.php is skipped.
