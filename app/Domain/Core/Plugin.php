@@ -2009,6 +2009,14 @@ final class Plugin
             2
         );
 
+        // Its delayed retries (+5 min, then +30 min) before it gives up.
+        add_action(
+            \BCC\Trust\Core\Services\Vote\VoteJobDispatcher::EDGE_RETRY_HOOK,
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handleEdgeRetry'],
+            10,
+            3
+        );
+
         // ── Fraud threshold-crossing async fan-out ─────────────────────
         //
         // `UserInfoRepository::updateFraudScore()` and `incrementFraudScore()`
