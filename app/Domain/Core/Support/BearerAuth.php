@@ -67,6 +67,17 @@ final class BearerAuth
     /** presentedTokenFailure() values. */
     public const TOKEN_EXPIRED = 'expired';
     public const TOKEN_INVALID = 'invalid';
+    /**
+     * F-462: the token's revocation state could not be read, so whether it
+     * still counts is unknown. The request is NOT authenticated, and is not
+     * served as anonymous either: refuseUnknownTokenState() answers 503.
+     * A 401 with a token code would make the app sign the member out
+     * (#673), so one database blip would sign everyone out.
+     */
+    public const TOKEN_UNAVAILABLE = 'unavailable';
+
+    /** First: a request whose token state is unknown reaches nothing. */
+    public const AUTH_ERRORS_PRIORITY = 1;
 
     /**
      * Why the bearer token PRESENTED with this request failed, if it did
@@ -98,6 +109,8 @@ final class BearerAuth
     public static function register(): void
     {
         add_filter('determine_current_user', [self::class, 'authenticateBearer'], 30);
+        add_filter('rest_authentication_errors', [self::class, 'refuseUnknownTokenState'], self::AUTH_ERRORS_PRIORITY);
+        add_filter('rest_send_nocache_headers', [self::class, 'noCacheWhenTokenStateUnknown']);
     }
 
     /**
@@ -155,9 +168,11 @@ final class BearerAuth
             // F-288: only a plain expiry is refreshable; anything else
             // (malformed, bad signature, revoked, signed out, superseded by
             // a refresh) is a dead token.
-            self::$presentedTokenFailure = $result['error'] === JwtToken::ERR_EXPIRED
-                ? self::TOKEN_EXPIRED
-                : self::TOKEN_INVALID;
+            self::$presentedTokenFailure = match ($result['error']) {
+                JwtToken::ERR_EXPIRED           => self::TOKEN_EXPIRED,
+                JwtToken::ERR_STATE_UNAVAILABLE => self::TOKEN_UNAVAILABLE,
+                default                         => self::TOKEN_INVALID,
+            };
             return false;
         }
 
@@ -180,6 +195,44 @@ final class BearerAuth
         self::$presentedTokenFailure = null;
         self::$authenticatedUserId   = $tokenUserId;
         return $tokenUserId;
+    }
+
+    /**
+     * `rest_authentication_errors`, first (F-462): a request whose bearer
+     * token could not be checked, because its revocation state could not be
+     * read, gets a 503 `bcc_unavailable` (try again). It is never served as
+     * signed out, and never told its token is invalid. An earlier filter's
+     * error stands; an earlier login did not involve the bearer.
+     *
+     * @param mixed $result
+     * @return mixed
+     */
+    public static function refuseUnknownTokenState($result)
+    {
+        if (self::$presentedTokenFailure !== self::TOKEN_UNAVAILABLE || is_wp_error($result)) {
+            return $result;
+        }
+
+        \BCC\Trust\Infrastructure\EdgeCache::noCache();
+
+        return new \WP_Error(
+            'bcc_unavailable',
+            'Your session could not be checked just now. Please try again.',
+            ['status' => 503]
+        );
+    }
+
+    /**
+     * `rest_send_nocache_headers` (F-462): that 503 is private and never
+     * stored. Core sends no-cache headers only for a signed-in user, and
+     * this request is not one.
+     *
+     * @param mixed $send
+     * @return mixed
+     */
+    public static function noCacheWhenTokenStateUnknown($send)
+    {
+        return self::$presentedTokenFailure === self::TOKEN_UNAVAILABLE ? true : $send;
     }
 
     /**

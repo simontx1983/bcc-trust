@@ -140,8 +140,16 @@ final class SessionController
         }
 
         $decoded = JwtToken::decodeForRefresh($token);
+        // F-462: whether this token is still live is unknown, or its sign-out
+        // could not be recorded. Say so (503, try again) rather than claim a
+        // sign-out that did not happen.
+        if (!$decoded['ok'] && $decoded['error'] === JwtToken::ERR_STATE_UNAVAILABLE) {
+            return self::stateUnavailable();
+        }
         if ($decoded['ok']) {
-            JwtToken::logOut($decoded['payload']);
+            if (!JwtToken::logOut($decoded['payload'])) {
+                return self::stateUnavailable();
+            }
             Logger::audit('user_logout', [
                 'user_id' => (int) ($decoded['payload']['user_id'] ?? 0),
             ]);
@@ -199,6 +207,10 @@ final class SessionController
         }
 
         $decoded = JwtToken::decode($token);
+        if (!$decoded['ok'] && $decoded['error'] === JwtToken::ERR_STATE_UNAVAILABLE) {
+            // F-462: unknown, not invalid. A 401 here would sign the app out.
+            return self::stateUnavailable();
+        }
         if (!$decoded['ok']) {
             return self::sessionUnauthorized($decoded['error']);
         }
@@ -237,6 +249,20 @@ final class SessionController
      * Every /auth/session response — 200, 401, 409, 429 — is per-token and
      * must never be cached or served to a different Authorization.
      */
+    /**
+     * F-462: the token's state could not be read. 503 `bcc_unavailable`,
+     * private and never stored: the client keeps its session and tries
+     * again, instead of signing the member out on a database blip.
+     */
+    private static function stateUnavailable(): WP_REST_Response
+    {
+        $response = ApiResponse::error('bcc_unavailable', 'Your session could not be checked just now. Please try again.', 503);
+        $response->header('Cache-Control', 'private, no-store');
+        $response->header('Vary', 'Authorization');
+
+        return $response;
+    }
+
     private static function sessionHeaders(WP_REST_Response $response): WP_REST_Response
     {
         $response->header('Cache-Control', 'no-store');
@@ -370,6 +396,11 @@ final class SessionController
         }
 
         $decoded = JwtToken::decodeForRefresh($token);
+        if ($decoded['ok'] !== true && $decoded['error'] === JwtToken::ERR_STATE_UNAVAILABLE) {
+            // F-462: whether this token was revoked, signed out or retired is
+            // unknown. Mint nothing, write nothing; the client tries again.
+            return self::stateUnavailable();
+        }
         if ($decoded['ok'] !== true) {
             // F-305: a suspension revokes every token (F-119), so a suspended
             // member's refresh fails HERE, before any suspension check, and
@@ -417,12 +448,18 @@ final class SessionController
             );
         }
 
+        // F-282: the old token stops working once the overlap has passed.
+        // F-462: retired BEFORE the new one is minted, so a retired list that
+        // cannot be read (and so must not be written) mints nothing. Safe in
+        // this order: the old token keeps its overlap, and refreshing it again
+        // within the overlap keeps the first cutoff.
+        if (!JwtToken::retireAfterRefresh($payload)) {
+            return self::stateUnavailable();
+        }
+
         // A refresh continues the same sign-in: keep when it began (F-253's
         // "wallet linked before this sign-in" rule must not reset here).
         $fresh = JwtToken::encodeContinuation($userId, $handle, JwtToken::sessionStartedAt($payload));
-
-        // F-282: the old token stops working once the overlap has passed.
-        JwtToken::retireAfterRefresh($payload);
 
         Logger::audit('token_refreshed', [
             'user_id' => $userId,
