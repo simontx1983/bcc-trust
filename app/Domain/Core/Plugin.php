@@ -1999,17 +1999,15 @@ final class Plugin
             [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handlePostVoteRetry']
         );
 
-        // Edge recalculation after vote removal. Resolve the page owner
-        // here: recalculateVoteEdge expects (source_user_id, target_user_id)
-        // — passing $pageId as the target silently wrote a zero-weight edge
-        // against a non-existent owner id and left the real voter→owner edge
-        // stale after every remove-vote / dispute-accept path.
-        add_action('bcc_trust_async_edge_recalculate', function (int $voterId, int $pageId): void {
-            $ownerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
-            if ($ownerId > 0 && $ownerId !== $voterId) {
-                $this->edgeRepository()->recalculateVoteEdge($voterId, $ownerId);
-            }
-        }, 10, 2);
+        // Edge recalculation after vote removal. The handler resolves the page
+        // owner (recalculateVoteEdge takes source_user_id, target_user_id) and
+        // contains its own failures, so a failed recalc never ends the tick.
+        add_action(
+            'bcc_trust_async_edge_recalculate',
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handleEdgeRecalculate'],
+            10,
+            2
+        );
 
         // ── Fraud threshold-crossing async fan-out ─────────────────────
         //

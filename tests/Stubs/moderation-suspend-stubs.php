@@ -54,6 +54,11 @@ namespace BCC\Trust\Core\Support {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            // F-508: $GLOBALS['__bcc_ms']['tv_write_fails'] = true makes the
+            // write fail (false, nothing stored), as a failed UPDATE does.
+            if (!empty($GLOBALS['__bcc_ms']['tv_write_fails'])) {
+                return false;
+            }
             $GLOBALS['__bcc_ms']['tv'][$userId] = (int) $value;
             return true;
         }

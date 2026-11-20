@@ -18,12 +18,14 @@ namespace BCC\Trust\Core\Tests\Unit {
      * Before this, the onboarding chips ("Bias suggestions toward") changed
      * nothing: the endpoint took no chain. Now:
      *   - validators: chain-filtered pages first (PageDiscoveryService's
-     *     `chain_slug`), topped up from the unbiased trust ranking, deduped,
-     *     never more than 4 and never fewer than without a chain;
+     *     `chain_slug`), then the unbiased trust ranking (the plain path's
+     *     own query and cache key), deduped, never more than 4 and never
+     *     fewer cards than without a chain, counted on the cards built;
      *   - projects and creators: unchanged (no chain data to bias by);
      *   - data.bias = {chain, applied_to}: applied_to is ["validators"] only
      *     when the chain filter really ran (not the legacy fallback, which
-     *     ignores chain_slug) AND put at least one validator in the bucket;
+     *     ignores chain_slug) AND at least one chain page built a card in
+     *     the bucket (a page can build no card for the viewer);
      *   - an unknown chain is a 400, never a silent unbiased answer.
      *
      * The discovery service is a scripted subclass; everything else is the
@@ -44,6 +46,8 @@ namespace BCC\Trust\Core\Tests\Unit {
             require_once dirname(__DIR__) . '/Stubs/onboarding-suggestions-stubs.php';
             $GLOBALS['__bcc_current_user'] = 7;
             Plugin::$cardCalls = [];
+            Plugin::$noCard    = [];
+            \BCC\Trust\Core\Support\PageCardPrefetcher::$primed = [];
             $this->discovery   = new ScriptedDiscovery([
                 // The unbiased trust ranking per type.
                 'validator|' => [21, 1, 2, 3, 4, 5, 6, 7],
@@ -108,8 +112,12 @@ namespace BCC\Trust\Core\Tests\Unit {
             self::assertSame(['chain' => 'cosmos', 'applied_to' => ['validators']], $data['bias']);
         }
 
-        public function testTheTopUpAsksForEnoughRowsToFillAfterTheDedupe(): void
+        public function testTheTopUpIsThePlainPathsOwnQuery(): void
         {
+            self::call();
+            $plain = $this->discovery->calls;
+            $this->discovery->calls = [];
+
             self::call(['chain' => 'cosmos']);
 
             $validatorCalls = array_values(array_filter(
@@ -117,20 +125,76 @@ namespace BCC\Trust\Core\Tests\Unit {
                 static fn (array $a): bool => $a['types'] === ['validator']
             ));
             self::assertCount(2, $validatorCalls);
-            self::assertSame('cosmos', $validatorCalls[0]['chain_slug']);
-            self::assertSame(4, $validatorCalls[0]['limit']);
-            self::assertArrayNotHasKey('chain_slug', $validatorCalls[1]);
-            self::assertSame(4 + 2, $validatorCalls[1]['limit']);
+            $chainCalls = array_values(array_filter($validatorCalls, static fn (array $a): bool => isset($a['chain_slug'])));
+            $plainCalls = array_values(array_filter($validatorCalls, static fn (array $a): bool => !isset($a['chain_slug'])));
+            self::assertCount(1, $chainCalls);
+            self::assertSame('cosmos', $chainCalls[0]['chain_slug']);
+            self::assertSame(4, $chainCalls[0]['limit']);
+            // Identical args to the unbiased path's validators query, so it
+            // reuses that cache entry instead of a widened one.
+            $plainValidator = array_values(array_filter($plain, static fn (array $a): bool => $a['types'] === ['validator']));
+            self::assertSame($plainValidator, $plainCalls);
         }
 
-        public function testAFullChainBucketNeedsNoTopUp(): void
+        public function testAFullChainBucketBuildsNoPlainCards(): void
         {
             $data = self::data(self::call(['chain' => 'osmosis']));
 
             self::assertSame([51, 52, 53, 54], self::ids($data, 'validators'));
             self::assertSame(['validators'], $data['bias']['applied_to']);
-            $validatorCalls = array_filter($this->discovery->calls, static fn (array $a): bool => $a['types'] === ['validator']);
-            self::assertCount(1, $validatorCalls);
+            $validatorCards = array_values(array_filter(Plugin::$cardCalls, static fn (array $c): bool => $c[0] === 'validator'));
+            self::assertSame([51, 52, 53, 54], array_map(static fn (array $c): int => $c[1], $validatorCards));
+        }
+
+        public function testAChainPageThatBuildsNoCardIsReplacedFromThePlainRanking(): void
+        {
+            Plugin::$noCard = [22];
+
+            $data = self::data(self::call(['chain' => 'cosmos']));
+
+            // 22 builds no card; 21 is still a chain card, then the plain list.
+            self::assertSame([21, 1, 2, 3], self::ids($data, 'validators'));
+            self::assertSame(['validators'], $data['bias']['applied_to']);
+        }
+
+        public function testNoChainCardBuiltMeansNoBiasClaimed(): void
+        {
+            // The filter ran and found Osmosis pages, but none builds a card
+            // for this viewer: the bucket is the plain one, and says so.
+            Plugin::$noCard = [51, 52, 53, 54];
+
+            $data = self::data(self::call(['chain' => 'osmosis']));
+
+            self::assertSame([21, 1, 2, 3], self::ids($data, 'validators'));
+            self::assertSame(['chain' => 'osmosis', 'applied_to' => []], $data['bias']);
+        }
+
+        public function testNeverFewerCardsThanWithoutAChain(): void
+        {
+            // Plain pages 1 and 2 build no card: the unbiased bucket holds 2.
+            Plugin::$noCard = [1, 2];
+            $plain = self::ids(self::data(self::call()), 'validators');
+            self::assertSame([21, 3], $plain);
+
+            foreach (['cosmos', 'osmosis', 'ethereum', 'injective'] as $chain) {
+                $biased = self::ids(self::data(self::call(['chain' => $chain])), 'validators');
+                self::assertGreaterThanOrEqual(count($plain), count($biased), $chain);
+                self::assertLessThanOrEqual(4, count($biased), $chain);
+                self::assertSame(array_values(array_unique($biased)), $biased, $chain);
+            }
+            self::assertSame([21, 22, 3], self::ids(self::data(self::call(['chain' => 'cosmos'])), 'validators'));
+        }
+
+        public function testOnePrimeCoversTheChainAndPlainCandidatesOnce(): void
+        {
+            self::call(['chain' => 'cosmos']);
+
+            $primed = \BCC\Trust\Core\Support\PageCardPrefetcher::$primed;
+            self::assertCount(1, $primed);
+            self::assertSame(array_values(array_unique($primed[0])), $primed[0]);
+            foreach ([21, 22, 1, 2, 3, 31, 41] as $id) {
+                self::assertContains($id, $primed[0]);
+            }
         }
 
         public function testOnlyTheValidatorsBucketIsEverBiased(): void

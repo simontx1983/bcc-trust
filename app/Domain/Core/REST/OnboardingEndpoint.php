@@ -318,29 +318,54 @@ final class OnboardingEndpoint
         ];
 
         // Two passes: collect every bucket's page ids first, then prime
-        // ONE PageCardPrefetcher bundle across all 12 candidates so the
+        // ONE PageCardPrefetcher bundle across all candidates so the
         // per-card hydration below doesn't N+1 (all three buckets are
         // page kinds — the bundle groups by target_kind internally).
+        //
+        // F-439: with `?chain=`, the biased bucket's candidates are that
+        // chain's pages first, then its plain ranking. The plain query is
+        // the very one the unbiased path runs (same args, same cache key).
         $bucketPageIds = [];
-        $biasApplied   = false;
+        $chainPageIds  = [];
         foreach (self::BUCKETS as $bucket => $spec) {
-            if ($chain !== null && $bucket === self::CHAIN_BIASED_BUCKET) {
-                [$bucketPageIds[$bucket], $biasApplied] = self::chainFirstPageIds($discovery, $spec['page_type'], $chain);
-                continue;
-            }
             $bucketPageIds[$bucket] = self::suggestionPageIds(
                 $discovery->query(self::suggestionQuery($spec['page_type'], self::SUGGESTIONS_LIMIT_PER_TYPE))
             );
+            if ($chain !== null && $bucket === self::CHAIN_BIASED_BUCKET) {
+                $chainPageIds           = self::chainFirstPageIds($discovery, $spec['page_type'], $chain);
+                $bucketPageIds[$bucket] = array_merge($chainPageIds, $bucketPageIds[$bucket]);
+            }
         }
 
-        $allPageIds = array_merge(...array_values($bucketPageIds));
+        // Decided from the cards actually built, not from the ids asked
+        // for: a page can build no card for this viewer.
+        $biasApplied = false;
+        $fromChain   = array_flip($chainPageIds);
+        $allPageIds  = array_values(array_unique(array_merge(...array_values($bucketPageIds))));
         if ($allPageIds !== []) {
             $prefetched = PageCardPrefetcher::primeFor($allPageIds, $userId);
             foreach (self::BUCKETS as $bucket => $spec) {
+                // In order, skipping repeats and pages that build no card,
+                // until the bucket is full. Chain pages come first, so a
+                // biased bucket holds every chain card that was built and
+                // then the plain cards, and is never smaller than the plain
+                // bucket alone.
+                $seen = [];
                 foreach ($bucketPageIds[$bucket] as $pageId) {
+                    if (count($out[$bucket]) >= self::SUGGESTIONS_LIMIT_PER_TYPE) {
+                        break;
+                    }
+                    if (isset($seen[$pageId])) {
+                        continue;
+                    }
+                    $seen[$pageId] = true;
                     $card = $cardSvc->getPageCardForList($spec['card_kind'], $pageId, $userId, $prefetched);
-                    if ($card !== null) {
-                        $out[$bucket][] = $card;
+                    if ($card === null) {
+                        continue;
+                    }
+                    $out[$bucket][] = $card;
+                    if ($bucket === self::CHAIN_BIASED_BUCKET && isset($fromChain[$pageId])) {
+                        $biasApplied = true;
                     }
                 }
             }
@@ -349,7 +374,7 @@ final class OnboardingEndpoint
         // F-439: what the bias actually did, so the wizard can say so.
         // null without `?chain=`. With one, `applied_to` names the buckets the
         // chain really re-ranked: empty when discovery could not filter by
-        // chain (legacy fallback) or no validator on that chain made the cut.
+        // chain (legacy fallback) or no card from that chain made the cut.
         $out['bias'] = $chain === null ? null : [
             'chain'      => $chain,
             'applied_to' => $biasApplied ? [self::CHAIN_BIASED_BUCKET] : [],
@@ -364,45 +389,22 @@ final class OnboardingEndpoint
     }
 
     /**
-     * F-439: a bucket's suggestions with `$chain`'s pages first. Up to the
-     * bucket size from the chain-filtered query, topped up from the
-     * unbiased trust ranking, deduped, so the bucket is never emptier
-     * than it would be without a chain.
+     * F-439: `$chain`'s pages of a type, by the same trust ranking, up to
+     * the bucket size. Empty when discovery could not filter by chain: its
+     * legacy fallback ignores chain_slug, so those rows are the plain
+     * ranking, and counting them as "chain first" would lie.
      *
-     * @return array{0: list<int>, 1: bool} page ids, and whether the chain
-     *         really put at least one page in the bucket
+     * @return list<int>
      */
     private static function chainFirstPageIds(
         \BCC\Trust\Core\Services\PageDiscoveryService $discovery,
         string $pageType,
         string $chain
     ): array {
-        $limit  = self::SUGGESTIONS_LIMIT_PER_TYPE;
         $result = $discovery->query(
-            self::suggestionQuery($pageType, $limit) + ['chain_slug' => $chain]
+            self::suggestionQuery($pageType, self::SUGGESTIONS_LIMIT_PER_TYPE) + ['chain_slug' => $chain]
         );
-        // The legacy fallback ignores chain_slug: its rows are the plain
-        // trust ranking, and counting them as "chain first" would lie.
-        $applied  = ($result['chain_applied'] ?? false) === true;
-        $chainIds = $applied ? self::suggestionPageIds($result) : [];
-        $ids      = $chainIds;
-
-        if (count($ids) < $limit) {
-            // Enough unbiased rows that the dedupe below can still fill up.
-            $more = self::suggestionPageIds(
-                $discovery->query(self::suggestionQuery($pageType, $limit + count($ids)))
-            );
-            foreach ($more as $pageId) {
-                if (count($ids) >= $limit) {
-                    break;
-                }
-                if (!in_array($pageId, $ids, true)) {
-                    $ids[] = $pageId;
-                }
-            }
-        }
-
-        return [$ids, $chainIds !== []];
+        return ($result['chain_applied'] ?? false) === true ? self::suggestionPageIds($result) : [];
     }
 
     /**

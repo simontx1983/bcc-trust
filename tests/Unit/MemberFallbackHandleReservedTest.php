@@ -45,6 +45,10 @@ final class MemberFallbackHandleReservedTest extends TestCase
         $svc = new HandleService();
         // What signup and rename call: validate($handle), no assignment id.
         self::assertSame(HandleService::ERR_RESERVED, $svc->validate('member-7'));
+        // F-496: every path word the sign-in gate reserves is a reserved handle.
+        foreach (\BCC\Trust\Core\Security\WordPressSignInGate::RESERVED_PATH_WORDS as $word) {
+            self::assertSame(HandleService::ERR_RESERVED, $svc->validate($word), $word);
+        }
         self::assertSame(HandleService::ERR_RESERVED, $svc->validate('member-123456'));
     }
 

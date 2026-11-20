@@ -305,14 +305,6 @@ final class SessionController
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
-        // Audit row FIRST so the in-app timeline records the action
-        // even if the mailer fails. AuditLogger never throws.
-        AuditLogger::log('sessions_revoked_all', $userId, [], 'user', $userId);
-
-        // Out-of-band email — Track-F redundancy. Never throws; failure
-        // records a DegradationMetric and is silently swallowed.
-        AccountSecurityMailer::sessionsRevokedAll($userId);
-
         // Mutation: bump the token-version meta. Every outstanding JWT
         // for this user fails ERR_REVOKED on next use, including the
         // bearer that authenticated THIS request. F-495: when that write
@@ -320,6 +312,20 @@ final class SessionController
         // again), never 200. The WordPress-side credentials and the push
         // subscriptions below are still cut: each is its own write.
         $revoked = JwtToken::revokeAllForUser($userId) !== null;
+
+        if ($revoked) {
+            // F-508: the audit row and the "sessions revoked" email come
+            // AFTER the revocation landed, so neither claims one that did
+            // not happen, and a retried 503 repeats neither. The audit row
+            // still comes before the mailer, so the in-app timeline records
+            // the action even if the mail fails. Neither throws; a mail
+            // failure records a DegradationMetric.
+            AuditLogger::log('sessions_revoked_all', $userId, [], 'user', $userId);
+            AccountSecurityMailer::sessionsRevokedAll($userId);
+        } else {
+            // Audited for admins (SessionsPage), not on the member's timeline.
+            AuditLogger::log('sessions_revoke_failed', $userId, [], 'user', $userId);
+        }
 
         // ...and every WordPress-side credential of the account (security
         // review 2026-11-18, H3): its cookie sessions (an admin's wp-admin;

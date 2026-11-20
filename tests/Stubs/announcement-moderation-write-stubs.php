@@ -51,6 +51,14 @@ if (!function_exists('wp_update_post')) {
     function wp_update_post($post = [], bool $wp_error = false, bool $fire_after_hooks = true)
     {
         $GLOBALS['__bcc_arch_post_writes'][] = (array) $post;
+        // F-361 — the superglobals AT the write. The guard restores them in
+        // a `finally`, so a check after the call sees the original whether
+        // the pin ran or not.
+        $GLOBALS['__bcc_pin_at_write'][] = [
+            'fn'   => 'wp_update_post',
+            'get'  => $_GET,
+            'post' => $_POST,
+        ];
         return (int) (((array) $post)['ID'] ?? 0);
     }
 }

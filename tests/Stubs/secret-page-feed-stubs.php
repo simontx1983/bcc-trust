@@ -143,6 +143,12 @@ namespace BCC\Core\Feed {
             public const SCOPE_FOR_YOU = 'for_you';
             public const SCOPE_GROUP   = 'group';
 
+            /** bcc-core #158: no author name is masked in this harness. */
+            public static function authorReadFailures(): int
+            {
+                return 0;
+            }
+
             /**
              * @param mixed ...$rest
              * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}

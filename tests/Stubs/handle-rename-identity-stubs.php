@@ -89,6 +89,11 @@ namespace {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            // F-508: the same opt-in failure switch as account-prehijack-stubs.
+            if (!empty($GLOBALS['__bcc_ph']['fail_update'][$key])) {
+                $GLOBALS['__bcc_ph']['failed_updates'][] = $key;
+                return false;
+            }
             $GLOBALS['__bcc_ph']['meta'][$userId][$key] = is_array($value) ? $value : (string) $value;
             return true;
         }

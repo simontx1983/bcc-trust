@@ -750,6 +750,29 @@ if ($created === false) {
     exit(1);
 }
 
+// WordPress core wp_usermeta, which production always has. PrivacySettings
+// reads the §K2 flags from it through bcc-core's guarded UserMetaRepository,
+// and that read answers "unknown" (every flag hidden) when the table is
+// missing. So every suite that renders a member name needs it, including
+// suites that back the rest of user meta with a get_user_meta() stub (those
+// stubs never reach this table). Suites that seed it keep their own
+// CREATE TABLE IF NOT EXISTS, a no-op now; the DDL matches theirs.
+$created = $GLOBALS['wpdb']->query(
+    "CREATE TABLE IF NOT EXISTS `wp_usermeta` (
+        umeta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        meta_key VARCHAR(255) NULL DEFAULT NULL,
+        meta_value LONGTEXT NULL,
+        PRIMARY KEY (umeta_id),
+        KEY user_id (user_id),
+        KEY meta_key (meta_key(191))
+    ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+);
+if ($created === false) {
+    fwrite(STDERR, "FATAL: could not create wp_usermeta: " . $GLOBALS['wpdb']->last_error . "\n");
+    exit(1);
+}
+
 // WordPress core wp_posts + wp_postmeta. Added for PR 5b: holder-gate
 // configuration lives entirely in post meta on `peepso-group` posts, so the
 // gate-identity repair cannot be exercised without them.

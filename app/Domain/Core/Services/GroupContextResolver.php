@@ -4,6 +4,9 @@
  *
  * Single seam for "what kind of group is this?" questions. Reads
  * post meta on the peepso-group post and produces a GroupContext.
+ * Privacy is the exception: it comes from bcc-core's probed table read
+ * (`PeepSoGroupPrivacy`, F-460), which answers null when it cannot be
+ * trusted; see PeepSoPrivacy.
  *
  * Domain isolation: the resolver reads only post meta on the group
  * post itself. It never reaches into Onchain repositories. The
@@ -36,6 +39,16 @@ final class GroupContextResolver {
     /** @var array<int, GroupContext|null> */
     private array $cache = [];
 
+    /**
+     * Group privacy primed by forManyGroups(): the answer of bcc-core's
+     * `PeepSoGroupPrivacy::privacyForGroups()` per group, null where that
+     * read could not be trusted. forGroup() uses an entry when there is one,
+     * and otherwise reads the single group itself.
+     *
+     * @var array<int, int|null>
+     */
+    private array $privacy = [];
+
     public function forGroup(int $groupId): ?GroupContext {
         if ($groupId <= 0) {
             return null;
@@ -55,7 +68,11 @@ final class GroupContextResolver {
 
         [$sourceKind, $sourceId] = $this->resolveSource($groupId, $type);
         $verification = $this->resolveVerification($type);
-        $privacy      = PeepSoPrivacy::fromGroupPostId($groupId);
+        // F-460: from the table (bcc-core's probed read), never the meta
+        // cache; unknown is Secret. See PeepSoPrivacy.
+        $privacy      = array_key_exists($groupId, $this->privacy)
+            ? PeepSoPrivacy::fromStoredValue($this->privacy[$groupId])
+            : PeepSoPrivacy::fromGroupPostId($groupId);
 
         $trustWeighting = (int) get_post_meta($groupId, '_bcc_trust_weighting_enabled', true) === 1;
 
@@ -79,6 +96,10 @@ final class GroupContextResolver {
      * issue its own SELECT * FROM wp_posts. Priming the object cache
      * collapses those to a single batched read.
      *
+     * Privacy is primed the same way: one bcc-core
+     * `PeepSoGroupPrivacy::privacyForGroups()` read for the page (F-460),
+     * through ProbesReads rather than get_post_meta().
+     *
      * @param int[] $groupIds
      * @return array<int, GroupContext>
      */
@@ -95,6 +116,7 @@ final class GroupContextResolver {
         }
         if ($missing !== []) {
             _prime_post_caches($missing, false, true);
+            $this->primePrivacy($missing);
         }
 
         $out = [];
@@ -105,6 +127,26 @@ final class GroupContextResolver {
             }
         }
         return $out;
+    }
+
+    /**
+     * Read the privacy of many groups in one query per BATCH_MAX ids, so a
+     * feed page is not one privacy query per group.
+     *
+     * ⚠ A chunk whose read cannot be trusted primes NULL (unknown, so
+     * Secret) for each of its groups. It does not leave them unprimed, which
+     * would fall back to one query per group against a database that is
+     * already failing.
+     *
+     * @param list<int> $groupIds
+     */
+    private function primePrivacy(array $groupIds): void {
+        foreach (array_chunk($groupIds, \BCC\Core\Repositories\PeepSoGroupPrivacy::BATCH_MAX) as $chunk) {
+            $byGroup = \BCC\Core\Repositories\PeepSoGroupPrivacy::privacyForGroups($chunk);
+            foreach ($chunk as $groupId) {
+                $this->privacy[$groupId] = $byGroup === null ? null : ($byGroup[$groupId] ?? null);
+            }
+        }
     }
 
     private function resolveType(string $kind): GroupType {

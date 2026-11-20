@@ -191,6 +191,62 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
         }
     }
 
+    /**
+     * F-508: the suspension stands when its token revocation does not land,
+     * and the admin is TOLD (a warning notice with the retry), not only the log.
+     */
+    public function testASingleSuspendWhoseRevocationFailsWarnsTheAdmin(): void
+    {
+        $GLOBALS['__bcc_ms']['tv_write_fails'] = true;
+
+        ob_start();
+        $result = $this->service()->suspendUser(self::UID, 'manual_suspension');
+        $out    = (string) ob_get_clean();
+
+        self::assertTrue($result['success'], 'the suspension itself landed');
+        self::assertSame([self::UID], $GLOBALS['__bcc_ms']['suspended']);
+        self::assertStringContainsString('notice-warning', $out);
+        self::assertStringContainsString('could not be ended', $out);
+        self::assertStringContainsString('Unsuspend and suspend them again to retry', $result['message']);
+    }
+
+    public function testASingleSuspendWhoseRevocationLandsShowsNoWarning(): void
+    {
+        ob_start();
+        $result = $this->service()->suspendUser(self::UID, 'manual_suspension');
+        $out    = (string) ob_get_clean();
+
+        self::assertTrue($result['success']);
+        self::assertStringNotContainsString('notice-warning', $out);
+        self::assertStringNotContainsString('could not be ended', $result['message']);
+    }
+
+    /** F-508: a bulk or ring suspend names each member whose revocation failed, for the next page view. */
+    public function testABulkSuspendNamesTheMembersWhoseRevocationFailed(): void
+    {
+        $GLOBALS['__bcc_ms']['tv_write_fails'] = true;
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4301, 4302], 'suspend'));
+
+        self::assertSame([4301, 4302], $GLOBALS['__bcc_ms']['suspended'], 'both suspensions landed');
+        self::assertSame(
+            [4301 => 'revoke_failed', 4302 => 'revoke_failed'],
+            $GLOBALS['__bcc_ms']['transients']['bcc_trust_suspend_skips_1'] ?? null
+        );
+    }
+
+    public function testARingSuspendNamesTheMembersWhoseRevocationFailed(): void
+    {
+        $GLOBALS['__bcc_ms']['tv_write_fails'] = true;
+
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([4301, 4302], 'suspend_all', 'a ring'));
+
+        self::assertSame(
+            [4301 => 'revoke_failed', 4302 => 'revoke_failed'],
+            $GLOBALS['__bcc_ms']['transients']['bcc_trust_suspend_skips_1'] ?? null
+        );
+    }
+
     public function testBulkSuspendRevokesEveryUser(): void
     {
         $tokens = [4301 => self::mintToken(4301), 4302 => self::mintToken(4302)];

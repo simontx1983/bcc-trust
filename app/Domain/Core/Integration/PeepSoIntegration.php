@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 use BCC\Trust\Core\Support\Formatting;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -199,10 +200,17 @@ class PeepSoIntegration
             return;
         }
 
-        $update = wp_update_post([
-            'ID'          => $pageId,
-            'post_author' => $userId,
-        ], true);
+        // F-361 — pinned: `wp_update_post()` calls `wp_insert_post()`,
+        // which fires the `wp_insert_post` action, where third-party
+        // listeners run. This write must stay inside `pinOnly`.
+        // Rationale: F-361 (private tracker).
+        $update = PeepSoAddPostGuard::pinOnly(
+            [], // a page author change drives nothing through the request
+            static fn () => wp_update_post([
+                'ID'          => $pageId,
+                'post_author' => $userId,
+            ], true)
+        );
 
         if (is_wp_error($update)) {
             \BCC\Core\Log\Logger::error('[bcc-trust] onPageClaimed: wp_update_post failed', [
@@ -440,7 +448,11 @@ class PeepSoIntegration
             $authorReset       = false;
             $authorResetFailed = false;
             if ((int) get_post_field('post_author', $pageId) === $userId) {
-                $update = wp_update_post(['ID' => $pageId, 'post_author' => 0], true);
+                // F-361 — pinned, same reason as the claim above.
+                $update = PeepSoAddPostGuard::pinOnly(
+                    [],
+                    static fn () => wp_update_post(['ID' => $pageId, 'post_author' => 0], true)
+                );
                 if (is_wp_error($update)) {
                     $authorResetFailed = true;
                     \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [

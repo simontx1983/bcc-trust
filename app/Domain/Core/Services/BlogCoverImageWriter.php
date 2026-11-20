@@ -35,6 +35,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
 use BCC\Core\Security\Throttle;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -510,18 +511,28 @@ final class BlogCoverImageWriter
         $stripped  = preg_replace('/\.[^.]+$/', '', $baseName);
         $postTitle = is_string($stripped) && $stripped !== '' ? $stripped : $baseName;
 
-        $attachmentId = wp_insert_attachment(
-            [
-                'guid'           => $savedUrl,
-                'post_mime_type' => $savedMime,
-                'post_title'     => $postTitle,
-                'post_content'   => '',
-                'post_status'    => 'inherit',
-                'post_author'    => $authorId,
-            ],
-            $savedPath,
-            0, // parent post id — 0 until the blog cover-pins this attachment
-            true // wp_error mode so we can surface real errors as an envelope
+        // ⚠ F-361 — `wp_insert_attachment()` RETURNS `wp_insert_post()`
+        // (wp-includes/post.php:6665), so it fires the `wp_insert_post`
+        // action, where third-party listeners run. This write must stay
+        // inside `pinOnly`. It is also the one site a grep for
+        // "wp_insert_post" would never have found.
+        //
+        // Rationale: F-361 (private tracker).
+        $attachmentId = PeepSoAddPostGuard::pinOnly(
+            [], // an attachment drives nothing through the request
+            static fn () => wp_insert_attachment(
+                [
+                    'guid'           => $savedUrl,
+                    'post_mime_type' => $savedMime,
+                    'post_title'     => $postTitle,
+                    'post_content'   => '',
+                    'post_status'    => 'inherit',
+                    'post_author'    => $authorId,
+                ],
+                $savedPath,
+                0, // parent post id — 0 until the blog cover-pins this attachment
+                true // wp_error mode so we can surface real errors as an envelope
+            )
         );
 
         if (is_wp_error($attachmentId) || (int) $attachmentId <= 0) {
