@@ -12,14 +12,12 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Security review (2026-11-18): BearerAuth authenticates every REST request,
- * so a member's token reached core's routes (`PUT /wp/v2/users/me` changed
- * the password or email around every BCC step-up) and every other plugin's.
+ * and core's routes and other plugins' run none of BCC's gates.
  * RestRouteAllowlist opens only BCC's namespaces to non-admins:
  *   - members: `/bcc/v1` and `/bcc-trust/v1` only; anything else is 403;
  *   - signed out: BCC's namespaces plus the exact EXEMPT_ROUTES (none
- *     today); anything else is 401, reads included (the allowlist's own
- *     review: `/wp/v2/media` listed every member's blog-cover upload with
- *     its author id);
+ *     today); anything else is 401, reads included (nothing outside BCC's
+ *     namespaces applies BCC's privacy rules);
  *   - admins: untouched.
  * Application passwords are for admins only.
  *
@@ -206,8 +204,6 @@ final class RestRouteAllowlistTest extends TestCase
     /** @return iterable<string, array{0: string}> */
     public static function readsOutsideBcc(): iterable
     {
-        // The review's finding: every member's blog-cover upload, with its
-        // author id.
         yield 'core media'                => ['/wp/v2/media'];
         yield 'a media item'              => ['/wp/v2/media/123'];
         yield 'media, any letter case'    => ['/WP/V2/Media'];
@@ -400,8 +396,8 @@ final class RestRouteAllowlistTest extends TestCase
 
     public function testASignedOutReadInsideABatchIsRefusedButABccRouteIsNot(): void
     {
-        // Reads too (the media listing this class closes), each with its own
-        // 401, beside a BCC route that is dispatched as normal.
+        // Reads too, each with its own 401, beside a BCC route that is
+        // dispatched as normal.
         $responses = self::batch([['GET', '/wp/v2/media'], ['HEAD', '/wp/v2/comments'], ['GET', '/bcc/v1/posts']]);
 
         self::assertSame([401, 401, 200], array_column($responses, 'status'));
