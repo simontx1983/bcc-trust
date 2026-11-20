@@ -37,12 +37,32 @@ if (!defined('ABSPATH')) {
  *    didn't work" answer, so the form tests neither passwords nor which
  *    logins are admins. Every other answer (an empty field, Wordfence's
  *    "enter your 2FA code" for an admin) passes through untouched.
- * 2. `admin_init`: a signed-in member is sent from wp-admin and
- *    admin-post.php to the app, and refused at admin-ajax.php (403). No
- *    admin-ajax action is needed by a member. The app talks to BCC's REST
- *    routes only, and the logged-in actions registered on this site are
- *    wp-admin tooling, PeepSo's own UI (whose pages send members to the
- *    app) and core's `rest-nonce`, the nonce this attack needed.
+ * 2. `init` (first) and `admin_init`: WordPress's and PeepSo's own ajax
+ *    doors, plus wp-admin.
+ *    - admin-ajax.php: a signed-in member gets a bare 403. No admin-ajax
+ *      action is needed by a member (MEMBER_AJAX_ACTIONS is empty). The
+ *      app talks to BCC's REST routes only, and the logged-in actions
+ *      registered on this site are wp-admin tooling, PeepSo's own UI and
+ *      core's `rest-nonce`, the nonce this attack needed. Signed-out
+ *      (`nopriv`) callers are untouched: LiteSpeed's async loopback sends
+ *      no cookies.
+ *    - PeepSo's /peepsoajax/ router: every non-admin, signed out
+ *      included, gets a bare 403. It is matched as PeepSo routes it (see
+ *      isPeepSoAjax()), so a prefix rule can't be walked past with
+ *      /x/peepsoajax/….
+ *    - wp-admin and admin-post.php (`admin_init`): a signed-in member is
+ *      sent to the app.
+ *
+ *    ⚠ WHY at `init` (security review, 2026-11-19): PeepSo routes
+ *    /peepsoajax/ on `wp_loaded` (-1), before any admin hook. A member
+ *    there or on admin-ajax was answered as themselves:
+ *    - tags.get_taggable named any activity's author and commenters;
+ *    - admin-ajax's peepso_embed_content (no nonce, no cap check) fetched
+ *      any URL server-side.
+ *    BearerAuth now signs members in on REST requests only, so this is
+ *    the second wall: a WordPress cookie from before H2/H3 can live for
+ *    14 days. The 403 is bare, never a page: a themed page would print a
+ *    nonce for the member.
  * 3. `rest_pre_dispatch` on every bcc namespace: a member must be
  *    authenticated by a BCC bearer token. A request whose user came from
  *    anything else (a cookie plus nonce, an application password) is 401
@@ -93,12 +113,25 @@ final class WordPressSignInGate
      */
     public const FAILED_SIGN_IN_CODES = ['incorrect_password', 'invalid_username', 'invalid_email'];
 
+    /** First on `init`, before PeepSo's /peepsoajax/ router (`wp_loaded`, -1). */
+    public const AJAX_PRIORITY = PHP_INT_MIN;
+
+    /**
+     * The admin-ajax actions a signed-in member may still call. Empty on
+     * purpose: the app needs none. An entry needs a reason and a test of
+     * its own.
+     *
+     * @var list<string>
+     */
+    public const MEMBER_AJAX_ACTIONS = [];
+
     /** True only while the app's forgot-password flow mints its key. */
     private static bool $mintingAppResetKey = false;
 
     public static function register(): void
     {
         add_filter('authenticate', [self::class, 'refuseMemberSignIn'], self::AUTHENTICATE_PRIORITY, 3);
+        add_action('init', [self::class, 'refuseWordPressAjax'], self::AJAX_PRIORITY);
         add_action('admin_init', [self::class, 'keepMembersOutOfAdmin'], 1);
         add_filter('rest_pre_dispatch', [self::class, 'filterRest'], self::REST_PRIORITY, 3);
         add_filter('allow_password_reset', [self::class, 'allowPasswordReset'], self::RESET_PRIORITY, 2);
@@ -146,8 +179,11 @@ final class WordPressSignInGate
             return;
         }
 
+        // refuseWordPressAjax() has already decided this at `init`; asking
+        // again here costs nothing and holds if that hook was taken away.
         if (wp_doing_ajax()) {
-            wp_die('-1', 403);
+            self::refuseMemberAjaxUnlessAllowed();
+            return;
         }
 
         // ⚠ wp_redirect, NOT wp_safe_redirect. The target is built here from
@@ -159,6 +195,92 @@ final class WordPressSignInGate
         // redirect wherever the frontend's host is not WordPress's home
         // (staging, local).
         wp_redirect(FrontendRedirect::defaultReturn('/'));
+        exit;
+    }
+
+    /**
+     * `init`, first: WordPress's and PeepSo's ajax doors (see the class
+     * note, door 2). Admins are untouched.
+     *   - /peepsoajax/: refused to every non-admin, signed out included;
+     *   - admin-ajax.php: refused to a signed-in member, unless the action
+     *     is in MEMBER_AJAX_ACTIONS. `nopriv` callers are untouched.
+     */
+    public static function refuseWordPressAjax(): void
+    {
+        $userId = get_current_user_id();
+        if ($userId > 0 && user_can($userId, self::CAPABILITY)) {
+            return;
+        }
+
+        $uri = $_SERVER['REQUEST_URI'] ?? '';
+        if (is_string($uri) && self::isPeepSoAjax($uri)) {
+            self::refuseBare();
+        }
+
+        if ($userId > 0 && wp_doing_ajax()) {
+            self::refuseMemberAjaxUnlessAllowed();
+        }
+    }
+
+    /**
+     * Would PeepSo route this request to its ajax handler? Answered as a
+     * SUPERSET of PeepSo::check_ajax_query() (peepso.php, 9.0.5.5), which
+     * takes trim(parse_url(REQUEST_URI, PHP_URL_PATH), '/'), splits it on
+     * '/', and routes when the second-to-last segment is 'peepsoajax'.
+     * Here, case-blind:
+     *   - the raw URI contains '/peepsoajax/' anywhere; or
+     *   - any segment of the path, read the same way with PHP's own
+     *     parse_url() (not wp_parse_url()), is 'peepsoajax'.
+     * So /peepsoajax/a.b, /x/peepsoajax/a.b and /index.php/peepsoajax/a.b
+     * all match, with or without a trailing slash or a query. A false
+     * positive only refuses a non-admin a URL that serves them nothing.
+     */
+    public static function isPeepSoAjax(string $requestUri): bool
+    {
+        if (stripos($requestUri, '/peepsoajax/') !== false) {
+            return true;
+        }
+
+        $path = parse_url($requestUri, PHP_URL_PATH);
+        foreach (explode('/', trim(is_string($path) ? $path : '', '/')) as $segment) {
+            if (strcasecmp($segment, 'peepsoajax') === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** admin-ajax.php for a signed-in member: a bare 403, unless allowed. */
+    private static function refuseMemberAjaxUnlessAllowed(): void
+    {
+        $action = $_REQUEST['action'] ?? null;
+        if (is_string($action) && self::allowsMemberAjax($action)) {
+            return;
+        }
+
+        self::refuseBare();
+    }
+
+    /**
+     * Is this admin-ajax action open to a signed-in member? Only an exact
+     * entry of the list: no prefix, no case folding.
+     *
+     * @param list<string> $allowed MEMBER_AJAX_ACTIONS; a test passes its own
+     */
+    public static function allowsMemberAjax(string $action, array $allowed = self::MEMBER_AJAX_ACTIONS): bool
+    {
+        return in_array($action, $allowed, true);
+    }
+
+    /**
+     * A bare 403 and nothing else: no page, no theme, so no nonce minted
+     * for the caller, and no handler after it.
+     */
+    private static function refuseBare(): never
+    {
+        nocache_headers();
+        status_header(403);
         exit;
     }
 

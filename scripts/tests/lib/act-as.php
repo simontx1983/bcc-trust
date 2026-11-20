@@ -142,3 +142,32 @@ if (!function_exists('bcc_harness_act_as')) {
         }
     }
 }
+
+if (!function_exists('bcc_harness_as')) {
+    /**
+     * Run $run as $userId, then sign out, even when something throws.
+     *
+     * bcc_harness_act_as() puts the request back only on
+     * bcc_harness_act_as(0). A harness that CATCHES a failure and carries
+     * on would otherwise keep the REST shape and the member's bearer for
+     * whatever ran next. Here the sign-out is in `finally`, and the sign-in
+     * is inside the `try` too, so a refused token (which throws after the
+     * shape and the header are in place) is cleaned up as well.
+     *
+     * It leaves the request signed out, not as whoever was current before.
+     *
+     * @template T
+     * @param callable(): T $run
+     * @return T
+     */
+    function bcc_harness_as(int $userId, callable $run)
+    {
+        try {
+            bcc_harness_act_as($userId);
+
+            return $run();
+        } finally {
+            bcc_harness_act_as(0);
+        }
+    }
+}

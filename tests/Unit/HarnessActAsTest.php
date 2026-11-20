@@ -220,6 +220,57 @@ final class HarnessActAsTest extends TestCase
         bcc_harness_act_as(self::MEMBER);
     }
 
+    /** The wrapper runs as the user, returns what the run returns, then signs out. */
+    public function testTheWrapperRunsAsTheUserThenSignsOut(): void
+    {
+        $seen = bcc_harness_as(self::MEMBER, static fn(): array => [get_current_user_id(), BearerAuth::authenticatedUserId()]);
+
+        self::assertSame([self::MEMBER, self::MEMBER], $seen);
+        self::assertSignedOutAndRestored();
+    }
+
+    /** A harness that catches a failure and carries on is left signed out. */
+    public function testTheWrapperSignsOutWhenTheRunThrows(): void
+    {
+        try {
+            bcc_harness_as(self::MEMBER, static function (): void {
+                throw new \LogicException('a harness check failed');
+            });
+            self::fail('the exception was swallowed');
+        } catch (\LogicException $e) {
+            self::assertSame('a harness check failed', $e->getMessage(), 'the run\'s own exception comes through');
+        }
+
+        self::assertSignedOutAndRestored();
+    }
+
+    /** A refused token throws after the shape and header are set: they go too. */
+    public function testTheWrapperCleansUpWhenTheTokenIsRefused(): void
+    {
+        add_filter('determine_current_user', static function ($userId) {
+            unset($GLOBALS['__bcc_ph']['users'][self::MEMBER]);
+            return $userId;
+        }, 1);
+
+        try {
+            bcc_harness_as(self::MEMBER, static fn(): bool => true);
+            self::fail('a refused token must throw');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('bcc_harness_act_as(' . self::MEMBER . ')', $e->getMessage());
+        }
+
+        self::assertSignedOutAndRestored();
+    }
+
+    private static function assertSignedOutAndRestored(): void
+    {
+        self::assertSame(0, get_current_user_id());
+        self::assertArrayNotHasKey('HTTP_AUTHORIZATION', $_SERVER, 'no bearer left behind');
+        self::assertSame('vendor/bin/phpunit', $_SERVER['SCRIPT_NAME'], 'the request\'s own SCRIPT_NAME');
+        self::assertSame('', $_SERVER['REQUEST_URI'], 'the request\'s own REQUEST_URI');
+        self::assertFalse(BearerAuth::isRestRequest());
+    }
+
     /** A token the app would refuse stops the harness instead of running it as nobody. */
     public function testARefusedTokenFailsLoudly(): void
     {
