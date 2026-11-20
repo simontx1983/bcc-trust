@@ -65,6 +65,22 @@ final class FeedItemReportVisibilityTest extends TestCase
         // second argument — a bare `class_exists()` would ask the autoloader,
         // which loads the real class and makes the guard always true, exactly
         // the trap this file is guarding against.
+        // ⚠⚠ THE TRAIT BEFORE THE CLASS THAT USES IT, and this line is
+        // FORWARD-LOOKING: it is a no-op today. These reads load core files
+        // BY PATH, so bcc-core's autoloader is not in play and every
+        // transitive dependency must be required explicitly, in order. The
+        // moment a core class loaded here gains a `use` of a core trait,
+        // requiring the class alone fatals with `Trait "..." not found` —
+        // a bcc-core change turning THIS repo's CI red, for a reason
+        // invisible from inside bcc-core.
+        //
+        // Required now, while it costs nothing, so that the core change can
+        // land without a window in which every open bcc-trust PR fails.
+        // bcc-search learned this the other way round: the equivalent line
+        // was missing there, and a core trait addition produced 9 fatals in
+        // its group-privacy suite with search `main` latently red. Seven
+        // other suites in this repo already require this trait.
+        require_once CoreSibling::require('src/Repositories/ProbesReads.php');
         require_once CoreSibling::require('src/Repositories/PeepSoGroupRepository.php');
         // The REAL public-feed module allowlist, not a copy, so this suite
         // fails if the two ever disagree.
