@@ -231,27 +231,17 @@ final class FeedRankingService
      * ({@see ActivityFeedService::authorReadFailures()}, a per-request count
      * snapshotted around the build, so a build that reads several pages is
      * covered). Such a page is served to this request only, and the next
-     * request builds again. Rationale: M3 (private tracker).
+     * request builds again. Needs bcc-core #158 (deployed first).
+     * Rationale: M3 (private tracker).
      *
      * @return array{0: array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}, 1: bool}
      */
     private function buildHotFeedForSharedCache(int $limit): array
     {
-        $before  = self::authorReadFailuresSoFar();
+        $before  = ActivityFeedService::authorReadFailures();
         $payload = $this->buildHotFeed(null, $limit);
 
-        return [$payload, self::authorReadFailuresSoFar() === $before];
-    }
-
-    /**
-     * bcc-core's masked-author count, or 0 on a core that predates it (that
-     * core masks nothing, so there is nothing to keep out of the cache).
-     */
-    private static function authorReadFailuresSoFar(): int
-    {
-        return method_exists(ActivityFeedService::class, 'authorReadFailures')
-            ? ActivityFeedService::authorReadFailures()
-            : 0;
+        return [$payload, ActivityFeedService::authorReadFailures() === $before];
     }
 
     /**

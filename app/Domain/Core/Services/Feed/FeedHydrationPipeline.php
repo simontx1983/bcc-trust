@@ -1239,7 +1239,7 @@ final class FeedHydrationPipeline
         // Prime the user_meta cache for bcc_handle reads — one query
         // instead of one per user. visibleName()'s real_name_hidden reads
         // its own guarded copy (bcc-core UserMetaRepository), primed the same way.
-        $reactorIds = array_map(static fn ($u) => (int) $u->ID, $users);
+        $reactorIds = array_values(array_map(static fn ($u) => (int) $u->ID, $users));
         update_meta_cache('user', $reactorIds);
         \BCC\Trust\Core\Support\PrivacySettings::prime($reactorIds);
 
