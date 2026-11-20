@@ -122,6 +122,31 @@ final class NotificationActorHandleTest extends TestCase
         );
     }
 
+    /**
+     * F-501: a stored handle is `[a-z0-9-]+` (HandleService), and the
+     * default one is `member-<id>`. The WHOLE leading token is the old
+     * handle: a match that stopped at the first hyphen would leave its tail
+     * glued to the new handle ("@newname-name …").
+     *
+     * @return iterable<string, array{0: string}>
+     */
+    public static function hyphenatedOldHandles(): iterable
+    {
+        yield 'one hyphen'            => ['old-name'];
+        yield 'the default handle'    => ['member-1234'];
+        yield 'several hyphens'       => ['a-b-c-d'];
+        yield 'a leading digit group' => ['42-crypto'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('hyphenatedOldHandles')]
+    public function testAHyphenatedOldHandleIsReplacedWhole(string $oldHandle): void
+    {
+        self::assertSame(
+            '@newname reacted to your post.',
+            NotificationViewService::withCurrentActorHandle('@' . $oldHandle . ' reacted to your post.', 'newname')
+        );
+    }
+
     /** @return iterable<string, array{0: string}> */
     public static function untouched(): iterable
     {
