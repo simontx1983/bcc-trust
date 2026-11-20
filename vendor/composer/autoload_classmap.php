@@ -381,6 +381,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\PageOwnerDecision' => $baseDir . '/app/Domain/Core/Support/PageOwnerDecision.php',
     'BCC\\Trust\\Core\\Support\\PageTypeMap' => $baseDir . '/app/Domain/Core/Support/PageTypeMap.php',
     'BCC\\Trust\\Core\\Support\\PeepSoAlbumAccess' => $baseDir . '/app/Domain/Core/Support/PeepSoAlbumAccess.php',
+    'BCC\\Trust\\Core\\Support\\PeepSoChatPrefs' => $baseDir . '/app/Domain/Core/Support/PeepSoChatPrefs.php',
     'BCC\\Trust\\Core\\Support\\PeepSoFriendGate' => $baseDir . '/app/Domain/Core/Support/PeepSoFriendGate.php',
     'BCC\\Trust\\Core\\Support\\PeepSoNameParts' => $baseDir . '/app/Domain/Core/Support/PeepSoNameParts.php',
     'BCC\\Trust\\Core\\Support\\Permission' => $baseDir . '/app/Domain/Core/Support/Permission.php',

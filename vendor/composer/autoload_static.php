@@ -537,6 +537,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\PageOwnerDecision' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageOwnerDecision.php',
         'BCC\\Trust\\Core\\Support\\PageTypeMap' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageTypeMap.php',
         'BCC\\Trust\\Core\\Support\\PeepSoAlbumAccess' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoAlbumAccess.php',
+        'BCC\\Trust\\Core\\Support\\PeepSoChatPrefs' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoChatPrefs.php',
         'BCC\\Trust\\Core\\Support\\PeepSoFriendGate' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoFriendGate.php',
         'BCC\\Trust\\Core\\Support\\PeepSoNameParts' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoNameParts.php',
         'BCC\\Trust\\Core\\Support\\Permission' => __DIR__ . '/../..' . '/app/Domain/Core/Support/Permission.php',
