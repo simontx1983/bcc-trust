@@ -18,6 +18,9 @@
  * ⚠ AUTOLOADED, NOT DECLARED. A suite that wants core's REAL class requires
  * it (CoreSibling::require('src/Repositories/UserMetaRepository.php'))
  * before first use, and the autoloader never fires.
+ * ⚠ Once any test in a SHARED process (one not run in a separate process)
+ * autoloads this double, the real class can no longer load in that process,
+ * so a suite that needs the real class must run in a separate process.
  *
  * The real class is pinned in bcc-core (UserMetaRepositoryReadTest) and,
  * through PrivacySettings, against real MySQL by

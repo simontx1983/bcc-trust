@@ -50,6 +50,16 @@ final class AutoHideAuthorNoticeIntegrationTest extends TestCase
         $GLOBALS['__bcc_mail']        = [];
         $GLOBALS['bcc_scheduled']     = [];
         $GLOBALS['__bcc_usermeta']    = [];
+        // The §K2 privacy flags are read from the real wp_usermeta (created
+        // by the bootstrap), never through the get_user_meta() stub. Start
+        // this suite's members from "nothing hidden".
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->usermeta} WHERE user_id IN (%d, %d) AND meta_key LIKE %s",
+            self::AUTHOR,
+            self::REPORTER,
+            $wpdb->esc_like('bcc_privacy_') . '%'
+        ));
         $GLOBALS['__bcc_test_object_cache'] = [];
 
         // F-296: the digest read excludes blocked members, fail-closed.
