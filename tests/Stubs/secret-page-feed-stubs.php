@@ -16,7 +16,7 @@
  * Doubled, because they are not what is under test: bcc-core's
  * ActivityFeedService (it answers pages from a fixture), the block, reputation
  * and hidden-activity reads, hydration (it returns the items it is given),
- * RestrictedGroups, ProfileSectionVisibility, PeepSoFriendGate, and the admin
+ * ProfileSectionVisibility, PeepSoFriendGate, and the admin
  * check.
  *
  * Fixture ($GLOBALS['__bcc_spf']):
@@ -287,17 +287,6 @@ namespace BCC\Trust\Core\Services\Feed {
 }
 
 namespace BCC\Trust\Core\Support {
-    if (!class_exists(__NAMESPACE__ . '\\RestrictedGroups', false)) {
-        final class RestrictedGroups
-        {
-            /** @return list<int> */
-            public static function forViewer(int $viewerId): array
-            {
-                return [];
-            }
-        }
-    }
-
     if (!class_exists(__NAMESPACE__ . '\\PeepSoFriendGate', false)) {
         final class PeepSoFriendGate
         {

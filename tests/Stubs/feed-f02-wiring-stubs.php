@@ -6,7 +6,7 @@
  * files here: this declares SEVEN classes that also exist for real
  * (`BCC\Core\Feed\ActivityFeedService`, `PeepSoBlockRepository`,
  * `Permissions`, `ReputationRepository`, `HiddenActivityRepository`,
- * `GroupContextResolver`, `FeedHydrationPipeline`, `RestrictedGroups`).
+ * `GroupContextResolver`, `FeedHydrationPipeline`).
  * A class declaration cannot be undone and the first one wins for the
  * rest of the process. The consuming test is
  * `#[RunTestsInSeparateProcesses]` + `#[PreserveGlobalState(false)]`.
@@ -415,21 +415,6 @@ namespace BCC\Trust\Core\Services {
             $ctx = $GLOBALS['__bcc_f02feed']['group_contexts'][$groupId] ?? null;
 
             return $ctx instanceof \BCC\Trust\Core\ValueObjects\GroupContext ? $ctx : null;
-        }
-    }
-}
-
-namespace BCC\Trust\Core\Support {
-    // ⚠ ProfileAccess and PeepSoFriendGate live in this namespace too and
-    // are deliberately NOT declared here — they are the real thing.
-    final class RestrictedGroups
-    {
-        /** @return list<int> */
-        public static function forViewer(int $viewerId): array
-        {
-            unset($viewerId);
-
-            return [];
         }
     }
 }
