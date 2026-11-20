@@ -124,6 +124,16 @@ namespace BCC\Trust\Onchain\Services {
                 return ($GLOBALS['__bcc_valgate_fixture']['opted_out'] ?? false) === 'permanent';
             }
 
+            /**
+             * H7: the join gate's trusted read. Fixture `opted_out` =
+             * 'unreadable' answers null (the map could not be read).
+             */
+            public function permanentOptOutState(int $userId, int $groupId): ?bool
+            {
+                $optedOut = $GLOBALS['__bcc_valgate_fixture']['opted_out'] ?? false;
+                return $optedOut === 'unreadable' ? null : $optedOut === 'permanent';
+            }
+
             public function clearOptOut(int $userId, int $groupId): void
             {
                 $GLOBALS['__bcc_valgate_fixture']['cleared'][] = [$userId, $groupId];

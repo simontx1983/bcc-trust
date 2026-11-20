@@ -88,7 +88,14 @@ final class ValidatorGroupGateService {
         // voluntary (TTL'd) opt-out (F-158, same rule as holder groups); only
         // a PERMANENT moderator-eviction opt-out still refuses. Auto-add and
         // the listing keep honouring every opt-out.
-        if ($this->optOuts->isPermanentOptOut($userId, $groupId)) {
+        //
+        // H7: a TRUSTED read. Unreadable is the transient 503, never "no
+        // opt-out".
+        $permanent = $this->optOuts->permanentOptOutState($userId, $groupId);
+        if ($permanent === null) {
+            return JoinResult::verifyUnavailable($minWire);
+        }
+        if ($permanent) {
             return JoinResult::optOutActive($minWire);
         }
         // A PeepSo ban is a moderator removal too (F-271): 403, not a 503.
