@@ -89,6 +89,7 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'filterRest'], 1, 3], $hooks['rest_pre_dispatch']);
         self::assertSame([[WordPressSignInGate::class, 'allowPasswordReset'], PHP_INT_MAX, 2], $hooks['allow_password_reset']);
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
+        self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
@@ -248,7 +249,7 @@ final class WordPressSignInGateTest extends TestCase
     {
         $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
         $GLOBALS['__bcc_sig']['ajax']    = true;
-        $_REQUEST['action'] = 'peepso_embed_content';
+        $_REQUEST['action'] = 'some_member_action';
 
         self::assertSame('status', self::runAdminInit());
         self::assertBare403();
@@ -261,8 +262,20 @@ final class WordPressSignInGateTest extends TestCase
             'admin, wp-admin'      => [self::ADMIN, false],
             'admin, admin-ajax'    => [self::ADMIN, true],
             'signed out, wp-admin' => [0, false],
-            'signed out, ajax'     => [0, true],
         ];
+    }
+
+    /** F-496: the same signed-out admin-ajax decision as `init`, asked again here. */
+    public function testASignedOutCallerIsRefusedAtAdminInitOnlyForADeniedAction(): void
+    {
+        $GLOBALS['__bcc_sig']['ajax'] = true;
+
+        $_REQUEST['action'] = 'wordfence_ls_authenticate';
+        self::assertNull(self::runAdminInit(), 'an action that is not denied passes');
+
+        $_REQUEST['action'] = 'peepso_vip_user_icons';
+        self::assertSame('status', self::runAdminInit());
+        self::assertBare403();
     }
 
     #[DataProvider('untouchedAdminVisits')]
@@ -311,7 +324,7 @@ final class WordPressSignInGateTest extends TestCase
     public static function memberAjaxActions(): array
     {
         return [
-            'peepso_embed_content (the SSRF)'          => ['peepso_embed_content'],
+            'some_member_action'                     => ['some_member_action'],
             "core's rest-nonce"                        => ['rest-nonce'],
             'heartbeat'                                => ['heartbeat'],
             "Action Scheduler's async runner"          => ['as_async_request_queue_runner'],
@@ -335,7 +348,7 @@ final class WordPressSignInGateTest extends TestCase
         $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
         $GLOBALS['__bcc_sig']['ajax']    = true;
         $_SERVER['REQUEST_URI'] = '/wp-admin/admin-ajax.php';
-        $_REQUEST['action'] = ['peepso_embed_content'];
+        $_REQUEST['action'] = ['some_member_action'];
 
         try {
             WordPressSignInGate::refuseWordPressAjax();
@@ -348,7 +361,7 @@ final class WordPressSignInGateTest extends TestCase
     public function testNoAdminAjaxActionIsOpenToMembers(): void
     {
         self::assertSame([], WordPressSignInGate::MEMBER_AJAX_ACTIONS);
-        self::assertFalse(WordPressSignInGate::allowsMemberAjax('peepso_embed_content'), 'the real (empty) list');
+        self::assertFalse(WordPressSignInGate::allowsMemberAjax('some_member_action'), 'the real (empty) list');
     }
 
     /** If the list ever gains an entry, only that exact action opens. */
@@ -357,28 +370,177 @@ final class WordPressSignInGateTest extends TestCase
         $sample = ['as_async_request_queue_runner'];
 
         self::assertTrue(WordPressSignInGate::allowsMemberAjax('as_async_request_queue_runner', $sample));
-        foreach (['AS_ASYNC_REQUEST_QUEUE_RUNNER', 'as_async_request_queue_runner_x', 'as_async_request', ' as_async_request_queue_runner', 'peepso_embed_content', ''] as $other) {
+        foreach (['AS_ASYNC_REQUEST_QUEUE_RUNNER', 'as_async_request_queue_runner_x', 'as_async_request', ' as_async_request_queue_runner', 'some_member_action', ''] as $other) {
             self::assertFalse(WordPressSignInGate::allowsMemberAjax($other, $sample), var_export($other, true));
         }
     }
 
-    /** @return array<string, array{int}> */
-    public static function untouchedAjaxCallers(): array
+    public function testAnAdminKeepsAdminAjax(): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::ADMIN;
+        $GLOBALS['__bcc_sig']['ajax']    = true;
+
+        self::assertNull(self::runInit('/wp-admin/admin-ajax.php', 'peepso_vip_user_icons'));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    // ── F-496: signed-out admin-ajax, a deny-list ───────────────────────
+
+    public function testTheSignedOutDenyRulesArePinned(): void
+    {
+        self::assertSame('peepso', WordPressSignInGate::SIGNED_OUT_DENIED_PREFIX);
+        self::assertSame([
+            'wp_convert_aioseo_blocks',
+            'wp_convert_yoast_blocks',
+            'wp_bulk_edit_seo_meta',
+            'wp_bulk_image_alt',
+            'rank_math_overlay_thumb',
+            'log_js_errors',
+        ], WordPressSignInGate::SIGNED_OUT_DENIED_ACTIONS);
+    }
+
+    /**
+     * Signed-out actions that MUST stay open: admin sign-in (2FA, passkeys),
+     * loopbacks, schedulers, mail and core's own. A refusal here locks
+     * admins out or stops background work.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function signedOutKeptActions(): array
     {
         return [
-            'an admin'                     => [self::ADMIN],
-            'signed out (nopriv, LiteSpeed\'s cookie-less loopback)' => [0],
+            'core heartbeat'              => ['heartbeat'],
+            'core generate-password'      => ['generate-password'],
+            'LiteSpeed loopback'          => ['async_litespeed'],
+            'Action Scheduler runner'     => ['as_async_request_queue_runner'],
+            'Wordfence 2FA sign-in'       => ['wordfence_ls_authenticate'],
+            'Wordfence passkey begin'     => ['wordfence_ls_begin_passkey_login'],
+            'Wordfence passkey finish'    => ['wordfence_ls_finish_passkey_login'],
+            'Wordfence support register'  => ['wordfence_ls_register_support'],
+            'Wordfence scan'              => ['wordfence_doScan'],
+            'WP Mail SMTP pingback'       => ['wp_mail_smtp_gmail_reauth_pingback'],
+            'WP Mail SMTP migrations'     => ['wp_mail_smtp_init_migrations'],
+            'WP Mail SMTP installed'      => ['wp_mail_smtp_is_installed'],
+            'no action at all'            => [''],
+            'the prefix in another case'  => ['PeepSo_vip_user_icons'],
+            'the prefix not at the start' => ['x_peepso'],
+            'a denied name, longer'       => ['wp_bulk_image_alt_x'],
+            'a denied name, upper case'   => ['WP_BULK_IMAGE_ALT'],
         ];
     }
 
-    #[DataProvider('untouchedAjaxCallers')]
-    public function testAdminsAndSignedOutCallersKeepAdminAjax(int $user): void
+    #[DataProvider('signedOutKeptActions')]
+    public function testASignedOutCallerKeepsAnyActionThatIsNotDenied(string $action): void
     {
-        $GLOBALS['__bcc_sig']['current'] = $user;
+        $GLOBALS['__bcc_sig']['ajax'] = true;
+
+        self::assertNull(self::runInit('/wp-admin/admin-ajax.php', $action));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+        self::assertFalse(WordPressSignInGate::deniesSignedOutAjax($action));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function signedOutDeniedActions(): array
+    {
+        return [
+            'PeepSo: vip_user_icons'      => ['peepso_vip_user_icons'],
+            'PeepSo: blogposts'           => ['peepsoblogposts_user_posts'],
+            'PeepSo: should_get_chats'    => ['peepso_should_get_chats'],
+            'any other peepso* action'    => ['peepso_some_new_action'],
+            'the bare prefix'             => ['peepso'],
+            'AIOSEO block conversion'     => ['wp_convert_aioseo_blocks'],
+            'Yoast block conversion'      => ['wp_convert_yoast_blocks'],
+            'bulk SEO meta edit'          => ['wp_bulk_edit_seo_meta'],
+            'bulk image alt'              => ['wp_bulk_image_alt'],
+            'Rank Math overlay thumbnail' => ['rank_math_overlay_thumb'],
+            'debug JS logger'             => ['log_js_errors'],
+        ];
+    }
+
+    #[DataProvider('signedOutDeniedActions')]
+    public function testASignedOutCallerGetsABare403ForADeniedAction(string $action): void
+    {
+        $GLOBALS['__bcc_sig']['ajax'] = true;
+
+        self::assertSame('status', self::runInit('/wp-admin/admin-ajax.php', $action));
+        self::assertBare403();
+        self::assertTrue(WordPressSignInGate::deniesSignedOutAjax($action));
+    }
+
+    /** An array action names no hook, so there is nothing to deny. */
+    public function testASignedOutArrayActionPasses(): void
+    {
+        $GLOBALS['__bcc_sig']['ajax'] = true;
+        $_SERVER['REQUEST_URI'] = '/wp-admin/admin-ajax.php';
+        $_REQUEST['action'] = ['peepso_vip_user_icons'];
+
+        WordPressSignInGate::refuseWordPressAjax();
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /** Members keep the full block: an action open signed out is still refused to them. */
+    public function testASignedInMemberIsRefusedAnActionOpenSignedOut(): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
         $GLOBALS['__bcc_sig']['ajax']    = true;
 
-        self::assertNull(self::runInit('/wp-admin/admin-ajax.php', 'async_litespeed'));
+        self::assertSame('status', self::runInit('/wp-admin/admin-ajax.php', 'heartbeat'));
+        self::assertBare403();
+    }
+
+    /** Signed out, but not admin-ajax: `init` leaves the request alone. */
+    public function testASignedOutPageRequestIsUntouched(): void
+    {
+        self::assertNull(self::runInit('/some-page/', 'peepso_vip_user_icons'));
         self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    // ── F-496: reserved path words ──────────────────────────────────────
+
+    public function testTheReservedPathWordsArePinned(): void
+    {
+        self::assertSame(['peepsoajax', 'peepso'], WordPressSignInGate::RESERVED_PATH_WORDS);
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function reservedGroupSlugs(): array
+    {
+        return [
+            'peepsoajax'  => ['peepsoajax', 'peepsoajax-group'],
+            'peepso'      => ['peepso', 'peepso-group'],
+            'mixed case'  => ['PeepSoAjax', 'peepsoajax-group'],
+        ];
+    }
+
+    #[DataProvider('reservedGroupSlugs')]
+    public function testAGroupNeverGetsAReservedSlug(string $slug, string $expected): void
+    {
+        $GLOBALS['__bcc_sig']['unique_suffix'] = '-2';
+
+        $out = WordPressSignInGate::keepPathWordsOffGroups($slug, 41, 'publish', 'peepso-group', 0, $slug);
+
+        self::assertSame($expected . '-2', $out, 'the -group form, made unique by core');
+        self::assertSame([[$expected, 41, 'publish', 'peepso-group', 0]], $GLOBALS['__bcc_sig']['unique_slug'] ?? null);
+    }
+
+    /** @return array<string, array{mixed, string}> */
+    public static function untouchedSlugs(): array
+    {
+        return [
+            'a normal group slug'                => ['builders', 'peepso-group'],
+            'a reserved word inside a longer one' => ['peepsoajax-fans', 'peepso-group'],
+            'a reserved word on a post'          => ['peepsoajax', 'post'],
+            'a reserved word on a page'          => ['peepso', 'page'],
+            'not a string'                       => [null, 'peepso-group'],
+        ];
+    }
+
+    /** @param mixed $slug */
+    #[DataProvider('untouchedSlugs')]
+    public function testOtherSlugsAreUntouched($slug, string $postType): void
+    {
+        self::assertSame($slug, WordPressSignInGate::keepPathWordsOffGroups($slug, 41, 'publish', $postType, 0, $slug));
+        self::assertArrayNotHasKey('unique_slug', $GLOBALS['__bcc_sig']);
     }
 
     /**
@@ -403,8 +565,8 @@ final class WordPressSignInGateTest extends TestCase
             'after index.php'            => ['/index.php/peepsoajax/a.b'],
             'a trailing slash'           => ['/peepsoajax/a.b/'],
             'a query string'             => ['/peepsoajax/a.b?x=1'],
-            'tags.get_taggable'          => ['/peepsoajax/tags.get_taggable?act_id=12'],
-            'any case'                   => ['/PeepSoAjax/tags.get_taggable'],
+            'a module call'              => ['/peepsoajax/module.method?id=12'],
+            'any case'                   => ['/PeepSoAjax/module.method'],
             'a doubled leading slash'    => ['//peepsoajax/a.b'],
             'a host-looking path'        => ['//cms.example.test/peepsoajax/a.b'],
             'absolute-form'              => ['https://cms.example.test/peepsoajax/a.b'],
@@ -427,7 +589,7 @@ final class WordPressSignInGateTest extends TestCase
         return [
             'the front page'       => ['/'],
             'a BCC REST call'      => ['/wp-json/bcc/v1/me'],
-            'admin-ajax'           => ['/wp-admin/admin-ajax.php?action=peepso_embed_content'],
+            'admin-ajax'           => ['/wp-admin/admin-ajax.php?action=some_member_action'],
             'a longer segment'     => ['/peepsoajaxx/a.b'],
             'a prefixed segment'   => ['/xpeepsoajax/a.b'],
             'split words'          => ['/peepso/ajax/a.b'],
@@ -470,7 +632,7 @@ final class WordPressSignInGateTest extends TestCase
     {
         $GLOBALS['__bcc_sig']['current'] = $user;
 
-        self::assertSame('status', self::runInit('/x/peepsoajax/tags.get_taggable'));
+        self::assertSame('status', self::runInit('/x/peepsoajax/module.method'));
         self::assertBare403();
     }
 
@@ -478,7 +640,7 @@ final class WordPressSignInGateTest extends TestCase
     {
         $GLOBALS['__bcc_sig']['current'] = self::ADMIN;
 
-        self::assertNull(self::runInit('/peepsoajax/tags.get_taggable'));
+        self::assertNull(self::runInit('/peepsoajax/module.method'));
         self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 
