@@ -229,4 +229,17 @@ namespace {
             return true;
         }
     }
+
+    if (!function_exists('wp_unique_post_slug')) {
+        /**
+         * F-496: records each call in 'unique_slug' and answers the slug
+         * plus 'unique_suffix' (default ''), as core would after making it
+         * unique.
+         */
+        function wp_unique_post_slug(string $slug, int $postId, string $postStatus, string $postType, int $postParent): string
+        {
+            $GLOBALS['__bcc_sig']['unique_slug'][] = [$slug, $postId, $postStatus, $postType, $postParent];
+            return $slug . ($GLOBALS['__bcc_sig']['unique_suffix'] ?? '');
+        }
+    }
 }

@@ -21,15 +21,13 @@ if (!defined('ABSPATH')) {
  *
  * And application passwords are available to admins only.
  *
- * ⚠⚠ WHY: BearerAuth authenticates EVERY REST request, so a member's bearer
- * token reaches core's routes and every other plugin's, none of which run
- * BCC's gates (step-up, suspension, privacy, rate limits). The first hole
- * found this way was `PUT /wp/v2/users/me` with a `password` or `email`, a
- * takeover around every BCC step-up. Its `application-passwords` routes
- * minted a credential that outlives "sign out everywhere". The security
- * review (2026-11-18) confirmed it and asked for an allowlist rather than
- * one route at a time. The frontend and its NextAuth server call no REST
- * route outside BCC's namespaces, so members lose nothing.
+ * ⚠⚠ WHY: a member's bearer token authenticates REST requests, and core's
+ * routes and other plugins' run none of BCC's gates (step-up, suspension,
+ * privacy, rate limits). So non-admins get an allowlist of BCC's own
+ * namespaces rather than a list of refused routes. It must stay an
+ * allowlist. Rationale: security review 2026-11-18 (private tracker). The
+ * frontend and its NextAuth server call no REST route outside BCC's
+ * namespaces, so members lose nothing.
  *
  * Matching:
  *   - The BCC check is the allow direction, so it stays fail-closed: the

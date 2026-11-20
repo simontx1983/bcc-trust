@@ -77,6 +77,9 @@ final class HandleService
         'moderator', 'mod',
         'login', 'signup', 'signin', 'register', 'logout',
         'me', 'self', 'dashboard', 'settings', 'about',
+        // F-496: WordPressSignInGate::RESERVED_PATH_WORDS. Pinned equal by
+        // WordPressSignInGateTest.
+        'peepsoajax', 'peepso',
     ];
 
     /**
