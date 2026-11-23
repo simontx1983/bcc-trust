@@ -96,6 +96,9 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
                 define('BCC_TRUST_FRAUD_HIGH', 80);
             }
             require_once dirname(__DIR__) . '/Stubs/cards-search-throttle-stubs.php';
+            require_once dirname(__DIR__) . '/Stubs/sitemap-endpoint-stubs.php';
+            $GLOBALS['__bcc_sitemap_meta'] = [];
+            \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
             // core's REAL privacy rules and open-groups read, before first use
             // (the suite would otherwise autoload the group-privacy double).
             require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoPagePrivacy.php');
@@ -223,6 +226,65 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
             self::assertStringContainsString('INNER JOIN wp_peepso_users bcc_pub_acc', $sql);
             self::assertStringContainsString('bcc_f182.is_suspended IS NULL OR bcc_f182.is_suspended = 0 OR wp_users.ID = 0', $sql);
             self::assertStringContainsString("bcc_pub_hide.meta_key = 'peepso_is_hide_profile_from_user_listing' AND bcc_pub_hide.meta_value = '1'", $sql);
+        }
+
+        public function testMembersCarryTheirCanonicalPathAndAShortScanEnds(): void
+        {
+            $this->wpdb->rows = [(object) ['id' => '5'], (object) ['id' => '6']];
+            $GLOBALS['__bcc_sitemap_meta'] = [
+                5 => ['bcc_handle' => 'good-one'],
+                6 => ['bcc_handle' => 'someone@example.test'],
+            ];
+
+            $full = self::call('/sitemap/members', ['after' => '0', 'limit' => '10'])->get_data()['data'] ?? null;
+            self::assertSame(['items' => [['path' => '/u/good-one']], 'next_after' => null], $full, 'the scan came back short: the end');
+
+            $page = self::call('/sitemap/members', ['after' => '0', 'limit' => '2'])->get_data()['data'] ?? null;
+            self::assertSame(6, $page['next_after'] ?? null, 'a full scan: next_after is the last id SCANNED, even when dropped');
+        }
+
+        /** ⚠ The usermeta read failing must fail the whole page, never list a member half-checked. */
+        public function testAFailedMetaReadIs503NotAPartialList(): void
+        {
+            $this->wpdb->rows = [(object) ['id' => '5'], (object) ['id' => '6']];
+            $GLOBALS['__bcc_sitemap_meta'] = [5 => ['bcc_handle' => 'good-one'], 6 => ['bcc_handle' => 'good-two']];
+            \BCC\Core\Repositories\UserMetaRepository::$unreadable = [6 => true];
+
+            $resp = self::call('/sitemap/members');
+
+            self::assertSame(503, $resp->get_status());
+            self::assertSame('bcc_unavailable', $resp->get_data()['error']['code'] ?? null);
+        }
+
+        /** P1: an unreadable SQL check is "not indexable", whatever the usermeta says. */
+        public function testAProfileIsNotIndexableWhenItsCheckCannotBeRead(): void
+        {
+            $GLOBALS['__bcc_sitemap_meta'] = [5 => ['bcc_handle' => 'good-one']];
+            $index = \BCC\Trust\Core\Plugin::instance()->publicProfileIndex();
+
+            $this->wpdb->rows = [(object) ['id' => '5']];
+            self::assertTrue($index->isIndexable(5), 'control: readable and eligible');
+
+            $this->wpdb->fail = true;
+            self::assertFalse($index->isIndexable(5));
+        }
+
+        public function testPagesMapTheirTypeAndEndWhenTheScanIsShort(): void
+        {
+            $this->wpdb->rows = [
+                (object) ['id' => '7', 'slug' => 'val-page', 'page_type' => 'validator'],
+                (object) ['id' => '8', 'slug' => 'proj-page', 'page_type' => ''],
+                (object) ['id' => '9', 'slug' => 'odd-page', 'page_type' => 'mystery'],
+            ];
+
+            $full = self::call('/sitemap/pages', ['after' => '0', 'limit' => '10'])->get_data()['data'] ?? null;
+            self::assertSame(
+                ['items' => [['path' => '/v/val-page'], ['path' => '/p/proj-page']], 'next_after' => null],
+                $full
+            );
+
+            $page = self::call('/sitemap/pages', ['after' => '0', 'limit' => '3'])->get_data()['data'] ?? null;
+            self::assertSame(9, $page['next_after'] ?? null);
         }
 
         public function testASignedInAdminGetsExactlyTheAnonymousAnswer(): void

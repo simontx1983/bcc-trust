@@ -92,6 +92,7 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951856 => [$page, 'publish', '', [], [['_bcc_page_type', 'builder']], null, 'page with no slug'],
             951857 => [$page, 'publish', 'f518-mystery', [], [['_bcc_page_type', 'mystery']], null, 'unknown page type'],
             951858 => [$page, 'publish', 'f518-closed-page', ['1'], [['_bcc_page_type', 'builder']], '/p/f518-closed-page', 'closed page is public to read'],
+            951859 => [$page, 'publish', 'f518-two-types', [], [['_bcc_page_type', 'validator'], ['_bcc_page_type', 'nft']], '/v/f518-two-types', 'two type rows: the first counts, as get_post_meta reads it'],
             // Groups.
             951871 => [$group, 'publish', 'f518-open', ['0'], [], '/communities/f518-open', 'open community'],
             951872 => [$group, 'publish', 'f518-hall', ['0'], [['_bcc_group_kind', 'hall']], '/halls/f518-hall', 'open Hall'],
