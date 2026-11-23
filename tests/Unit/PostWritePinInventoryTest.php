@@ -98,6 +98,23 @@ final class PostWritePinInventoryTest extends TestCase
      */
     private const CONDITIONAL_WRITERS = ['wp_delete_post', 'wp_delete_attachment'];
 
+    /**
+     * ⛔ The ONLY receivers whose `->update(` is not a model write.
+     * Deliberately one name. {@see updateIsNotOnWpdb()}.
+     *
+     * @var list<string>
+     */
+    private const WPDB_RECEIVERS = ['$wpdb'];
+
+    /**
+     * ⛔ The guard's FULLY QUALIFIED name. It lives in bcc-core, and this
+     * plugin reaches it by importing that FQN — every file here with a pin
+     * does. A pin is armed only by THIS class; {@see isRealGuardCall()} says
+     * why the short name alone is not enough.
+     */
+    private const GUARD_NAMESPACE = 'BCC\\Core\\PeepSo';
+    private const GUARD_FQN       = self::GUARD_NAMESPACE . '\\PeepSoAddPostGuard';
+
     /** Indirect dispatch: these take a callable NAME as a string. */
     private const DISPATCHERS = ['call_user_func', 'call_user_func_array'];
 
@@ -200,30 +217,6 @@ final class PostWritePinInventoryTest extends TestCase
             // `$wpdb->update(`, so binding to a receiver is what keeps this
             // rule from producing 68 false positives against one true one.
             // A guard that noisy gets switched off.
-            $groupVars = [];
-            for ($i = 0; $i < $count; $i++) {
-                if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_NEW) {
-                    continue;
-                }
-                $j = self::nextSignificant($tokens, $i + 1, $count);
-                if ($j === null || !is_array($tokens[$j]) || self::bare($tokens[$j][1]) !== 'PeepSoGroup') {
-                    continue;
-                }
-                // walk back for `$var =`
-                $k = $i - 1;
-                while ($k >= 0 && is_array($tokens[$k]) && $tokens[$k][0] === T_WHITESPACE) {
-                    $k--;
-                }
-                if ($k >= 0 && $tokens[$k] === '=') {
-                    $k--;
-                    while ($k >= 0 && is_array($tokens[$k]) && $tokens[$k][0] === T_WHITESPACE) {
-                        $k--;
-                    }
-                    if ($k >= 0 && is_array($tokens[$k]) && $tokens[$k][0] === T_VARIABLE) {
-                        $groupVars[$tokens[$k][1]] = true;
-                    }
-                }
-            }
 
             // ── main walk ──────────────────────────────────────────────
             $depth     = 0;
@@ -414,7 +407,7 @@ final class PostWritePinInventoryTest extends TestCase
                 }
 
                 // ── PeepSo MODEL write: `$group->update([...])` ─────────
-                if ($name === 'update' && self::receiverIsGroupVar($tokens, $i, $groupVars)) {
+                if ($name === 'update' && self::updateIsNotOnWpdb($tokens, $i)) {
                     $rows[] = [
                         'site'   => $rel . ':' . $line,
                         'fn'     => '$group->update(…)',
@@ -444,7 +437,7 @@ final class PostWritePinInventoryTest extends TestCase
                 $prev = self::prevSignificant($tokens, $i - 1);
                 if ($prev !== null && is_array($tokens[$prev]) && in_array(
                     $tokens[$prev][0],
-                    [T_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION],
+                    [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION],
                     true
                 )) {
                     continue;
@@ -607,14 +600,114 @@ final class PostWritePinInventoryTest extends TestCase
             return false;
         }
 
-        $name = self::bare($tokens[$cls][1]);
-        if ($name === 'PeepSoAddPostGuard') {
+        $written = ltrim($tokens[$cls][1], '\\');
+
+        // ⛔⛔ F-457 — THE FULLY QUALIFIED NAME, or the short name only with
+        // evidence that it resolves to it in THIS file. The old rule matched
+        // the bare short name anywhere, so any class called
+        // `PeepSoAddPostGuard` — in any namespace, a local stub, a test
+        // double — armed a pin it has nothing to do with.
+        if ($written === self::GUARD_FQN) {
             return true;
         }
 
-        // self:: / static:: only inside the guard class itself.
-        return in_array(strtolower($name), ['self', 'static'], true)
-            && str_contains($src, 'class PeepSoAddPostGuard');
+        if (self::bare($written) === 'PeepSoAddPostGuard') {
+            // ⚠⚠ TOKENS, NOT `str_contains`. A COMMENT naming the import
+            // satisfied a text check and armed every pin in the file — the
+            // comment-names-the-mechanism trap, inside the rule written to
+            // close a name-matching hole.
+            return self::declaresGuardNamespace($tokens) || self::importsGuardFqn($tokens);
+        }
+
+        // ⛔ `self::` / `static::` requires BOTH the guard's namespace AND a
+        // declaration of its class. Either alone is not enough: a file can
+        // declare a class of that NAME in a foreign namespace (the impostor
+        // fixture does exactly that), and a `self::pinOnly()` inside it would
+        // otherwise arm. In this plugin the branch is unreachable — the guard
+        // lives in bcc-core — and it is written tightly anyway so the twins
+        // do not diverge.
+        return in_array(strtolower($written), ['self', 'static'], true)
+            && self::declaresGuardNamespace($tokens)
+            && self::declaresGuardClass($tokens);
+    }
+
+    /**
+     * Does this file DECLARE the guard's own namespace?
+     *
+     * ⚠ Token-based: a comment naming the namespace must not count.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function declaresGuardNamespace(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_NAMESPACE) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j !== null && is_array($tokens[$j])
+                && ltrim($tokens[$j][1], '\\') === self::GUARD_NAMESPACE) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Does this file IMPORT the guard by its fully qualified name?
+     *
+     * ⚠ A `use … as Something;` alias is deliberately NOT accepted: the alias
+     * would arm pins under a name this walk cannot follow, which is the hole
+     * the forbid rules exist for.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function importsGuardFqn(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_USE) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j === null || !is_array($tokens[$j])
+                || ltrim($tokens[$j][1], '\\') !== self::GUARD_FQN) {
+                continue;
+            }
+            $k = self::nextSignificant($tokens, $j + 1, $count);
+            if ($k !== null && $tokens[$k] === ';') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Is the guard class DECLARED in this file? (Gates `self::` / `static::`,
+     * together with {@see declaresGuardNamespace()}.)
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function declaresGuardClass(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_CLASS) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j !== null && is_array($tokens[$j]) && $tokens[$j][1] === 'PeepSoAddPostGuard') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -686,21 +779,165 @@ final class PostWritePinInventoryTest extends TestCase
      * Was the receiver of this `->update(` assigned from a PeepSoGroup?
      *
      * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
-     * @param array<string, bool> $groupVars
+     * ⛔⛔ F-457 — DENY BY DEFAULT. This used to ALLOW every `->update(`
+     * except one whose receiver a file-scoped pre-pass had tied to a literal
+     * `new PeepSoGroup`. Every way of holding a group object that the
+     * pre-pass could not see — an alias, a subclass, a dynamic `new`, a
+     * property, a method return — walked straight past it.
+     *
+     * Now an `->update(` is a model write unless its receiver is provably
+     * `$wpdb`.
+     *
+     * ⚠ THE LIMIT, stated rather than hidden: the exclusion is itself
+     * NAME-based. `$db = $wpdb; $db->update(...)` is flagged (a false
+     * positive, which fails safe), and a model update written through a
+     * variable called `$wpdb` is missed. One receiver name, not an
+     * open-ended allowlist, and what this guard defends against is a PeepSo
+     * MODEL write rather than a wpdb write.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
      */
-    private static function receiverIsGroupVar(array $tokens, int $i, array $groupVars): bool
+    private static function updateIsNotOnWpdb(array $tokens, int $i): bool
     {
+        // ⚠⚠ BOTH OBJECT OPERATORS. PHP 8's nullsafe `?->` is its own
+        // token, T_NULLSAFE_OBJECT_OPERATOR, so treating only
+        // T_OBJECT_OPERATOR lets `$group?->update([...])` past entirely — the
+        // same shape as PHP 8 lexing a fully-qualified call as ONE token.
         $arrow = self::prevSignificant($tokens, $i - 1);
-        if ($arrow === null || !is_array($tokens[$arrow]) || $tokens[$arrow][0] !== T_OBJECT_OPERATOR) {
+        if ($arrow === null || !is_array($tokens[$arrow])
+            || !in_array($tokens[$arrow][0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR], true)) {
             return false;
         }
 
         $recv = self::prevSignificant($tokens, $arrow - 1);
-        if ($recv === null || !is_array($tokens[$recv]) || $tokens[$recv][0] !== T_VARIABLE) {
+        if ($recv === null) {
             return false;
         }
 
-        return isset($groupVars[$tokens[$recv][1]]);
+        // ⚠⚠ A PROPERTY IS IN SCOPE, A CALL RESULT IS NOT, and keeping those
+        // apart is the whole subtlety. Denying every receiver that is not a
+        // plain `$var` was the first attempt and it was WRONG IN BOTH
+        // DIRECTIONS: it flagged this plugin's own
+        // `Plugin::instance()->reviewReplyService()->update(...)` — an
+        // ordinary service call — and it stopped flagging
+        // `$this->group->update(...)`, because a PROPERTY receiver is a
+        // T_STRING after `->`, not a T_VARIABLE. That property form is the
+        // likeliest real dodge of the three, so the obvious narrowing quietly
+        // gave up the case it mattered most to keep. A fixture caught it.
+        //
+        // ⭐ AN INDEX AND AN INLINE `new` ARE RESOLVED, so only a TRUE call
+        // result stays out of scope. Both were in the named gap until the
+        // review agent pointed out how ordinary they are:
+        //
+        //   $this->groups[$id]->update(…)   an index over a property
+        //   $groups[0]->update(…)           an index over a variable
+        //   (new PeepSoGroup($id))->update(…) a common idiom
+        //
+        // An index is unwrapped to its BASE and the base judged by the same
+        // variable/property rule; a parenthesised `new` is treated as the
+        // model write it is.
+        if ($tokens[$recv] === ']') {
+            $base = self::indexBase($tokens, $recv);
+            if ($base === null) {
+                return false;
+            }
+            $recv = $base;
+        } elseif ($tokens[$recv] === ')') {
+            // `(new Foo(…))->update(` — the receiver is the constructed
+            // object. Any OTHER `)` is a call result: out of scope, and that
+            // is the one gap left, named rather than hidden.
+            return self::parenWrapsNew($tokens, $recv);
+        }
+
+        if (!is_array($tokens[$recv])) {
+            return false;
+        }
+
+        // `$group->update(` — a plain variable.
+        if ($tokens[$recv][0] === T_VARIABLE) {
+            return !in_array($tokens[$recv][1], self::WPDB_RECEIVERS, true);
+        }
+
+        // `$this->group->update(` — a property. `$this->wpdb->update(` is
+        // excluded on the same name, so both spellings are covered.
+        if ($tokens[$recv][0] === T_STRING) {
+            return !in_array('$' . $tokens[$recv][1], self::WPDB_RECEIVERS, true);
+        }
+
+        return false;
+    }
+
+    /**
+     * Given the `]` of an index, the token index of the expression it indexes.
+     *
+     * `$this->groups[$id]` → the `groups` T_STRING; `$groups[0]` → the
+     * `$groups` T_VARIABLE. Nested indexes unwrap repeatedly, so
+     * `$a[$i][$j]->update(` resolves to `$a`.
+     *
+     * ⚠ Returns null when the base is not a name token — an index over a call
+     * result, say — which leaves it in the out-of-scope gap rather than
+     * guessing.
+     *
+     * @param  array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     * @return int|null token index of the base, or null
+     */
+    private static function indexBase(array $tokens, int $close): ?int
+    {
+        while ($close >= 0 && $tokens[$close] === ']') {
+            $open = null;
+            for ($j = $close - 1, $depth = 0; $j >= 0; $j--) {
+                if ($tokens[$j] === ']') {
+                    $depth++;
+                    continue;
+                }
+                if ($tokens[$j] === '[') {
+                    if ($depth === 0) {
+                        $open = $j;
+                        break;
+                    }
+                    $depth--;
+                }
+            }
+            if ($open === null) {
+                return null;
+            }
+            $close = self::prevSignificant($tokens, $open - 1) ?? -1;
+        }
+
+        return $close >= 0 && is_array($tokens[$close]) ? $close : null;
+    }
+
+    /**
+     * Given the `)` before `->`, does it close a parenthesised `new`?
+     *
+     * `(new PeepSoGroup($id))->update(…)` is a model write spelled as one
+     * expression. Any other `)` is a call result and stays out of scope.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function parenWrapsNew(array $tokens, int $close): bool
+    {
+        $open = null;
+        for ($j = $close - 1, $depth = 0; $j >= 0; $j--) {
+            if ($tokens[$j] === ')') {
+                $depth++;
+                continue;
+            }
+            if ($tokens[$j] === '(') {
+                if ($depth === 0) {
+                    $open = $j;
+                    break;
+                }
+                $depth--;
+            }
+        }
+        if ($open === null) {
+            return false;
+        }
+
+        $first = self::nextSignificant($tokens, $open + 1, count($tokens));
+
+        return $first !== null && is_array($tokens[$first]) && $tokens[$first][0] === T_NEW;
     }
 
     /**
@@ -880,6 +1117,138 @@ final class PostWritePinInventoryTest extends TestCase
         );
     }
 
+    /**
+     * The forbidden shapes, as "kind file:line" strings.
+     *
+     * ⚠ TOKEN-BASED, not text. A comment that NAMES `class_alias(` or shows
+     * an aliased import as an example must not trip the scan — the same trap
+     * that made a `substr_count` of this guard's own name read 3 for 2 calls.
+     *
+     * ⚠⚠ A dynamic `new $var(` is deliberately NOT in this set. A class name
+     * in a variable cannot be resolved by a token walk, so forbidding it was
+     * the first instinct — but in bcc-core the equivalent scan flags a service
+     * locator's null-object factory, where dynamic construction is the file's
+     * whole purpose, and it would flag every future factory. Excluding that by
+     * PATH would make this an allowlist, which is what the rest of this guard
+     * exists to avoid. So the gap is NAMED: a model write whose class name is
+     * deliberately indirected is not caught. The aliased-import and subclass
+     * rules cover what ordinary refactoring produces; a variable class name is
+     * a deliberate act, and a deliberate bypass is not what a mechanical guard
+     * can stop.
+     *
+     * @param  list<string> $files
+     * @return list<string>
+     */
+    private static function dodges(array $files): array
+    {
+        $found = [];
+
+        foreach ($files as $path) {
+            $src    = (string) file_get_contents($path);
+            $tokens = token_get_all($src);
+            $count  = count($tokens);
+            $rel    = str_replace(self::baseDir() . DIRECTORY_SEPARATOR, '', $path);
+            $rel    = str_replace('\\', '/', $rel);
+
+            for ($i = 0; $i < $count; $i++) {
+                $t = $tokens[$i];
+                if (!is_array($t)) {
+                    continue;
+                }
+                $line = $t[2];
+                $add  = static function (string $kind) use (&$found, $rel, $line): void {
+                    $found[] = $kind . ' ' . $rel . ':' . $line;
+                };
+
+                // `class_alias(` as a CALL, not as a name in a string.
+                if ($t[0] === T_STRING && self::bare($t[1]) === 'class_alias') {
+                    $j = self::nextSignificant($tokens, $i + 1, $count);
+                    if ($j !== null && $tokens[$j] === '(') {
+                        $add('class_alias');
+                    }
+                    continue;
+                }
+
+                // `use …PeepSo… as X;` — an import that renames a PeepSo class.
+                if ($t[0] === T_AS) {
+                    $p = self::prevSignificant($tokens, $i - 1);
+                    if ($p !== null && is_array($tokens[$p]) && str_contains($tokens[$p][1], 'PeepSo')) {
+                        $add('aliased-import');
+                    }
+                    continue;
+                }
+
+                // `extends …PeepSo…` — a subclass of a PeepSo model.
+                if ($t[0] === T_EXTENDS) {
+                    $j = self::nextSignificant($tokens, $i + 1, $count);
+                    if ($j !== null && is_array($tokens[$j]) && str_contains($tokens[$j][1], 'PeepSo')) {
+                        $add('extends-model');
+                    }
+                    continue;
+                }
+
+                // `[$obj, 'update']` — the method name as data, never as a call.
+                if ($t[0] === T_CONSTANT_ENCAPSED_STRING && trim($t[1], "'\"") === 'update') {
+                    if (self::isUpdateCallablePair($tokens, $i)) {
+                        $add('update-callable');
+                    }
+                }
+            }
+        }
+
+        sort($found);
+
+        return $found;
+    }
+
+    /**
+     * Is this `'update'` literal the second element of an `[$obj, 'update']`
+     * callable pair, and NOT a REST route's `'callback' =>` value?
+     *
+     * ⚠ The exclusion is the POSITION, not a file. This plugin registers one
+     * such callback (`ReviewRepliesEndpoint`), where `update` is the
+     * endpoint's own handler. Naming the file would make this an allowlist.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function isUpdateCallablePair(array $tokens, int $i): bool
+    {
+        $comma = self::prevSignificant($tokens, $i - 1);
+        if ($comma === null || $tokens[$comma] !== ',') {
+            return false;
+        }
+
+        $open = null;
+        for ($j = $comma - 1, $depth = 0; $j >= 0; $j--) {
+            if ($tokens[$j] === ']') {
+                $depth++;
+                continue;
+            }
+            if ($tokens[$j] === '[') {
+                if ($depth === 0) {
+                    $open = $j;
+                    break;
+                }
+                $depth--;
+            }
+        }
+        if ($open === null) {
+            return false;
+        }
+
+        $arrow = self::prevSignificant($tokens, $open - 1);
+        if ($arrow !== null && is_array($tokens[$arrow]) && $tokens[$arrow][0] === T_DOUBLE_ARROW) {
+            $key = self::prevSignificant($tokens, $arrow - 1);
+            if ($key !== null && is_array($tokens[$key])
+                && $tokens[$key][0] === T_CONSTANT_ENCAPSED_STRING
+                && trim($tokens[$key][1], "'\"") === 'callback') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /** Fixtures live beside the guard, out of every scanned root. */
     private static function fixture(string $name): string
     {
@@ -910,12 +1279,16 @@ final class PostWritePinInventoryTest extends TestCase
     public function testEveryNamedCaseStillExists(): void
     {
         $expected = [
+            'testAClassSharingTheGuardsShortNameDoesNotArmAPin',
             'testACommentMentionIsNotACallSite',
             'testADecoyClosureDoesNotPinAWriteBesideIt',
+            'testAnUpdateOnANonWpdbReceiverIsAModelWrite',
             'testEveryNamedCaseStillExists',
             'testEveryPostWriteIsPinned',
             'testEveryWriterCarriesItsEvidence',
             'testTheAllowlistIsEmpty',
+            'testTheConstructsThatWouldDodgeThisGuardAreForbidden',
+            'testTheDodgeScanFindsEveryShapeInTheFixture',
             'testTheGroupConstructorFileSetIsReviewed',
             'testTheWalkFindsWritesAndSeesPins',
             'testTheWriterSetIsPinnedAgainstSilentShrinking',
@@ -936,6 +1309,147 @@ final class PostWritePinInventoryTest extends TestCase
             . ' silently weakens the guard — the suite stays green while the check is'
             . ' gone, which is exactly how this file lost a case once already. Adding'
             . ' one is welcome: list it here too.'
+        );
+    }
+
+    /**
+     * ⛔⛔ F-457 — THE CONSTRUCTS THAT WOULD WALK PAST THIS GUARD ARE
+     * FORBIDDEN OUTRIGHT, rather than chased.
+     *
+     * Every rule above matches a model write BY NAME, so anything that changes
+     * the name at the call site dodges it: an aliased import, a subclass,
+     * `class_alias()`, or an `[$obj, 'update']` pair where the method name
+     * never appears as a call at all.
+     *
+     * ⚠ Resolving those would mean following aliases and inheritance through
+     * a token walk, which is where a walk stops being trustworthy. Forbidding
+     * them is cheap and honest instead: it costs NOTHING today, and it turns
+     * "a future change could dodge the guard" into "a future change fails this
+     * test and has to say why".
+     */
+    public function testTheConstructsThatWouldDodgeThisGuardAreForbidden(): void
+    {
+        $files = self::phpFiles();
+        self::assertGreaterThanOrEqual(self::MIN_FILES, count($files), 'too few files to mean anything');
+
+        self::assertSame(
+            [],
+            self::dodges($files),
+            "These constructs can carry a PeepSo model write past every rule in this\n"
+            . "guard, because every rule matches a NAME at the call site:\n"
+            . "  an aliased import, a subclass, class_alias(), or an\n"
+            . "  [\$obj, 'update'] pair.\n\n"
+            . "None existed when this test was written, so this is not a cleanup\n"
+            . "task \u2014 it is a new construct that needs a decision. Either spell the\n"
+            . "write out so the guard can see it, or say in review why the guard\n"
+            . "should stop being able to."
+        );
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY, and here it does real work. The tree contains NONE of
+     * these shapes, so the assertion above passes over nothing — exactly the
+     * false green this guard refuses elsewhere. The fixture holds one of each.
+     */
+    public function testTheDodgeScanFindsEveryShapeInTheFixture(): void
+    {
+        $found = self::dodges([self::fixture('dodged-writes.php.txt')]);
+
+        $kinds = [];
+        foreach ($found as $row) {
+            $kinds[substr($row, 0, (int) strpos($row, ' '))] = true;
+        }
+        ksort($kinds);
+
+        self::assertSame(
+            ['aliased-import', 'class_alias', 'extends-model', 'update-callable'],
+            array_keys($kinds),
+            'every forbidden shape must be detected in the fixture'
+        );
+    }
+
+    /**
+     * ⛔⛔ F-457 — AN `->update(` IS A MODEL WRITE UNLESS ITS RECEIVER IS
+     * PROVABLY `$wpdb`.
+     *
+     * ⚠⚠ AND THE OBVIOUS NARROWING OF THIS RULE IS WRONG. Denying only a
+     * plain `$var` fixes the service-call false positive and SILENTLY STOPS
+     * CATCHING `$this->group->update(...)`, because a property receiver is a
+     * T_STRING after `->`, not a T_VARIABLE — the likeliest real dodge of the
+     * three. This fixture is what caught that in bcc-core; it must stay here
+     * so the twins cannot drift apart on it.
+     *
+     * Three forms are reported: a property receiver, a method-return receiver,
+     * and a nullsafe property receiver. Neither `$wpdb` spelling is, and a
+     * chained call result is out of scope by design.
+     */
+    public function testAnUpdateOnANonWpdbReceiverIsAModelWrite(): void
+    {
+        $rows = self::callSites([self::fixture('dodged-writes.php.txt')]);
+
+        $updates = [];
+        foreach ($rows as $row) {
+            if (str_contains($row['fn'], 'update')) {
+                $updates[] = $row['site'];
+            }
+        }
+
+                // SEVEN in-scope receiver shapes, each a separate way of holding a
+        // model, and each one a fixture LINE rather than a claim:
+        //   a property, a method-return variable, a nullsafe property,
+        //   a STATIC property, an indexed property, an indexed variable,
+        //   and an inline new.
+        //
+        // Excluded, also fixture lines: the two wpdb spellings, an INDEXED
+        // wpdb (the same base rule), and a true call result -- the one gap
+        // left, and it is named in updateIsNotOnWpdb().
+self::assertCount(
+            7,
+            $updates,
+            'the property, method-return and NULLSAFE receivers must all be'
+            . " reported; neither \$wpdb form and no chained result may be. Got:\n  "
+            . implode("\n  ", $updates)
+        );
+
+        foreach ($rows as $row) {
+            if (str_contains($row['fn'], 'update')) {
+                self::assertFalse($row['pinned'], $row['site'] . ' is not inside a pin');
+            }
+        }
+    }
+
+    /**
+     * ⛔⛔ F-457 — ONLY THE REAL GUARD ARMS A PIN.
+     *
+     * `isRealGuardCall()` used to match the bare short name anywhere, so any
+     * class called `PeepSoAddPostGuard` — another namespace, a local stub, a
+     * test double — armed a pin it has nothing to do with. The fixture
+     * declares exactly that, with a write inside its `pinOnly()`.
+     *
+     * ⚠ It also carries a COMMENT naming the real import, which a text-based
+     * check accepted as evidence and which must now arm nothing; and two
+     * METHODS named like writers, one reached through `?->`, which must not be
+     * mistaken for the global functions.
+     */
+    public function testAClassSharingTheGuardsShortNameDoesNotArmAPin(): void
+    {
+        $rows = self::callSites([self::fixture('impostor-guard.php.txt')]);
+
+        self::assertNotEmpty($rows, 'the fixture must contain a write, or this proves nothing');
+
+        foreach ($rows as $row) {
+            self::assertFalse(
+                $row['pinned'],
+                $row['site'] . ': a pin spelled by a class that merely shares the'
+                . " guard's short name must not count as protection"
+            );
+        }
+
+        self::assertCount(
+            1,
+            $rows,
+            'only the real write may be reported; a method that merely shares a'
+            . " writer's name is not a call to that writer, through `->` or `?->`"
         );
     }
 
