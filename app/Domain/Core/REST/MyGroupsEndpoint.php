@@ -461,12 +461,7 @@ final class MyGroupsEndpoint
         // deny reason rides in error.data.reason for the frontend.
         $decision = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
         if (!$decision->isAllowed()) {
-            return ApiResponse::error(
-                'bcc_forbidden',
-                self::createDenyMessage($decision->reason),
-                403,
-                ['reason' => $decision->reason]
-            );
+            return self::createDenyResponse($decision->reason);
         }
 
         $name         = trim((string) $request->get_param('name'));
@@ -581,12 +576,11 @@ final class MyGroupsEndpoint
             // collapse on the transfer path.
             $recheck = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
             if (!$recheck->isAllowed()) {
-                return ApiResponse::error(
-                    'bcc_forbidden',
-                    self::createDenyMessage($recheck->reason),
-                    403,
-                    ['reason' => $recheck->reason]
-                );
+                // ⚠ The SAME helper as the pre-lock check above. These two
+                // sites answered the same gate with duplicated response
+                // code, and a reason handled in one but not the other would
+                // be invisible from the route's happy path.
+                return self::createDenyResponse($recheck->reason);
             }
 
             $groupId = \BCC\Core\PeepSo\PeepSoGroupWriter::createPlainGroup(
@@ -710,6 +704,11 @@ final class MyGroupsEndpoint
                 // Advisory-lock contention on the receiver's custody
                 // critical section — retryable (§21.2 TOCTOU fail-closed).
                 'bcc_conflict'       => 409,
+                // ⚠ A read the service could not TRUST (F-503) — also
+                // retryable. Without this entry it would fall to the
+                // `default` below and answer 400, which tells the client
+                // its request was malformed when nothing was wrong with it.
+                'bcc_unavailable'    => 503,
                 'bcc_internal_error' => 500,
                 default              => 400,
             };
@@ -728,6 +727,44 @@ final class MyGroupsEndpoint
      * no cadence pressure, no nudges. The stable machine reason is in
      * error.data.reason; this is the human sentence beside it.
      */
+    /**
+     * The create gate's refusal, as a response.
+     *
+     * ⚠⚠ `unavailable` is RETRYABLE and must not be a 403. It means the
+     * ownership count could not be READ (F-503), not that the member is
+     * ineligible — a 403 tells them to stop trying, and the generic copy
+     * ("You can't create a community right now.") reads as a permanent no
+     * for what is a transient server fault. Everything else here IS a
+     * property of their account and stays a 403 with its stable
+     * `error.data.reason`.
+     *
+     * ⚠ Used by BOTH create denial sites — the pre-lock gate and the
+     * authoritative recheck inside the lock. They answer the same gate, so
+     * a reason handled in one and not the other would be a half-fix that
+     * the happy path cannot reveal.
+     *
+     * Same §F-438 / §F-462 convention as the other retryable refusals:
+     * `bcc_unavailable` + 503, so the frontend can offer a retry.
+     */
+    private static function createDenyResponse(string $reason): WP_REST_Response
+    {
+        if ($reason === 'unavailable') {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We couldn\'t check your communities just now. Please try again.',
+                503,
+                ['reason' => $reason]
+            );
+        }
+
+        return ApiResponse::error(
+            'bcc_forbidden',
+            self::createDenyMessage($reason),
+            403,
+            ['reason' => $reason]
+        );
+    }
+
     private static function createDenyMessage(string $reason): string
     {
         return match ($reason) {
