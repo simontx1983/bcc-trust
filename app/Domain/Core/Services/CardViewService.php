@@ -52,6 +52,7 @@ use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
@@ -1441,13 +1442,13 @@ final class CardViewService
 
     private static function isPageClaimed(int $pageId): bool
     {
-        return ClaimRepository::getForEntity('page', $pageId) !== [];
+        return ClaimRepository::getForEntity('page', $pageId, PageClaimRolePolicy::OWNER_ROLES) !== [];
     }
 
     private static function viewerHasClaim(int $viewerId, int $pageId): bool
     {
         return self::claimRowIsVerified(
-            ClaimRepository::getUserClaim($viewerId, 'page', $pageId)
+            ClaimRepository::getUserClaim($viewerId, 'page', $pageId, PageClaimRolePolicy::OWNER_ROLES)
         );
     }
 

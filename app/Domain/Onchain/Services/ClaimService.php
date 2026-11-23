@@ -128,7 +128,7 @@ class ClaimService {
         }
 
         // Check for existing claim by this user.
-        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($existing && $existing->status === 'verified') {
             return ['success' => false, 'message' => 'You have already claimed this.'];
         }

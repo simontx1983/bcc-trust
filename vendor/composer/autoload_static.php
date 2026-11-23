@@ -706,6 +706,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\NftSelectionService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftSelectionService.php',
         'BCC\\Trust\\Onchain\\Services\\NftSpamFilter' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftSpamFilter.php',
         'BCC\\Trust\\Onchain\\Services\\OnchainDataReadService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/OnchainDataReadService.php',
+        'BCC\\Trust\\Onchain\\Services\\PageClaimRolePolicy' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/PageClaimRolePolicy.php',
         'BCC\\Trust\\Onchain\\Services\\PieceBuilderException' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/PieceBuilderException.php',
         'BCC\\Trust\\Onchain\\Services\\SignalFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SignalFetcher.php',
         'BCC\\Trust\\Onchain\\Services\\SignalRefreshService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SignalRefreshService.php',

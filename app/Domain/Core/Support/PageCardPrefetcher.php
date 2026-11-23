@@ -35,6 +35,7 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MessagesService;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
@@ -209,9 +210,10 @@ final class PageCardPrefetcher
         // ── 3. Viewer-independent batches ───────────────────────────
         $readModels = (new PageReadModelRepository())->getByPageIds($pageIds);
 
-        // is_claimed ≡ getForEntity('page', id) !== [] — reduce the
-        // verified-claims batch to a presence map (every page keyed).
-        $claimsBatch  = ClaimRepository::getForEntityBatch('page', $pageIds);
+        // is_claimed ≡ getForEntity('page', id, OWNER_ROLES) !== [] — reduce
+        // the verified owner-claims batch to a presence map (every page
+        // keyed). D1: a team row never makes a page "claimed".
+        $claimsBatch  = ClaimRepository::getForEntityBatch('page', $pageIds, PageClaimRolePolicy::OWNER_ROLES);
         $claimedPages = [];
         foreach ($pageIds as $pageId) {
             $claimedPages[$pageId] = isset($claimsBatch[$pageId]) && $claimsBatch[$pageId] !== [];
@@ -293,7 +295,7 @@ final class PageCardPrefetcher
         if ($viewerId > 0) {
             $plugin = Plugin::instance();
 
-            $viewerClaims       = ClaimRepository::getUserClaimsForEntities($viewerId, 'page', $pageIds);
+            $viewerClaims       = ClaimRepository::getUserClaimsForEntities($viewerId, 'page', $pageIds, PageClaimRolePolicy::OWNER_ROLES);
             $viewerVotes        = (new VoteRepository())->getVotedPageIdsForVoter($viewerId, $pageIds);
             // viewer_has_endorsed is derived from viewer_attestations below
             // (vouch slot non-null) — no separate endorsements batch since
