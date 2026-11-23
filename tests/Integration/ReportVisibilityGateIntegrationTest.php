@@ -228,6 +228,19 @@ final class ReportVisibilityGateIntegrationTest extends TestCase
             self::GROUP_ID,
             (string) $privacy
         )), $wpdb->last_error);
+
+        // F-461: the post's group facts are read from the TABLE too
+        // (PostGroupFactsRepository, through ProbesReads), so the post's own
+        // rows are seeded where production reads them. removeFeedActivities()
+        // deletes every postmeta row of a seeded post.
+        foreach (['peepso_group_id' => (string) self::GROUP_ID, '_bcc_post_visibility' => $visibility] as $key => $value) {
+            self::assertNotFalse($wpdb->query($wpdb->prepare(
+                "INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
+                self::POST_ID,
+                $key,
+                $value
+            )), $wpdb->last_error);
+        }
     }
 
     private function deletePrivacyRows(): void

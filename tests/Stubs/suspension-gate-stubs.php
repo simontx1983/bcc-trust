@@ -87,6 +87,11 @@ namespace BCC\Trust\Onchain\Repositories {
 }
 
 namespace {
+    // H7: the opt-out map is read through bcc-core's UserMetaRepository and
+    // written through UserMetaSwapRepository; this world's stand-ins use
+    // the user-meta fixture below.
+    require_once __DIR__ . '/user-meta-fixture-stand-ins.php';
+
     if (!function_exists('get_current_user_id')) {
         function get_current_user_id(): int
         {

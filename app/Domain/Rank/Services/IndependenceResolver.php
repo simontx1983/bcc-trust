@@ -12,6 +12,11 @@
  * nothing is zero-credited without a formal, auditable, reversible
  * determination row.
  *
+ * FAIL-CLOSED (F-464): when the findings can't be read, every method
+ * THROWS RepositoryReadFailure, never "no clusters", and nothing is
+ * memoised. The ingestor's subscriber records `evidence_ingest_failed`;
+ * the promotion engine skips the member.
+ *
  * Memoized: the ingestor consults this on every evidence hook, and
  * findings change rarely. The memo is rebuilt when this process wrote a
  * finding (ClusterFindingsRepository::writeVersion()) and after MEMO_TTL

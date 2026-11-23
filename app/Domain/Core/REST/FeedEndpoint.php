@@ -42,8 +42,10 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Services\Feed\ViewerExclusions;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedUnavailable;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -306,31 +308,48 @@ final class FeedEndpoint
      * via PostShortcodeRepository, then shares feedItem()'s body — same
      * gates, same envelope, same 404 posture (unknown code and hidden /
      * not-visible item are indistinguishable to the client).
+     *
+     * ⚠ F-438: THE VIEWER'S EXCLUSION LISTS ARE READ BEFORE THE CODE IS
+     * RESOLVED. Resolving first would answer an unknown code 404 straight
+     * away while a known one reached the lists and answered 503, so the
+     * answer would depend on whether the code exists. Probed first, a list
+     * that cannot be read is the same 503 for every code, and the lists are
+     * handed on rather than read twice. A code lookup that did not run is
+     * the same 503, never "no such code".
      */
     public function feedItemByShortcode(WP_REST_Request $request): WP_REST_Response
     {
-        $code  = $request->get_param('id');
-        $actId = is_string($code)
-            ? Plugin::instance()->postShortcodeRepository()->resolveActId($code)
-            : null;
+        $code = $request->get_param('id');
+
+        try {
+            $exclusions = Plugin::instance()->feedRankingService()->viewerExclusions(get_current_user_id());
+            $actId      = is_string($code) ? Plugin::instance()->postShortcodeRepository()->resolveActId($code) : null;
+        } catch (ActivityReadFailedException) {
+            return FeedUnavailable::response(FeedUnavailable::POST_MESSAGE);
+        } catch (RepositoryReadFailure) {
+            return FeedUnavailable::response(FeedUnavailable::POST_MESSAGE);
+        }
 
         if ($actId === null) {
             return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
         }
 
-        return $this->respondWithFeedItem($actId);
+        return $this->respondWithFeedItem($actId, $exclusions);
     }
 
     /**
      * Shared single-activity body for the numeric + shortcode permalink
      * routes — one gate path, one envelope, one cache posture.
+     *
+     * @param ViewerExclusions|null $exclusions the viewer's lists when the
+     *        route already probed them (the shortcode route); null reads them
      */
-    private function respondWithFeedItem(int $actId): WP_REST_Response
+    private function respondWithFeedItem(int $actId, ?ViewerExclusions $exclusions = null): WP_REST_Response
     {
         $viewerId = get_current_user_id();
 
         try {
-            $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId);
+            $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId, $exclusions);
         } catch (ActivityReadFailedException) {
             // A read that did not run is not "not found": a 404 here would
             // tell the client the post is gone.

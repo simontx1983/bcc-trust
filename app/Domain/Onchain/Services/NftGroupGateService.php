@@ -21,6 +21,8 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Core\Repositories\UserMetaRepository;
+use BCC\Trust\Core\Repositories\UserMetaSwapRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
@@ -69,7 +71,13 @@ final class NftGroupGateService {
             return JoinResult::notAHolderGroup();
         }
 
-        if ($this->isPermanentOptOut($userId, $groupId)) {
+        // H7: a TRUSTED read. Unreadable is the transient 503, never "no
+        // opt-out".
+        $permanent = $this->permanentOptOutState($userId, $groupId);
+        if ($permanent === null) {
+            return JoinResult::verifyUnavailable($config->minBalance);
+        }
+        if ($permanent) {
             return JoinResult::optOutActive($config->minBalance);
         }
         // A PeepSo ban is a moderator removal too (F-271): refuse it with the
@@ -161,6 +169,13 @@ final class NftGroupGateService {
             return [];
         }
 
+        // H7: the opt-out map from ONE trusted read for the whole pass.
+        // Unreadable means no auto-join this pass.
+        $optOuts = $this->readOptOutMap($userId);
+        if ($optOuts === null) {
+            return [];
+        }
+
         $groupIds = array_map(static fn(GatedGroupConfig $c): int => $c->groupId, $configs);
         $alreadyJoined = \BCC\Core\Repositories\PeepSoGroupRepository::findUserMemberships(
             $userId,
@@ -183,7 +198,7 @@ final class NftGroupGateService {
             if (isset($alreadyJoined[$cfg->groupId])) {
                 continue;
             }
-            if ($this->isOptOutActive($userId, $cfg->groupId)) {
+            if ($this->optOutActiveIn($optOuts['map'], $userId, $cfg->groupId)) {
                 continue;
             }
             $identity = GateIdentityResolver::resolve($cfg);
@@ -317,12 +332,19 @@ final class NftGroupGateService {
      * member who then pressed Leave used to overwrite the permanent marker
      * with time(), which made it a voluntary leave that an explicit Join
      * overrides: the removal was undone by Leave then Join.
+     *
+     * H7: the permanent check runs on the SAME trusted read as the write
+     * (mutateOptOutMap), so nothing can change between them.
      */
     public function recordOptOut(int $userId, int $groupId): void {
-        if ($this->isPermanentOptOut($userId, $groupId)) {
-            return;
-        }
-        $this->writeOptOutTimestamp($userId, $groupId, time());
+        $now = time();
+        $this->mutateOptOutMap($userId, $groupId, 'record_opt_out', static function (array $map) use ($groupId, $now): array {
+            if (($map[$groupId] ?? null) === self::PERMANENT_OPT_OUT_TIMESTAMP) {
+                return $map;
+            }
+            $map[$groupId] = $now;
+            return $map;
+        });
     }
 
     /**
@@ -363,21 +385,40 @@ final class NftGroupGateService {
 
     /**
      * Record a permanent opt-out (mod removals; never expires).
+     *
+     * H7: through mutateOptOutMap(), so it is only ever written over the
+     * map it read. If the map cannot be read at all this eviction is not
+     * recorded, and that is logged at ERROR.
      */
     public function recordPermanentOptOut(int $userId, int $groupId): void {
-        $this->writeOptOutTimestamp($userId, $groupId, self::PERMANENT_OPT_OUT_TIMESTAMP);
+        $this->mutateOptOutMap($userId, $groupId, 'record_permanent_opt_out', static function (array $map) use ($groupId): array {
+            $map[$groupId] = self::PERMANENT_OPT_OUT_TIMESTAMP;
+            return $map;
+        });
     }
 
     public function clearOptOut(int $userId, int $groupId): void {
+        $this->mutateOptOutMap($userId, $groupId, 'clear_opt_out', static function (array $map) use ($groupId): array {
+            unset($map[$groupId]);
+            return $map;
+        });
+    }
+
+    /**
+     * H7: is there a PERMANENT opt-out (a moderator eviction) for this
+     * group, from a TRUSTED read? null = the map could not be read. For the
+     * JOIN gates (this class and ValidatorGroupGateService), which refuse
+     * on null with the transient 503.
+     */
+    public function permanentOptOutState(int $userId, int $groupId): ?bool {
         if ($userId <= 0 || $groupId <= 0) {
-            return;
+            return false;
         }
-        $map = $this->loadOptOutMap($userId);
-        if (!isset($map[$groupId])) {
-            return;
+        $state = $this->readOptOutMap($userId);
+        if ($state === null) {
+            return null;
         }
-        unset($map[$groupId]);
-        $this->persistOptOutMap($userId, $map);
+        return ($state['map'][$groupId] ?? null) === self::PERMANENT_OPT_OUT_TIMESTAMP;
     }
 
     /**
@@ -385,20 +426,42 @@ final class NftGroupGateService {
      * (recordPermanentOptOut). A voluntary, TTL'd opt-out is FALSE here
      * even while active: it blocks automatic re-adding, not an explicit
      * Join (F-158).
+     *
+     * ⚠⚠ H7: DISPLAY ONLY (the holder and delegator listings' opt_out_kind).
+     * It reads through WordPress's meta cache, which answers a failed read
+     * as "no opt-out", and the listings call it once per group, so a trusted
+     * (uncached) read here would cost a query per group. A gate must use
+     * permanentOptOutState(), which can say "unknown".
      */
     public function isPermanentOptOut(int $userId, int $groupId): bool {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
-        $map = $this->loadOptOutMap($userId);
+        $map = self::decodeOptOutMap((string) get_user_meta($userId, self::USER_META_OPT_OUT, true));
         return isset($map[$groupId]) && $map[$groupId] === self::PERMANENT_OPT_OUT_TIMESTAMP;
     }
 
+    /**
+     * Is any opt-out active for this group?
+     *
+     * ⚠⚠ H7: DISPLAY ONLY, for the same reason as isPermanentOptOut(). The
+     * auto-join pass (findEligibleGroups) reads the map once through the
+     * trusted read instead.
+     */
     public function isOptOutActive(int $userId, int $groupId): bool {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
-        $map = $this->loadOptOutMap($userId);
+        $map = self::decodeOptOutMap((string) get_user_meta($userId, self::USER_META_OPT_OUT, true));
+        return $this->optOutActiveIn($map, $userId, $groupId);
+    }
+
+    /**
+     * The TTL rule over an already-read map.
+     *
+     * @param array<int, int> $map
+     */
+    private function optOutActiveIn(array $map, int $userId, int $groupId): bool {
         if (!isset($map[$groupId])) {
             return false;
         }
@@ -420,29 +483,106 @@ final class NftGroupGateService {
         );
     }
 
-    private function writeOptOutTimestamp(int $userId, int $groupId, int $timestamp): void {
+    /** Writes tried at most per change, each from a fresh read. */
+    private const OPT_OUT_WRITE_ATTEMPTS = 3;
+
+    /**
+     * H7: change the opt-out map without ever writing over one that was not
+     * read.
+     *
+     * The map is ONE user-meta value holding every group's opt-out, so each
+     * change is a read-modify-write, and get_user_meta() answers a failed
+     * read as '' (no map). So:
+     *   - the read is TRUSTED and FRESH (bcc-core
+     *     UserMetaRepository::firstValuesOrUnknown(…, true): null when it
+     *     failed, including wpdb's pre-flush bail with stale rows; never the
+     *     request memo), and a failed read writes NOTHING;
+     *   - the write is a compare-and-swap on the exact raw value read
+     *     (UserMetaSwapRepository: a guarded INSERT / UPDATE / DELETE, not
+     *     update_user_meta() with a previous value, which is no CAS), so a
+     *     change another request made between our read and our write is
+     *     never overwritten: the swap matches nothing, and we read again;
+     *   - each attempt starts from a fresh read, at most
+     *     OPT_OUT_WRITE_ATTEMPTS. Giving up is logged at ERROR and leaves
+     *     the stored map exactly as it was.
+     *
+     * @param callable(array<int, int>): array<int, int> $change
+     */
+    private function mutateOptOutMap(int $userId, int $groupId, string $operation, callable $change): bool {
         if ($userId <= 0 || $groupId <= 0) {
-            return;
+            return false;
         }
-        $map = $this->loadOptOutMap($userId);
-        $map[$groupId] = $timestamp;
-        $this->persistOptOutMap($userId, $map);
+
+        $failedReads = 0;
+        for ($attempt = 0; $attempt < self::OPT_OUT_WRITE_ATTEMPTS; $attempt++) {
+            $state = $this->readOptOutMap($userId);
+            if ($state === null) {
+                $failedReads++;
+                continue;
+            }
+
+            $next = $change($state['map']);
+            if ($next === $state['map']) {
+                return true;
+            }
+            if (self::swapOptOutMap($userId, $state['raw'], $next)) {
+                return true;
+            }
+        }
+
+        \BCC\Core\Log\Logger::error('[NftGroupGateService] opt-out map not changed: it could not be read, or kept changing underneath', [
+            'operation'    => $operation,
+            'user_id'      => $userId,
+            'group_id'     => $groupId,
+            'attempts'     => self::OPT_OUT_WRITE_ATTEMPTS,
+            'failed_reads' => $failedReads,
+        ]);
+        return false;
     }
 
     /**
-     * Read the opt-out map from user meta on EVERY call.
+     * Replace the stored map, but only if it is still exactly $expectedRaw
+     * (null = there was no row). An empty map removes the key.
+     *
+     * @param array<int, int> $next
+     */
+    private static function swapOptOutMap(int $userId, ?string $expectedRaw, array $next): bool {
+        return UserMetaSwapRepository::swap(
+            $userId,
+            self::USER_META_OPT_OUT,
+            $expectedRaw,
+            $next === [] ? null : (string) wp_json_encode($next)
+        );
+    }
+
+    /**
+     * H7: the opt-out map from a TRUSTED, FRESH read (never the request
+     * memo), or null when it could not be read. raw is the stored string
+     * exactly; '' may be an empty or a SQL-NULL value, which the swap
+     * treats alike.
      *
      * ⚠ No per-instance memo (#409 / F-158). Since F-158 the join gate refuses
      * only a PERMANENT opt-out (a moderator eviction). An instance that had
      * memoized the map while the member had merely left would go on reading
      * "left" after another instance recorded the eviction, and would let the
-     * evicted member rejoin. WordPress already caches user meta per request
-     * (and in the object cache), so the memo saved only a json_decode.
+     * evicted member rejoin.
      *
+     * @return array{raw: string|null, map: array<int, int>}|null raw = the stored value as read (null = no row)
+     */
+    private function readOptOutMap(int $userId): ?array {
+        $stored = UserMetaRepository::firstValuesOrUnknown([$userId], [self::USER_META_OPT_OUT], true);
+        if ($stored === null) {
+            return null;
+        }
+        $raw = $stored[$userId][self::USER_META_OPT_OUT] ?? null;
+
+        return ['raw' => $raw, 'map' => self::decodeOptOutMap($raw ?? '')];
+    }
+
+    /**
      * @return array<int, int>
      */
-    private function loadOptOutMap(int $userId): array {
-        $raw = (string) get_user_meta($userId, self::USER_META_OPT_OUT, true);
+    private static function decodeOptOutMap(string $raw): array {
         if ($raw === '') {
             return [];
         }
@@ -461,20 +601,5 @@ final class NftGroupGateService {
             }
         }
         return $map;
-    }
-
-    /**
-     * @param array<int, int> $map
-     */
-    private function persistOptOutMap(int $userId, array $map): void {
-        if ($map === []) {
-            delete_user_meta($userId, self::USER_META_OPT_OUT);
-            return;
-        }
-        update_user_meta(
-            $userId,
-            self::USER_META_OPT_OUT,
-            wp_json_encode($map)
-        );
     }
 }

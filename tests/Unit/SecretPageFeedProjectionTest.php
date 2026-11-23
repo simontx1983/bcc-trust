@@ -124,6 +124,37 @@ final class SecretPageFeedProjectionTest extends TestCase
         self::assertSame(['feed_1'], self::ids($this->service()->getTagFeed(self::STRANGER, 'validators')));
     }
 
+    /**
+     * F-438 / F-455: every surface now reads the viewer's exclusion lists
+     * first (FeedRankingService::viewerExclusions()). That probe only reads
+     * lists, and each surface still runs the page filters after its read, so
+     * a secret page's notice stays dropped on the three surfaces this file
+     * had not walked: the cold-start hot posts, the group room, My Groups.
+     */
+    public function testTheColdStartHotPostsDropItToo(): void
+    {
+        $this->firstPage([self::secretNotice(2), self::post(1)]);
+
+        self::assertSame(['feed_1'], self::ids($this->service()->getHotFeedForViewer(self::STRANGER, 2)));
+        self::assertSame(['feed_2', 'feed_1'], self::ids($this->service()->getHotFeedForViewer(self::MEMBER, 2)), 'a member');
+    }
+
+    public function testTheGroupRoomDropsItToo(): void
+    {
+        $this->firstPage([self::secretNotice(2), self::post(1)]);
+
+        self::assertSame(['feed_1'], self::ids($this->service()->getGroupFeed(self::STRANGER, 77)));
+    }
+
+    public function testMyGroupsDropsItToo(): void
+    {
+        $GLOBALS['__bcc_spf']['my_groups'] = [77];
+        $this->firstPage([self::secretNotice(2), self::post(1)]);
+
+        self::assertSame(['feed_1'], self::ids($this->service()->getFeed(self::STRANGER, 'groups')));
+        self::assertSame(['feed_2', 'feed_1'], self::ids($this->service()->getFeed(self::MEMBER, 'groups')), 'a member');
+    }
+
     public function testAPageTheNoticesEmptyIsReadPast(): void
     {
         $GLOBALS['__bcc_spf']['pages'] = [

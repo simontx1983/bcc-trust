@@ -241,7 +241,16 @@ final class MyGroupsEndpoint
         // the canonical threshold (25/50/75); reputation is fetched
         // via the same ReputationRepository the rest of the trust engine
         // already uses so there's a single source of truth for the score.
-        $trustMin = (int) get_post_meta($groupId, '_bcc_trust_gate_min', true);
+        // F-463: read through ProbesReads, never get_post_meta(); a minimum
+        // that cannot be read refuses the join (retryable) before any write.
+        $trustMin = self::trustGateMin($groupId);
+        if ($trustMin === null) {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We couldn\'t check this community\'s requirements. Please try again.',
+                503
+            );
+        }
         if ($trustMin > 0) {
             $viewerScore = (int) round(
                 Plugin::instance()->reputationRepository()->getScore($userId)
@@ -730,6 +739,36 @@ final class MyGroupsEndpoint
             'cooldown_active' => 'A 30-day cooldown follows creating, receiving, or transferring a community. Yours is still active.',
             default           => 'You can\'t create a community right now.',
         };
+    }
+
+    /**
+     * The group's trust-score minimum for the plain join (F-463), read
+     * through bcc-core's PostMetaRepository: through ProbesReads, never
+     * get_post_meta(); a read that cannot be trusted answers null, and the
+     * join refuses.
+     *
+     *   - no row (or only empty rows) is 0: no minimum, a real answer;
+     *   - duplicate rows: the HIGHEST counts;
+     *   - a non-empty value that is not a number is unknown (null), never 0.
+     */
+    private static function trustGateMin(int $groupId): ?int
+    {
+        $rows = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown([$groupId], ['_bcc_trust_gate_min']);
+        if ($rows === null) {
+            return null;
+        }
+        $min = 0;
+        foreach ($rows[$groupId]['_bcc_trust_gate_min'] ?? [] as $value) {
+            $value = trim($value);
+            if ($value === '') {
+                continue;
+            }
+            if (!is_numeric($value)) {
+                return null;
+            }
+            $min = max($min, (int) $value);
+        }
+        return $min;
     }
 
     /**

@@ -38,7 +38,8 @@ namespace BCC\Trust\Core\Tests\Unit {
         {
             require_once dirname(__DIR__) . '/Stubs/optout-map-stubs.php';
 
-            $GLOBALS['__bcc_optout_meta']  = [];
+            // H7: one store for the trusted read and the meta functions.
+            $GLOBALS['wpdb']               = new \TokenStateWpdb();
             $GLOBALS['__bcc_optout_reads'] = 0;
         }
 
@@ -80,7 +81,7 @@ namespace BCC\Trust\Core\Tests\Unit {
             $gate->recordOptOut(self::USER_ID, self::GROUP_ID);
 
             self::assertFalse($gate->isPermanentOptOut(self::USER_ID, self::GROUP_ID));
-            $stored = json_decode((string) current($GLOBALS['__bcc_optout_meta'][self::USER_ID]), true);
+            $stored = \OptOutStore::map(self::USER_ID);
             self::assertIsArray($stored);
             self::assertGreaterThan(0, $stored[self::GROUP_ID] ?? 0, 'the voluntary opt-out is still written');
         }

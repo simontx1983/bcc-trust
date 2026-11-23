@@ -20,11 +20,12 @@
  *                               members in.
  *
  * Privacy is the exhaustive `PeepSoPrivacy` enum (open/closed/secret) — there
- * is no "unknown privacy" branch at this layer. Note the resolver
- * ({@see \BCC\Trust\Core\ValueObjects\PeepSoPrivacy::fromGroupPostId})
- * collapses absent/corrupt `peepso_group_privacy` meta to Open, so a group
- * with missing privacy meta is treated as Open here. PeepSo + `createPlainGroup`
- * always set privacy at creation, so this is a theoretical edge, not a live path.
+ * is no "unknown privacy" branch at this layer. The value comes from
+ * {@see \BCC\Trust\Core\ValueObjects\PeepSoPrivacy::fromGroupPostId} (F-460):
+ * the strictest stored privacy row; a group with no privacy row is Open; a
+ * value that cannot be read is Secret, so it reaches this policy already
+ * failed closed. PeepSo + `createPlainGroup` always set privacy at creation,
+ * so the no-row case is a theoretical edge, not a live path.
  *
  * Pure by construction — no WordPress, PeepSo, or singleton access — so
  * the full authorization matrix is unit-testable without stubs. The

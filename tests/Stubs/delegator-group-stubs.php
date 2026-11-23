@@ -30,6 +30,11 @@
 declare(strict_types=1);
 
 namespace {
+    // H7: the opt-out map is read through bcc-core's UserMetaRepository and
+    // written through UserMetaSwapRepository; this world's stand-ins use
+    // the user-meta fixture below.
+    require_once __DIR__ . '/user-meta-fixture-stand-ins.php';
+
     if (!class_exists('WP_Post', false)) {
         class WP_Post
         {

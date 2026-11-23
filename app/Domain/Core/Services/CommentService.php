@@ -38,6 +38,7 @@ use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Repositories\CommentRepository;
+use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
@@ -684,7 +685,15 @@ final class CommentService
             return ['can_read' => false, 'can_create' => false];
         }
 
-        $groupId = (int) get_post_meta($parentPostId, 'peepso_group_id', true);
+        // ⚠⚠ F-461: "is this a group post" is read through
+        // PostGroupFactsRepository, never get_post_meta(): a read that
+        // cannot be trusted refuses, and closes the thread.
+        $groupFacts = PostGroupFactsRepository::forPost($parentPostId);
+        if ($groupFacts === null) {
+            return ['can_read' => false, 'can_create' => false];
+        }
+
+        $groupId = (int) $groupFacts['group_raw'];
         if ($groupId <= 0) {
             // Not group-scoped, so no membership gate — but the post's own
             // §F-02 audience still decides. A refusal here reaches
@@ -694,7 +703,8 @@ final class CommentService
             $visible = FeedItemReportVisibility::audienceAllows(
                 $viewerId,
                 $parentActId,
-                $parentPostId
+                $parentPostId,
+                $groupFacts
             );
             return [
                 'can_read'   => $visible,

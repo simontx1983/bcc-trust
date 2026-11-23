@@ -4,9 +4,14 @@
  *
  * Single seam for "what kind of group is this?" questions. Reads
  * post meta on the peepso-group post and produces a GroupContext.
- * Privacy is the exception: it comes from bcc-core's probed table read
- * (`PeepSoGroupPrivacy`, F-460), which answers null when it cannot be
- * trusted; see PeepSoPrivacy.
+ * The values that decide something are read through ProbesReads, never
+ * get_post_meta(): a read that cannot be trusted answers null, and callers
+ * fail closed.
+ *   - privacy: bcc-core's `PeepSoGroupPrivacy` (F-460); unknown is Secret,
+ *     see PeepSoPrivacy;
+ *   - kind and trust weighting: bcc-core's `PostMetaRepository` (F-463);
+ *     unknown, or duplicate kind rows that disagree, gives NO context
+ *     (null), which every consumer already treats as "no such group".
  *
  * Domain isolation: the resolver reads only post meta on the group
  * post itself. It never reaches into Onchain repositories. The
@@ -36,8 +41,21 @@ final class GroupContextResolver {
 
     private const POST_TYPE = 'peepso-group';
 
+    private const META_KIND      = '_bcc_group_kind';
+    private const META_WEIGHTING = '_bcc_trust_weighting_enabled';
+
     /** @var array<int, GroupContext|null> */
     private array $cache = [];
+
+    /**
+     * Kind and trust weighting primed by forManyGroups() from one guarded
+     * read per BATCH_MAX ids; null where that read could not be trusted or
+     * the values are ambiguous. forGroup() uses an entry when there is one,
+     * and otherwise reads the single group itself.
+     *
+     * @var array<int, array{kind: string, weighting: bool}|null>
+     */
+    private array $groupMeta = [];
 
     /**
      * Group privacy primed by forManyGroups(): the answer of bcc-core's
@@ -63,18 +81,23 @@ final class GroupContextResolver {
             return $this->cache[$groupId] = null;
         }
 
-        $kind = (string) get_post_meta($groupId, '_bcc_group_kind', true);
-        $type = $this->resolveType($kind);
+        // F-463: kind and weighting through ProbesReads. Unknown → no context.
+        $meta = array_key_exists($groupId, $this->groupMeta)
+            ? $this->groupMeta[$groupId]
+            : (self::readGroupMeta([$groupId])[$groupId] ?? null);
+        if ($meta === null) {
+            return $this->cache[$groupId] = null;
+        }
+        $type = $this->resolveType($meta['kind']);
 
         [$sourceKind, $sourceId] = $this->resolveSource($groupId, $type);
         $verification = $this->resolveVerification($type);
-        // F-460: from the table (bcc-core's probed read), never the meta
-        // cache; unknown is Secret. See PeepSoPrivacy.
+        // F-460: through ProbesReads; unknown is Secret. See PeepSoPrivacy.
         $privacy      = array_key_exists($groupId, $this->privacy)
             ? PeepSoPrivacy::fromStoredValue($this->privacy[$groupId])
             : PeepSoPrivacy::fromGroupPostId($groupId);
 
-        $trustWeighting = (int) get_post_meta($groupId, '_bcc_trust_weighting_enabled', true) === 1;
+        $trustWeighting = $meta['weighting'];
 
         return $this->cache[$groupId] = new GroupContext(
             $groupId,
@@ -98,7 +121,8 @@ final class GroupContextResolver {
      *
      * Privacy is primed the same way: one bcc-core
      * `PeepSoGroupPrivacy::privacyForGroups()` read for the page (F-460),
-     * through ProbesReads rather than get_post_meta().
+     * through ProbesReads rather than get_post_meta(). So are kind and trust
+     * weighting: one `PostMetaRepository::valuesOrUnknown()` read (F-463).
      *
      * @param int[] $groupIds
      * @return array<int, GroupContext>
@@ -117,6 +141,9 @@ final class GroupContextResolver {
         if ($missing !== []) {
             _prime_post_caches($missing, false, true);
             $this->primePrivacy($missing);
+            foreach (self::readGroupMeta($missing) as $groupId => $meta) {
+                $this->groupMeta[$groupId] = $meta;
+            }
         }
 
         $out = [];
@@ -147,6 +174,57 @@ final class GroupContextResolver {
                 $this->privacy[$groupId] = $byGroup === null ? null : ($byGroup[$groupId] ?? null);
             }
         }
+    }
+
+    /**
+     * Kind and trust weighting for each group, one guarded read per
+     * `PostMetaRepository::BATCH_MAX` ids.
+     *
+     * ⚠ A chunk whose read cannot be trusted answers NULL for each of its
+     * groups (no context). It does not fall back to per-group reads against a
+     * database that is already failing.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, array{kind: string, weighting: bool}|null>
+     */
+    private static function readGroupMeta(array $groupIds): array {
+        $out = [];
+        foreach (array_chunk($groupIds, \BCC\Core\Repositories\PostMetaRepository::BATCH_MAX) as $chunk) {
+            $rows = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown($chunk, [self::META_KIND, self::META_WEIGHTING]);
+            foreach ($chunk as $groupId) {
+                $out[$groupId] = $rows === null ? null : self::decideGroupMeta($rows[$groupId] ?? []);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The decision on one group's raw rows.
+     *
+     *   - kind: no row is '' (a plain group, a real answer). Duplicate rows
+     *     must AGREE; rows that disagree (including '' beside 'holders') are
+     *     unknown, so '' can never win over a gated kind.
+     *   - weighting: enabled when the value is 1; no row is off. Duplicate
+     *     rows must agree on that, or it is unknown.
+     *
+     * Unknown → null: no context.
+     *
+     * @param array<string, list<string>> $values
+     * @return array{kind: string, weighting: bool}|null
+     */
+    private static function decideGroupMeta(array $values): ?array {
+        $kinds = array_values(array_unique($values[self::META_KIND] ?? ['']));
+        if (count($kinds) !== 1) {
+            return null;
+        }
+        $weightings = array_values(array_unique(array_map(
+            static fn (string $v): bool => (int) $v === 1,
+            $values[self::META_WEIGHTING] ?? ['0']
+        )));
+        if (count($weightings) !== 1) {
+            return null;
+        }
+        return ['kind' => $kinds[0], 'weighting' => $weightings[0]];
     }
 
     private function resolveType(string $kind): GroupType {

@@ -15,6 +15,7 @@ use BCC\Trust\Rank\Services\RankPromotionEngine;
 use BCC\Trust\Rank\Services\RankScoreCalculator;
 use BCC\Trust\Rank\Support\RankScoringConfig;
 use BCC\Trust\Tests\Stubs\RankUnitWpFakes;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../Stubs/rank-unit-stubs.php';
@@ -113,9 +114,10 @@ final class RankFindingAssessmentTest extends TestCase
      * @param array{rank_slug: string, recovery_status: string, recovery_deadline: string|null} $stateRow
      * @param list<object> $findingRows
      * @param list<object> $events
+     * @param 'findings'|'clusters'|null $fail F-464/F-465: that read fails, as a failed SELECT does
      * @return array{0: RankPromotionEngine, 1: object}
      */
-    private function engine(array $stateRow, array $findingRows, array $events, ?string $lastLoginDay = null): array
+    private function engine(array $stateRow, array $findingRows, array $events, ?string $lastLoginDay = null, ?string $fail = null): array
     {
         $row = (object) ($stateRow + ['apprentice_awarded_at' => '2026-01-01 00:00:00']);
 
@@ -183,24 +185,30 @@ final class RankFindingAssessmentTest extends TestCase
             }
         };
 
-        $findings = new class ($findingRows) extends FindingsRepository {
+        $findings = new class ($findingRows, $fail === 'findings') extends FindingsRepository {
             /** @param list<object> $rows */
-            public function __construct(private readonly array $rows)
+            public function __construct(private readonly array $rows, private readonly bool $fails)
             {
             }
             public function getActiveForUser(int $userId): array
             {
                 unset($userId);
+                if ($this->fails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+                }
                 return $this->rows;
             }
         };
 
-        $clusters = new class extends ClusterFindingsRepository {
-            public function __construct()
+        $clusters = new class ($fail === 'clusters') extends ClusterFindingsRepository {
+            public function __construct(private readonly bool $fails)
             {
             }
             public function listActiveConfirmed(): array
             {
+                if ($this->fails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+                }
                 return [];
             }
         };
@@ -321,6 +329,88 @@ final class RankFindingAssessmentTest extends TestCase
         self::assertFalse($assessment['satisfied']['journeyman']);
         self::assertFalse($assessment['satisfied']['veteran']);
         self::assertSame('apprentice', $assessment['target']);
+    }
+
+    // ── F-464 / F-465: an unreadable input persists nothing ─────────────
+
+    /** @return array<string, array{string}> */
+    public static function failedEngineReads(): array
+    {
+        return [
+            "the member's findings (F-465)" => ['findings'],
+            'the confirmed clusters (F-464)' => ['clusters'],
+        ];
+    }
+
+    /**
+     * An unreadable input flags the assessment unknown: it satisfies nothing
+     * above apprentice, and the persisting paths write nothing this run.
+     */
+    #[DataProvider('failedEngineReads')]
+    public function testAnUnreadableInputIsFlaggedAndSatisfiesNothingAboveApprentice(string $fail): void
+    {
+        [$engine] = $this->engine(
+            ['rank_slug' => 'journeyman', 'recovery_status' => '', 'recovery_deadline' => null],
+            [],
+            $this->veteranEvidence(),
+            null,
+            $fail
+        );
+
+        $assessment = $engine->assess(self::USER);
+        self::assertNotNull($assessment, 'a read-only caller still gets an assessment');
+        self::assertTrue($assessment['findings_unknown']);
+        self::assertFalse($assessment['satisfied']['journeyman']);
+        self::assertFalse($assessment['satisfied']['veteran']);
+        self::assertSame('apprentice', $assessment['target']);
+    }
+
+    #[DataProvider('failedEngineReads')]
+    public function testEvaluatePersistsNothingWhenAnInputIsUnreadable(string $fail): void
+    {
+        [$engine, $state] = $this->engine(
+            ['rank_slug' => 'journeyman', 'recovery_status' => '', 'recovery_deadline' => null],
+            [],
+            $this->veteranEvidence(),
+            null,
+            $fail
+        );
+
+        $engine->evaluate(self::USER);
+
+        self::assertSame([], $state->persisted, 'no promotion, no grace, no write at all');
+        self::assertSame([], RankUnitWpFakes::firedHooks());
+    }
+
+    #[DataProvider('failedEngineReads')]
+    public function testEvaluateImmediatePersistsNothingWhenAnInputIsUnreadable(string $fail): void
+    {
+        [$engine, $state] = $this->engine(
+            ['rank_slug' => 'veteran', 'recovery_status' => '', 'recovery_deadline' => null],
+            [],
+            $this->veteranEvidence(),
+            null,
+            $fail
+        );
+
+        $engine->evaluateImmediate(self::USER);
+
+        self::assertSame([], $state->persisted);
+        self::assertSame([], RankUnitWpFakes::firedHooks());
+    }
+
+    public function testAReadableCleanRecordIsNotFlagged(): void
+    {
+        [$engine] = $this->engine(
+            ['rank_slug' => 'journeyman', 'recovery_status' => '', 'recovery_deadline' => null],
+            [],
+            $this->veteranEvidence()
+        );
+
+        $assessment = $engine->assess(self::USER);
+        self::assertNotNull($assessment);
+        self::assertFalse($assessment['findings_unknown']);
+        self::assertSame('veteran', $assessment['target'], 'control: this member really would be promoted');
     }
 
     // ── Ordinary grace vs immediate demotion ─────────────────────────────

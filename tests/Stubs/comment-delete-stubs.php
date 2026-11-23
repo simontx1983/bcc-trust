@@ -191,6 +191,22 @@ namespace BCC\Trust\Tests\Stubs {
             self::$isAdmin      = false;
             self::$listReads    = [];
             self::$commentActs  = [];
+
+            // F-461: the comment gate reads a post's group facts from the
+            // database (PostGroupFactsRepository), never get_post_meta().
+            // By default the "database" answers from $postMeta, so a test's
+            // meta fixture keeps its meaning; wpdb()->dbRows overrides it.
+            $GLOBALS['wpdb'] = new \BCC\Trust\Tests\Support\PostGroupFactsWpdb(
+                static fn (int $postId, string $key): mixed => self::$postMeta[$postId][$key] ?? ''
+            );
+        }
+
+        /** The F-461 group-facts read's `$wpdb` (installed by reset()). */
+        public static function wpdb(): \BCC\Trust\Tests\Support\PostGroupFactsWpdb
+        {
+            $wpdb = $GLOBALS['wpdb'] ?? null;
+            \PHPUnit\Framework\Assert::assertInstanceOf(\BCC\Trust\Tests\Support\PostGroupFactsWpdb::class, $wpdb);
+            return $wpdb;
         }
     }
 }

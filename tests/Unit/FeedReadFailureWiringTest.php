@@ -26,6 +26,11 @@ use PHPUnit\Framework\TestCase;
  * ⚠ This proves the code SAYS it. That it DOES it, against a real database
  * and the real bcc-core read, is PagePostsIntegrationTest's F-275 section.
  *
+ * F-438: the ranking service's `viewerExclusions()` probe counts as a feed
+ * read too. It throws the same exception, and a route calls it on its own
+ * before a lookup (the shortcode permalink), so a route that probes without
+ * the catch would be the same 500.
+ *
  * Not REST, so not here: CronService::warmHotFeed() already catches
  * \Throwable around the warm, and the failed build throws before its cache
  * write (HotFeed tests).
@@ -34,7 +39,7 @@ final class FeedReadFailureWiringTest extends TestCase
 {
     /** file (under app/Domain/Core/REST) => methods that read a feed */
     private const GUARDED = [
-        'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'respondWithFeedItem'],
+        'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'feedItemByShortcode', 'respondWithFeedItem'],
         'GroupsDetailEndpoint.php'  => ['feed'],
         'PagesEndpoint.php'         => ['feed'],
         'UsersEndpoint.php'         => ['blog', 'activity'],
@@ -42,12 +47,13 @@ final class FeedReadFailureWiringTest extends TestCase
     ];
 
     /**
-     * A feed read: the ranking service's getters, the cold-start panel, or
-     * the profile Blog tab. Only `getUserBlog` on the blog service: its
-     * other getter (`getBlogForEdit`, the editor's single-draft read) does
-     * not read the activity stream and does not throw.
+     * A feed read: the ranking service's getters and its viewerExclusions()
+     * probe (F-438), the cold-start panel, or the profile Blog tab. Only
+     * `getUserBlog` on the blog service: its other getter (`getBlogForEdit`,
+     * the editor's single-draft read) does not read the activity stream and
+     * does not throw.
      */
-    private const CALL = '/(?:(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*get\w*|blogService\(\)\s*->\s*getUserBlog)\s*\(/';
+    private const CALL = '/(?:(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*(?:get\w*|viewerExclusions)|blogService\(\)\s*->\s*getUserBlog)\s*\(/';
 
     /**
      * `try { … } catch (ActivityReadFailedException) { … }`, capturing both
@@ -122,6 +128,16 @@ final class FeedReadFailureWiringTest extends TestCase
 
         self::assertCount(1, self::unguardedCalls($tab));
         self::assertSame([], self::unguardedCalls($draft));
+    }
+
+    /** F-438: the exclusion probe is a feed read, and needs the same guard. */
+    public function testTheMatcherSeesTheExclusionProbe(): void
+    {
+        $bare    = '{ $x = Plugin::instance()->feedRankingService()->viewerExclusions($v); return ApiResponse::ok([]); }';
+        $guarded = '{ try { $x = Plugin::instance()->feedRankingService()->viewerExclusions($v); } catch (ActivityReadFailedException) { return FeedUnavailable::response(); } return ApiResponse::ok([]); }';
+
+        self::assertCount(1, self::unguardedCalls($bare));
+        self::assertSame([], self::unguardedCalls($guarded));
     }
 
     public function testTheMatcherAcceptsTheGuard(): void
