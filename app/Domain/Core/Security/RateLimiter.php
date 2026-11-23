@@ -19,6 +19,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\RateLimitRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
@@ -513,6 +514,12 @@ class RateLimiter {
      * Get adjusted limit based on user trust level using config thresholds.
      * User info is cached in the object cache for 5 minutes to avoid a DB
      * query on every single rate-limit check.
+     *
+     * F-469 (L1): only an answer the read actually gave is cached. A failed
+     * read used to come back from getByUserId() as null, the same as "no
+     * row", and that null was cached here for the full 5 minutes. Now it is
+     * read through getByUserIdOrThrow() and NOT cached: this call gets the
+     * base limit (no adjustment either way), and the next call reads again.
      */
     private static function getAdjustedLimit(int $userId, int $baseLimit, string $action): int {
         if (!$userId) {
@@ -522,7 +529,11 @@ class RateLimiter {
         $cacheKey = 'rl_userinfo_' . $userId;
         $userInfo = wp_cache_get($cacheKey, 'bcc_trust_rl');
         if ($userInfo === false) {
-            $userInfo = self::$userInfoRepo->getByUserId($userId);
+            try {
+                $userInfo = self::$userInfoRepo->getByUserIdOrThrow($userId);
+            } catch (RepositoryException) {
+                return $baseLimit; // logged by the repository; not cached
+            }
             wp_cache_set($cacheKey, $userInfo, 'bcc_trust_rl', 300);
         }
 
