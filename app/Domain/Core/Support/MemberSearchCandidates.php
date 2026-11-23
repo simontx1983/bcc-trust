@@ -30,6 +30,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Support;
 
+use BCC\Core\Repositories\UserMetaRepository;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
@@ -56,6 +57,9 @@ final class MemberSearchCandidates
      *     cannot recover a member this cut already dropped.
      */
     public const MAX_CANDIDATES = 1000;
+
+    /** The §K2 "hide my real name" flag (PrivacySettings' `real_name_hidden`). */
+    private const REAL_NAME_HIDDEN_META = 'bcc_privacy_real_name_hidden';
 
     /**
      * F-432: what a caller that opts into $throwOnReadFailure adds to both
@@ -142,6 +146,19 @@ final class MemberSearchCandidates
             }));
         }
 
+        // F-512: a member is matched by display name only when NONE of their
+        // real_name_hidden rows is truthy. The meta_query above cannot say
+        // that (a member holding both a '0' and a '1' row passes it through
+        // the '0' row); it stays as a pre-filter, so members whose rows are
+        // all '1' never take a candidate slot. Read through bcc-core's
+        // UserMetaRepository (every stored value, through ProbesReads), the
+        // same reader and the same "any truthy row hides" rule as the
+        // display path. A read that cannot be trusted keeps NO name match:
+        // only handle matches remain, or it throws when the caller asked.
+        if ($byName !== []) {
+            $byName = self::withoutHiddenRealNames($byName, $throwOnReadFailure);
+        }
+
         $byHandle = [];
         if ($handle !== '') {
             self::clearReadErrorIf($throwOnReadFailure);
@@ -163,6 +180,35 @@ final class MemberSearchCandidates
         }
 
         return array_keys($ids);
+    }
+
+    /**
+     * F-512: the name matches whose real_name_hidden rows are ALL falsy (or
+     * absent). One bounded read of every stored value; a truthy row on any
+     * of them hides the name. Unreadable keeps none.
+     *
+     * @param list<int> $ids
+     * @return list<int>
+     * @throws RepositoryReadFailure when $throwOnReadFailure and the read did not run
+     */
+    private static function withoutHiddenRealNames(array $ids, bool $throwOnReadFailure): array
+    {
+        $flags = UserMetaRepository::valuesOrUnknown($ids, [self::REAL_NAME_HIDDEN_META]);
+        if ($flags === null) {
+            if ($throwOnReadFailure) {
+                throw new RepositoryReadFailure(self::class, 'ids: real-name flags', 'the read did not run');
+            }
+            return [];
+        }
+
+        return array_values(array_filter($ids, static function (int $id) use ($flags): bool {
+            foreach ($flags[$id][self::REAL_NAME_HIDDEN_META] ?? [] as $value) {
+                if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                    return false;
+                }
+            }
+            return true;
+        }));
     }
 
     /**
