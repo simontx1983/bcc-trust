@@ -67,12 +67,18 @@ final class BearerAuthRestOnlyTest extends TestCase
         yield 'a prefix configured with slashes' => ['/index.php', '/wp-json/bcc/v1/me', '', '/wp-json/'];
         yield 'a sub-directory install'         => ['/cms/index.php', '/cms/wp-json/bcc/v1/me', '/cms', 'wp-json'];
         yield 'a sub-directory home, any case (core strips it case-blind)' => ['/cms/index.php', '/CMS/wp-json/bcc/v1/me', '/cms/', 'wp-json'];
+        // F-525: percent-encoded text stays allowed (some card slugs are
+        // stored percent-encoded), as long as the path is canonical.
+        yield 'a card slug stored percent-encoded' => ['/index.php', '/wp-json/bcc/v1/cards/%f0%9f%90%betrace-juno-vckja0', '', 'wp-json'];
+        yield "the app's spelling of that slug" => ['/index.php', '/wp-json/bcc/v1/cards/%25f0%259f%2590%25betrace-juno-vckja0', '', 'wp-json'];
+        yield 'an encoded space'                => ['/index.php', '/wp-json/bcc/v1/cards/a%2520b', '', 'wp-json'];
+        yield 'four rounds of encoding'         => ['/index.php', '/wp-json/bcc/v1/cards/%25252541', '', 'wp-json'];
     }
 
     #[DataProvider('restRequests')]
     public function testARestRequestThroughTheFrontControllerCounts(string $script, string $uri, string $home, string $prefix): void
     {
-        self::assertTrue(BearerAuth::isRestRequestFor($script, $uri, $home, $prefix, false));
+        self::assertTrue(BearerAuth::isRestRequestFor($script, $uri, $home, $prefix, false, ''));
     }
 
     /** @return iterable<string, array{0: string, 1: string, 2: string}> */
@@ -101,7 +107,71 @@ final class BearerAuthRestOnlyTest extends TestCase
     #[DataProvider('nonRestPaths')]
     public function testAnyOtherPathDoesNotCount(string $uri, string $home, string $prefix): void
     {
-        self::assertFalse(BearerAuth::isRestRequestFor('/index.php', $uri, $home, $prefix, false));
+        self::assertFalse(BearerAuth::isRestRequestFor('/index.php', $uri, $home, $prefix, false, ''));
+    }
+
+    /**
+     * F-525: a path that is not canonical never counts, in its raw form or
+     * after any percent-decoding.
+     *
+     * @return iterable<string, array{0: string}>
+     */
+    public static function nonCanonicalPaths(): iterable
+    {
+        yield 'a .. segment'                     => ['/wp-json/../index.php/x'];
+        yield 'a . segment'                      => ['/wp-json/./bcc/v1/me'];
+        yield 'a trailing .. segment'            => ['/wp-json/bcc/v1/..'];
+        yield 'an encoded .. segment'            => ['/wp-json/%2e%2e/index.php/x'];
+        yield 'an encoded .. segment, upper case' => ['/wp-json/%2E%2E/index.php/x'];
+        yield 'a doubly encoded .. segment'      => ['/wp-json/%252e%252e/index.php/x'];
+        yield 'a half-encoded .. segment'        => ['/wp-json/.%2e/index.php/x'];
+        yield 'an encoded slash after the prefix' => ['/wp-json%2f../index.php/x'];
+        yield 'an encoded slash inside'          => ['/wp-json/bcc%2fv1/me'];
+        yield 'a doubly encoded slash'           => ['/wp-json/bcc%252fv1/me'];
+        yield 'a backslash'                      => ['/wp-json/a\\..\\x'];
+        yield 'an encoded backslash'             => ['/wp-json/bcc%5cv1/me'];
+        yield 'an empty segment'                 => ['/wp-json//bcc/v1/me'];
+        yield 'an empty segment, deeper'         => ['/wp-json/bcc/v1//me'];
+        yield 'a malformed escape'               => ['/wp-json/bcc/v1/%zz'];
+        yield 'a short escape'                   => ['/wp-json/bcc/v1/%2'];
+        yield 'a trailing percent'               => ['/wp-json/bcc/v1/me%'];
+        yield 'an encoded NUL'                   => ['/wp-json/bcc/v1/%00'];
+        yield 'an encoded newline'               => ['/wp-json/bcc/v1/%0a'];
+        yield 'a raw control character'          => ["/wp-json/bcc/v1/\x01"];
+        yield 'five rounds of encoding'          => ['/wp-json/bcc/v1/%2525252541'];
+    }
+
+    #[DataProvider('nonCanonicalPaths')]
+    public function testANonCanonicalPathDoesNotCount(string $uri): void
+    {
+        self::assertFalse(BearerAuth::isRestRequestFor('/index.php', $uri, '', 'wp-json', false, ''));
+    }
+
+    /** F-525: any PATH_INFO means the server routed by script, not by path. */
+    public function testPathInfoDoesNotCount(): void
+    {
+        self::assertFalse(BearerAuth::isRestRequestFor('/index.php', '/wp-json/', '', 'wp-json', false, '/x'));
+        self::assertFalse(BearerAuth::isRestRequestFor('/index.php', '/wp-json/bcc/v1/me', '', 'wp-json', false, '/'));
+        self::assertTrue(BearerAuth::isRestRequestFor('/index.php', '/wp-json/bcc/v1/me', '', 'wp-json', false, ''), 'control');
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function pathInfoKeys(): iterable
+    {
+        yield 'PATH_INFO'      => ['PATH_INFO'];
+        yield 'ORIG_PATH_INFO' => ['ORIG_PATH_INFO'];
+    }
+
+    #[DataProvider('pathInfoKeys')]
+    public function testTheReaderRefusesPathInfo(string $key): void
+    {
+        self::request('/index.php', '/wp-json/');
+        $_SERVER[$key] = '/x';
+
+        self::assertFalse(BearerAuth::isRestRequest());
+
+        unset($_SERVER[$key]);
+        self::assertTrue(BearerAuth::isRestRequest(), 'control');
     }
 
     /** @return iterable<string, array{0: string, 1: string, 2: bool}> */
@@ -123,7 +193,7 @@ final class BearerAuthRestOnlyTest extends TestCase
     #[DataProvider('otherEntryPoints')]
     public function testNoOtherEntryPointCounts(string $script, string $uri, bool $otherEntry): void
     {
-        self::assertFalse(BearerAuth::isRestRequestFor($script, $uri, '', 'wp-json', $otherEntry));
+        self::assertFalse(BearerAuth::isRestRequestFor($script, $uri, '', 'wp-json', $otherEntry, ''));
     }
 
     // ── The reader: what the server and WordPress say ─────────────────────
@@ -191,6 +261,45 @@ final class BearerAuthRestOnlyTest extends TestCase
     private static function withToken(string $token): void
     {
         $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $token;
+    }
+
+    // ── F-525: the parse_request backstop ─────────────────────────────────
+
+    /** A bearer user still present at parse_request 11 means core did not dispatch REST. */
+    public function testTheBackstopSignsOutABearerUserOutsideRest(): void
+    {
+        self::withToken(JwtToken::encode(self::USER, 'handle90'));
+        self::request('/index.php', '/wp-json/bcc/v1/me/account');
+        self::assertSame(self::USER, BearerAuth::authenticateBearer(false));
+
+        BearerAuth::signOutBearerOutsideRest();
+
+        self::assertSame(0, BearerAuth::authenticatedUserId());
+        self::assertSame([0], $GLOBALS['__bcc_ph']['set_current_user'] ?? null);
+    }
+
+    public function testTheBackstopLeavesARestRequestAlone(): void
+    {
+        define('REST_REQUEST', true);
+        self::withToken(JwtToken::encode(self::USER, 'handle90'));
+        self::request('/index.php', '/wp-json/bcc/v1/me/account');
+        self::assertSame(self::USER, BearerAuth::authenticateBearer(false));
+
+        BearerAuth::signOutBearerOutsideRest();
+
+        self::assertSame(self::USER, BearerAuth::authenticatedUserId());
+        self::assertArrayNotHasKey('set_current_user', $GLOBALS['__bcc_ph']);
+    }
+
+    /** Nobody the bearer signed in: nothing to undo (a cookie admin stays signed in). */
+    public function testTheBackstopLeavesEveryoneElseAlone(): void
+    {
+        self::request('/index.php', '/no-such-page/');
+        self::assertSame(7, BearerAuth::authenticateBearer(7), 'an earlier sign-in, not the bearer');
+
+        BearerAuth::signOutBearerOutsideRest();
+
+        self::assertArrayNotHasKey('set_current_user', $GLOBALS['__bcc_ph']);
     }
 
     public function testTheAppsRestCallIsSignedIn(): void

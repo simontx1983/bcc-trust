@@ -114,6 +114,37 @@ final class BearerAuth
         add_filter('determine_current_user', [self::class, 'authenticateBearer'], 30);
         add_filter('rest_authentication_errors', [self::class, 'refuseUnknownTokenState'], self::AUTH_ERRORS_PRIORITY);
         add_filter('rest_send_nocache_headers', [self::class, 'noCacheWhenTokenStateUnknown']);
+        add_action('parse_request', [self::class, 'signOutBearerOutsideRest'], self::OUTSIDE_REST_PRIORITY);
+    }
+
+    /**
+     * After core's `rest_api_loaded` (parse_request, 10), which serves a REST
+     * request and exits. Anything that reaches 11 is not REST.
+     */
+    public const OUTSIDE_REST_PRIORITY = 11;
+
+    /** Percent-decoding rounds a request path may need before it is stable. */
+    private const MAX_DECODE_ROUNDS = 4;
+
+    /**
+     * `parse_request`, after core's REST dispatch: a backstop. A user the
+     * bearer signed in is still here only if this is NOT a REST request, so
+     * they are signed out for the rest of it. isRestRequestFor() is the
+     * primary guard; this runs later (after `init` and `wp_loaded`), and
+     * catches any request it let through that core did not route to REST.
+     *
+     * @param mixed $wp
+     */
+    public static function signOutBearerOutsideRest($wp = null): void
+    {
+        unset($wp);
+        if (self::$authenticatedUserId <= 0 || (defined('REST_REQUEST') && REST_REQUEST)) {
+            return;
+        }
+
+        Logger::warning('[bcc-trust] bearer sign-in dropped: not a REST request');
+        self::$authenticatedUserId = 0;
+        wp_set_current_user(0);
     }
 
     /**
@@ -256,6 +287,10 @@ final class BearerAuth
     {
         $scriptName = $_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '');
         $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        $pathInfo   = $_SERVER['PATH_INFO'] ?? '';
+        if (!is_string($pathInfo) || $pathInfo === '') {
+            $pathInfo = $_SERVER['ORIG_PATH_INFO'] ?? '';
+        }
         $homePath   = wp_parse_url((string) home_url(), PHP_URL_PATH);
 
         return self::isRestRequestFor(
@@ -263,7 +298,8 @@ final class BearerAuth
             is_string($requestUri) ? $requestUri : '',
             is_string($homePath) ? $homePath : '',
             (string) rest_get_url_prefix(),
-            is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST)
+            is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST),
+            is_string($pathInfo) ? $pathInfo : 'set'
         );
     }
 
@@ -276,17 +312,24 @@ final class BearerAuth
      *     index.php runs parse_request, so only there does a path become a
      *     REST dispatch. admin-ajax.php, admin-post.php, wp-login.php,
      *     wp-cron.php and xmlrpc.php never qualify, whatever they carry;
-     *   - the request path, as WP::parse_request reads it (before `?`,
-     *     slashes trimmed, the home path taken off the front when it is
-     *     there, as core does), is the REST
-     *     prefix itself or starts with the prefix and a `/`. Those are
-     *     core's two REST rewrite rules (`^{prefix}/?$`, `^{prefix}/(.*)?`).
+     *   - there is no PATH_INFO (or ORIG_PATH_INFO);
+     *   - the request path is CANONICAL (canonicalPath()): no `.` or `..`
+     *     segment, no empty segment, no backslash, no control character, no
+     *     malformed escape, and no `/` that only appears once decoded, in the
+     *     raw path or after any of up to MAX_DECODE_ROUNDS percent-decodings.
+     *     Percent-encoded text otherwise stays allowed: some card slugs are
+     *     stored percent-encoded;
+     *   - the path, as WP::parse_request reads it (before `?`, slashes
+     *     trimmed, the home path taken off the front when it is there, as
+     *     core does), is the REST prefix itself or starts with the prefix and
+     *     a `/`, both raw and fully decoded. Those are core's two REST rewrite
+     *     rules (`^{prefix}/?$`, `^{prefix}/(.*)?`).
      *
      * Everything else is false, and that is the safe direction, because
      * false only means the bearer is ignored:
      *
      *   - `?rest_route=` is not honoured (nothing BCC sends uses it);
-     *   - nor is `/index.php/{prefix}/…` (PATH_INFO);
+     *   - nor is `/index.php/{prefix}/…`, or any request with PATH_INFO;
      *   - nor is a percent-encoded or differently-cased prefix.
      *
      * The app and its NextAuth server call `{BCC_API_URL}/wp-json/…` only.
@@ -296,10 +339,11 @@ final class BearerAuth
      * @param string $homePath    home_url()'s path, '' at the root
      * @param string $restPrefix  rest_get_url_prefix()
      * @param bool   $otherEntry  an admin, ajax, cron or XML-RPC request
+     * @param string $pathInfo    PATH_INFO (else ORIG_PATH_INFO), '' when unset
      */
-    public static function isRestRequestFor(string $scriptName, string $requestUri, string $homePath, string $restPrefix, bool $otherEntry): bool
+    public static function isRestRequestFor(string $scriptName, string $requestUri, string $homePath, string $restPrefix, bool $otherEntry, string $pathInfo): bool
     {
-        if ($otherEntry || !str_ends_with($scriptName, '/index.php')) {
+        if ($otherEntry || $pathInfo !== '' || !str_ends_with($scriptName, '/index.php')) {
             return false;
         }
 
@@ -308,7 +352,79 @@ final class BearerAuth
             return false;
         }
 
-        $path = trim(explode('?', $requestUri, 2)[0], '/');
+        $rawPath = explode('?', $requestUri, 2)[0];
+        $decoded = self::canonicalPath($rawPath);
+        if ($decoded === null) {
+            return false;
+        }
+
+        return self::startsWithRestPrefix($rawPath, $homePath, $prefix)
+            && self::startsWithRestPrefix($decoded, $homePath, $prefix);
+    }
+
+    /**
+     * The path fully percent-decoded, or null when it is not canonical: the
+     * raw path and every decoding round must be clean (isCleanPath()), a
+     * decoding may not add a `/`, and the path must stop changing within
+     * MAX_DECODE_ROUNDS decodings.
+     */
+    private static function canonicalPath(string $rawPath): ?string
+    {
+        $current = $rawPath;
+        for ($round = 0; ; $round++) {
+            if (!self::isCleanPath($current)) {
+                return null;
+            }
+            $next = rawurldecode($current);
+            if ($next === $current) {
+                return $current;
+            }
+            if ($round >= self::MAX_DECODE_ROUNDS) {
+                return null; // still changing after MAX_DECODE_ROUNDS decodings
+            }
+            if (substr_count($next, '/') !== substr_count($current, '/')) {
+                return null;
+            }
+            $current = $next;
+        }
+    }
+
+    /**
+     * No control character, no backslash, no malformed escape, and no `.`,
+     * `..` or empty segment (outer slashes aside, as core trims them).
+     */
+    private static function isCleanPath(string $path): bool
+    {
+        if (preg_match('/[\x00-\x1F\x7F]/', $path) === 1) {
+            return false;
+        }
+        if (str_contains($path, '\\')) {
+            return false;
+        }
+        if (preg_match('/%(?![0-9A-Fa-f]{2})/', $path) === 1) {
+            return false;
+        }
+
+        $trimmed = trim($path, '/');
+        if ($trimmed === '') {
+            return true;
+        }
+        foreach (explode('/', $trimmed) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Is $path (before `?`) the REST prefix, or under it, once the home path
+     * is taken off the front, as WP::parse_request reads it?
+     */
+    private static function startsWithRestPrefix(string $path, string $homePath, string $prefix): bool
+    {
+        $path = trim($path, '/');
 
         $home = trim($homePath, '/');
         if ($home !== '') {
