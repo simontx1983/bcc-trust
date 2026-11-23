@@ -42,6 +42,7 @@ use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Http\SafeHttpClient;
 use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoBlockRepository;
+use BCC\Trust\Core\Repositories\NotificationRepository;
 use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Support\NotificationPrefs;
 use BCC\Trust\Core\Support\PushMetrics;
@@ -139,6 +140,12 @@ final class PushDispatcher
      * The bell is unaffected: PeepSo applies blocks to it on its own path.
      * System events (no actor) pass 0.
      *
+     * F-516: `notification_id` in the payload is the bell row this event
+     * wrote; anything but a positive int means none (0 nothing owed, -1 a
+     * failed write, absent no bell). It is not part of the body's wording; it is
+     * kept beside the actor's events, and the push sent at flush lists the
+     * ids of the actors still counted, so opening it can mark them read.
+     *
      * @param array<string, mixed> $payload Free-form metadata for body
      *   rendering. Keys consumed by PushPayload: actor_handle, page_id,
      *   page_name, dispute_id, outcome.
@@ -176,6 +183,10 @@ final class PushDispatcher
             }
         }
 
+        $bellId = isset($payload['notification_id']) && is_int($payload['notification_id']) ? $payload['notification_id'] : 0;
+        unset($payload['notification_id']);
+        $ids = $bellId > 0 ? [$bellId] : [];
+
         $key      = self::queueKey($recipientId, $eventType);
         $existing = get_transient($key);
 
@@ -190,7 +201,7 @@ final class PushDispatcher
                     'first_payload' => $payload,
                     'first_at'      => time(),
                     // F-189: who contributed, so flush() can re-check blocks.
-                    'actors'        => [$actorId => ['n' => 1, 'payload' => $payload]],
+                    'actors'        => [$actorId => ['n' => 1, 'payload' => $payload, 'ids' => $ids]],
                 ],
                 self::DEBOUNCE_SECS + self::LATE_FLUSH_GRACE
             );
@@ -206,10 +217,17 @@ final class PushDispatcher
         // Subsequent event in the same window — accumulate. The
         // already-scheduled flush will pick this up.
         $actors = isset($existing['actors']) && is_array($existing['actors']) ? $existing['actors'] : [];
+        if (self::idCount($actors) >= self::MAX_NOTIFICATION_IDS) {
+            // F-516: the push lists at most as many ids as mark-read takes;
+            // an event past that is still counted, its bell stays unread.
+            $ids = [];
+        }
         if (isset($actors[$actorId]) && is_array($actors[$actorId])) {
             $actors[$actorId]['n'] = (int) ($actors[$actorId]['n'] ?? 0) + 1;
+            $known = isset($actors[$actorId]['ids']) && is_array($actors[$actorId]['ids']) ? $actors[$actorId]['ids'] : [];
+            $actors[$actorId]['ids'] = array_merge($known, $ids);
         } elseif (count($actors) < self::MAX_TRACKED_ACTORS) {
-            $actors[$actorId] = ['n' => 1, 'payload' => $payload];
+            $actors[$actorId] = ['n' => 1, 'payload' => $payload, 'ids' => $ids];
         } else {
             // F-189: an actor beyond the cap could not be re-checked for a
             // block at flush, so their event is not counted (fail closed).
@@ -245,6 +263,25 @@ final class PushDispatcher
     /** F-189: distinct actors one debounce window tracks for the flush-time block re-check. */
     private const MAX_TRACKED_ACTORS = 50;
 
+    /** F-516: bell ids one push lists, as many as one mark-read call takes. */
+    private const MAX_NOTIFICATION_IDS = NotificationRepository::MARK_READ_MANY_MAX;
+
+    /**
+     * Bell ids a queued window already holds, across all its actors.
+     *
+     * @param array<int|string, mixed> $actors
+     */
+    private static function idCount(array $actors): int
+    {
+        $n = 0;
+        foreach ($actors as $entry) {
+            if (is_array($entry) && isset($entry['ids']) && is_array($entry['ids'])) {
+                $n += count($entry['ids']);
+            }
+        }
+        return $n;
+    }
+
     /**
      * F-189: re-check, at send time, every actor counted into a queued push.
      * A block created AFTER an event was queued must still stop it: the
@@ -255,15 +292,17 @@ final class PushDispatcher
      * be read (fail closed, as F-99; the probe has no cache, so a failed
      * read is never remembered), is removed with all of their events. The
      * push names the first actor who remains. System events (actor 0) are
-     * never looked up.
+     * never looked up. F-516: `ids` are the bell ids of the actors who
+     * remain, never of one who was removed.
      *
      * @param array<int|string, mixed> $actors the queue's 'actors' map
-     * @return array{count: int, first_payload: array<string, mixed>}
+     * @return array{count: int, first_payload: array<string, mixed>, ids: list<int>}
      */
     private function survivingEvents(int $recipientId, string $eventType, array $actors): array
     {
         $count        = 0;
         $firstPayload = null;
+        $ids          = [];
         foreach ($actors as $actorKey => $entry) {
             $actorId = (int) $actorKey;
             $n       = is_array($entry) ? (int) ($entry['n'] ?? 0) : 0;
@@ -286,8 +325,17 @@ final class PushDispatcher
             if ($firstPayload === null) {
                 $firstPayload = is_array($entry['payload'] ?? null) ? $entry['payload'] : [];
             }
+            foreach (is_array($entry['ids'] ?? null) ? $entry['ids'] : [] as $id) {
+                if (is_int($id) && $id > 0) {
+                    $ids[$id] = $id;
+                }
+            }
         }
-        return ['count' => $count, 'first_payload' => $firstPayload ?? []];
+        return [
+            'count'         => $count,
+            'first_payload' => $firstPayload ?? [],
+            'ids'           => array_slice(array_values($ids), 0, self::MAX_NOTIFICATION_IDS),
+        ];
     }
 
     /**
@@ -315,11 +363,13 @@ final class PushDispatcher
         if (!is_array($data)) {
             return;
         }
+        $ids = [];
         if (isset($data['actors']) && is_array($data['actors'])) {
             // F-189: only the events of actors still unblocked are sent.
             $surviving    = $this->survivingEvents($recipientId, $eventType, $data['actors']);
             $count        = $surviving['count'];
             $firstPayload = $surviving['first_payload'];
+            $ids          = $surviving['ids'];
         } else {
             // A window queued before F-189 (no actor list): sent as queued.
             // Its events already passed F-74's enqueue-time check.
@@ -336,6 +386,12 @@ final class PushDispatcher
         }
 
         $body = self::buildBody($eventType, $count, $firstPayload);
+        if ($ids !== []) {
+            // F-516: the bell rows this push stands for. The page the push
+            // opens marks them read (POST /me/notifications/mark-read `ids`);
+            // the service worker holds no credentials to do it itself.
+            $body['notification_ids'] = $ids;
+        }
         $this->sendToSubscriptions($subs, $body, $eventType);
     }
 

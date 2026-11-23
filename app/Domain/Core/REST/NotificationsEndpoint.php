@@ -28,6 +28,7 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\NotificationRepository;
 use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
@@ -93,6 +94,11 @@ final class NotificationsEndpoint
                         'required'          => false,
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
+                    ],
+                    // F-516: the ids a push carried. Validated in markRead()
+                    // (1 to MARK_READ_MANY_MAX positive integers).
+                    'ids' => [
+                        'required' => false,
                     ],
                 ],
             ]
@@ -174,13 +180,30 @@ final class NotificationsEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
         }
 
-        $id = (int) $request->get_param('id');
         $repo = Plugin::instance()->notificationRepository();
 
-        if ($id > 0) {
-            $updated = $repo->markRead($viewerId, $id) ? 1 : 0;
+        // F-516: `ids` (the ids a push carried) marks exactly those of the
+        // viewer's own rows. It is validated before anything is written,
+        // and an EMPTY list is refused: falling through to "mark all"
+        // would turn a client bug into marking every notification read.
+        $rawIds = $request->get_param('ids');
+        if ($rawIds !== null) {
+            $ids = self::parseIds($rawIds);
+            if ($ids === null) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    sprintf('`ids` must list 1 to %d notification ids.', NotificationRepository::MARK_READ_MANY_MAX),
+                    400
+                );
+            }
+            $updated = $repo->markReadMany($viewerId, $ids);
         } else {
-            $updated = $repo->markAllReadForUser($viewerId);
+            $id = (int) $request->get_param('id');
+            if ($id > 0) {
+                $updated = $repo->markRead($viewerId, $id) ? 1 : 0;
+            } else {
+                $updated = $repo->markAllReadForUser($viewerId);
+            }
         }
 
         // Invalidate the viewer's badge cache so the bell badge
@@ -192,5 +215,35 @@ final class NotificationsEndpoint
         $response = ApiResponse::ok(['ok' => true, 'updated' => $updated]);
         $response->header('Cache-Control', 'no-store');
         return $response;
+    }
+
+    /**
+     * F-516: `ids` as 1 to MARK_READ_MANY_MAX positive integers (JSON
+     * numbers, or digit strings as a form post sends them), duplicates
+     * dropped. Null for anything else, including an empty list.
+     *
+     * @param mixed $raw
+     * @return list<int>|null
+     */
+    private static function parseIds($raw): ?array
+    {
+        if (!is_array($raw) || $raw === [] || count($raw) > NotificationRepository::MARK_READ_MANY_MAX) {
+            return null;
+        }
+        $ids = [];
+        foreach ($raw as $value) {
+            if (is_int($value)) {
+                $id = $value;
+            } elseif (is_string($value) && preg_match('/^[1-9][0-9]{0,18}$/', $value) === 1) {
+                $id = (int) $value;
+            } else {
+                return null;
+            }
+            if ($id <= 0) {
+                return null;
+            }
+            $ids[$id] = $id;
+        }
+        return array_values($ids);
     }
 }
