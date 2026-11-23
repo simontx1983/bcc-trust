@@ -39,6 +39,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
 use BCC\Trust\Onchain\Services\DelegatorGroupView;
+use BCC\Trust\Onchain\Services\ValidatorClaimSupport;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
@@ -509,7 +510,7 @@ final class CardViewService
                 // F-301: whether THIS viewer may claim the page. The claim
                 // CTA rendered on claim_target alone, so a suspended member
                 // was offered a claim the write always refuses (F-109).
-                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget !== null),
+                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget),
             ],
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
@@ -1480,8 +1481,14 @@ final class CardViewService
      * "first" is deterministic where the old LIMIT 1 was arbitrary
      * on multi-chain pages (benign tightening).
      *
+     * F-515: it also says whether the page CAN be claimed, and if not why
+     * (`claimable`, `unclaimable_reason_code`, `unclaimable_hint`), from
+     * {@see ValidatorClaimSupport}, the rule POST /pages/:id/claim refuses
+     * by. The block stays non-null for an unclaimable page, so the card can
+     * say why.
+     *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
-     * @return array{entity_type: string, entity_id: int, chain_slug: string}|null
+     * @return array{entity_type: string, entity_id: int, chain_slug: string, claimable: bool, unclaimable_reason_code: string|null, unclaimable_hint: string|null}|null
      */
     private static function resolveClaimTarget(string $kind, int $pageId, bool $isClaimed, ?array $validatorRows = null): ?array
     {
@@ -1494,10 +1501,19 @@ final class CardViewService
         if ($row === null) {
             return null;
         }
+        $support = ValidatorClaimSupport::assess(
+            (string) $row->chain_type,
+            (string) $row->chain_slug,
+            (string) $row->chain_name,
+            (string) $row->operator_address
+        );
         return [
-            'entity_type' => 'validator',
-            'entity_id'   => (int) $row->validator_id,
-            'chain_slug'  => (string) $row->chain_slug,
+            'entity_type'             => 'validator',
+            'entity_id'               => (int) $row->validator_id,
+            'chain_slug'              => (string) $row->chain_slug,
+            'claimable'               => $support['claimable'],
+            'unclaimable_reason_code' => $support['reason_code'],
+            'unclaimable_hint'        => $support['hint'],
         ];
     }
 
@@ -2356,12 +2372,21 @@ final class CardViewService
      * An UNKNOWN suspension state (null) is allowed: display only, the
      * write gate fails closed on its own.
      *
+     * F-515: a page that cannot be claimed at all (`claim_target.claimable`
+     * false) answers `not_claimable` with the same hint, checked FIRST: it
+     * is a fact about the page, whoever is asking, and the write refuses it
+     * the same way.
+     *
+     * @param array{claimable: bool, unclaimable_hint: string|null}|null $claimTarget
      * @return Permission
      */
-    private static function resolveCanClaim(int $viewerId, bool $hasClaimTarget): array
+    private static function resolveCanClaim(int $viewerId, ?array $claimTarget): array
     {
-        if (!$hasClaimTarget) {
+        if ($claimTarget === null) {
             return self::deny(null, 'not_applicable');
+        }
+        if (!$claimTarget['claimable']) {
+            return self::deny($claimTarget['unclaimable_hint'], 'not_claimable');
         }
         if ($viewerId <= 0) {
             return self::deny('Sign in to claim this page.', 'signin_required');
