@@ -85,6 +85,30 @@ class ClaimRepository {
      */
     private static array $ambiguousAudited = [];
 
+    /**
+     * D1: the `claim_role IN (...)` condition every role-scoped reader
+     * adds. Roles must be ones PageClaimRolePolicy knows; anything else is
+     * a programming error and throws rather than reading the wrong rows.
+     *
+     * @param list<string> $roles non-empty
+     * @return array{0: string, 1: list<string>} the SQL fragment and its args
+     */
+    private static function roleCondition(string $column, array $roles): array
+    {
+        $known = array_merge(
+            \BCC\Trust\Onchain\Services\PageClaimRolePolicy::ENTITY_CLAIM_ROLES,
+            \BCC\Trust\Onchain\Services\PageClaimRolePolicy::TEAM_ROLES
+        );
+        foreach ($roles as $role) {
+            if (!in_array($role, $known, true)) {
+                throw new \InvalidArgumentException('Unknown claim role: ' . $role);
+            }
+        }
+        $roles = array_values(array_unique($roles));
+
+        return [$column . ' IN (' . implode(',', array_fill(0, count($roles), '%s')) . ')', $roles];
+    }
+
     public static function table(): string {
         return \BCC\Core\DB\DB::table('onchain_claims');
     }
@@ -249,19 +273,28 @@ class ClaimRepository {
     }
 
     /**
-     * Get all verified claims for an entity.
+     * Get all verified claims for an entity in the given roles.
+     *
+     * D1: the caller names the roles it reads, from PageClaimRolePolicy
+     * (OWNER_ROLES for "is this page claimed", ENTITY_CLAIM_ROLES for an
+     * entity row), so a page TEAM row is never read as an owner.
      *
      * Wallet addresses are NOT included by default to prevent data leaks.
      * Pass $includeWalletAddress = true only when the caller needs it
      * (e.g. admin views).
      *
+     * @param list<string> $roles
      * @return list<ClaimPublic> Array of claim objects with user display_name.
      */
-    public static function getForEntity(string $entityType, int $entityId, bool $includeWalletAddress = false): array {
+    public static function getForEntity(string $entityType, int $entityId, array $roles, bool $includeWalletAddress = false): array {
+        if ($roles === []) {
+            return [];
+        }
         global $wpdb;
         $table = self::table();
 
         $walletCol = $includeWalletAddress ? ', cl.wallet_address' : '';
+        [$roleSql, $roleArgs] = self::roleCondition('cl.claim_role', $roles);
 
         /** @var list<ClaimPublic>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -271,10 +304,12 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id = %d AND cl.status = 'verified'
+               AND {$roleSql}
              ORDER BY cl.verified_at ASC
              LIMIT 100",
             $entityType,
-            $entityId
+            $entityId,
+            ...$roleArgs
         ));
 
         return $rows ?: [];
@@ -320,19 +355,26 @@ class ClaimRepository {
     }
 
     /**
-     * Get a user's claim on a specific entity (if any).
+     * Get a user's claim on a specific entity (if any) in the given roles.
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
      *
+     * @param list<string> $roles
      * @return ClaimRow|null
      */
-    public static function getUserClaim(int $userId, string $entityType, int $entityId): ?object {
+    public static function getUserClaim(int $userId, string $entityType, int $entityId, array $roles): ?object {
+        if ($roles === []) {
+            return null;
+        }
         global $wpdb;
         $table = self::table();
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', $roles);
 
         /** @var ClaimRow|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
-             WHERE user_id = %d AND entity_type = %s AND entity_id = %d",
-            $userId, $entityType, $entityId
+             WHERE user_id = %d AND entity_type = %s AND entity_id = %d
+               AND {$roleSql}",
+            $userId, $entityType, $entityId, ...$roleArgs
         ));
     }
 
@@ -349,27 +391,32 @@ class ClaimRepository {
      * Bounded: caller-paginated IN-list (cards per_page ≤ 50); LIMIT
      * is belt-and-suspenders.
      *
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
+     *
      * @param int[] $entityIds
+     * @param list<string> $roles
      * @return array<int, object> entity_id => claim row.
      * @phpstan-return array<int, ClaimRow>
      */
-    public static function getUserClaimsForEntities(int $userId, string $entityType, array $entityIds): array {
-        if ($userId <= 0 || empty($entityIds)) {
+    public static function getUserClaimsForEntities(int $userId, string $entityType, array $entityIds, array $roles): array {
+        if ($userId <= 0 || empty($entityIds) || $roles === []) {
             return [];
         }
 
         global $wpdb;
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', $roles);
 
         /** @var list<ClaimRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE user_id = %d AND entity_type = %s AND entity_id IN ({$ph})
+               AND {$roleSql}
              LIMIT 500",
             $userId,
             $entityType,
-            ...$entityIds
+            ...[...$entityIds, ...$roleArgs]
         ));
 
         $map = [];
@@ -723,17 +770,21 @@ class ClaimRepository {
      *                           (page claims back the card-level
      *                           is_claimed flag; see CardViewService /
      *                           PageCardPrefetcher).
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
+     *
      * @param int[]  $entityIds
+     * @param list<string> $roles
      * @return array<int, list<ClaimWithClaimer>> entity_id => array of claim objects
      */
-    public static function getForEntityBatch(string $entityType, array $entityIds): array {
-        if (empty($entityIds)) {
+    public static function getForEntityBatch(string $entityType, array $entityIds, array $roles): array {
+        if (empty($entityIds) || $roles === []) {
             return [];
         }
 
         global $wpdb;
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+        [$roleSql, $roleArgs] = self::roleCondition('cl.claim_role', $roles);
 
         /** @var list<ClaimWithClaimer>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -743,10 +794,11 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id IN ({$ph}) AND cl.status = 'verified'
+               AND {$roleSql}
              ORDER BY cl.verified_at ASC
              LIMIT 500",
             $entityType,
-            ...$entityIds
+            ...[...$entityIds, ...$roleArgs]
         ));
 
         $map = [];

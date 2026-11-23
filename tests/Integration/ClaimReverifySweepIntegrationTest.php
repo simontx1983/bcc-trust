@@ -178,7 +178,7 @@ final class ClaimReverifySweepIntegrationTest extends TestCase
             [$unverif, 'wallet_link_gone'],
             [$noRow, 'validator_row_gone'],
         ], $mine, 'the kept claim is absent; the others are definite');
-        self::assertSame('verified', ClaimRepository::getUserClaim(self::USER, 'validator', (int) ClaimRepository::findManyByIds([$keep])[$keep]->entity_id)?->status);
+        self::assertSame('verified', ClaimRepository::getUserClaim(self::USER, 'validator', (int) ClaimRepository::findManyByIds([$keep])[$keep]->entity_id, \BCC\Trust\Onchain\Services\PageClaimRolePolicy::ENTITY_CLAIM_ROLES)?->status);
     }
 }
 

@@ -46,6 +46,7 @@ use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedUnavailable;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Services\ClaimService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use WP_REST_Request;
@@ -448,7 +449,7 @@ final class PagesEndpoint
         // If the user already has a verified claim, return 200 with
         // status="already_verified" so the frontend doesn't have to
         // distinguish from a fresh success.
-        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($existing !== null && (string) $existing->status === 'verified') {
             $role = (string) $existing->claim_role;
 
@@ -532,7 +533,7 @@ final class PagesEndpoint
         // its trust-scoring event) is already in place — log and
         // continue rather than rolling back.
         $role       = (string) ($result['role'] ?? 'operator');
-        $underlying = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $underlying = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($underlying !== null) {
             $mirror = ClaimRepository::createExclusiveClaim(
                 $userId,

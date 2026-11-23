@@ -551,6 +551,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\NftSelectionService' => $baseDir . '/app/Domain/Onchain/Services/NftSelectionService.php',
     'BCC\\Trust\\Onchain\\Services\\NftSpamFilter' => $baseDir . '/app/Domain/Onchain/Services/NftSpamFilter.php',
     'BCC\\Trust\\Onchain\\Services\\OnchainDataReadService' => $baseDir . '/app/Domain/Onchain/Services/OnchainDataReadService.php',
+    'BCC\\Trust\\Onchain\\Services\\PageClaimRolePolicy' => $baseDir . '/app/Domain/Onchain/Services/PageClaimRolePolicy.php',
     'BCC\\Trust\\Onchain\\Services\\PieceBuilderException' => $baseDir . '/app/Domain/Onchain/Services/PieceBuilderException.php',
     'BCC\\Trust\\Onchain\\Services\\SignalFetcher' => $baseDir . '/app/Domain/Onchain/Services/SignalFetcher.php',
     'BCC\\Trust\\Onchain\\Services\\SignalRefreshService' => $baseDir . '/app/Domain/Onchain/Services/SignalRefreshService.php',

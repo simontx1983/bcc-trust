@@ -200,7 +200,8 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(ClaimRepository::class, false)) {
         final class ClaimRepository
         {
-            public static function getUserClaim(int $userId, string $entityType, int $entityId): ?object
+            /** @param list<string> $roles */
+            public static function getUserClaim(int $userId, string $entityType, int $entityId, array $roles = []): ?object
             {
                 $key = $entityType . '|' . $entityId . '|' . $userId;
 
