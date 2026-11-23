@@ -56,7 +56,20 @@ if (!defined('ABSPATH')) {
  *      links to these.
  *   6. Every other 404 a signed-out visitor would get is the same bare 404:
  *      no themed page is rendered for them. A signed-in admin still gets
- *      the themed page.
+ *      the themed page. Checked twice:
+ *      - at `template_redirect` priority 1, before `redirect_canonical`
+ *        (10) can guess a permalink for it;
+ *      - at `404_template`, the last word. Every path to the theme's 404
+ *        page asks get_404_template() first: core's template loader,
+ *        including a 404 set later during `template_redirect` (core's
+ *        sitemap handler sets one at 10 while sitemaps are off), and any
+ *        plugin that renders the 404 page itself.
+ *   7. A page built from a PeepSo shortcode (activity, profile, members,
+ *      groups, messages, register, recover, reset, …) sends every non-admin
+ *      to the app's front page with a 302. This runs on `wp` at -1000,
+ *      before PeepSo's own `wp` handler (-1, PeepSo::check_query) can act
+ *      on the request. The app is on another host; if home ever pointed
+ *      back at this host, the answer is a bare 403 instead of a loop.
  */
 final class WordPressFrontEndGate
 {
@@ -66,6 +79,9 @@ final class WordPressFrontEndGate
     /** The X-Redirect-By header, so a curl shows who answered. */
     public const REDIRECT_BY = 'BCC';
 
+    /** `wp`, before PeepSo's own handler there (-1). */
+    public const PEEPSO_PAGE_PRIORITY = -1000;
+
     public static function register(): void
     {
         add_action('template_redirect', [self::class, 'sendFeedsToTheApp'], self::REDIRECT_PRIORITY);
@@ -73,6 +89,8 @@ final class WordPressFrontEndGate
         add_action('template_redirect', [self::class, 'bareNotFoundWhenSignedOut'], self::REDIRECT_PRIORITY);
         add_filter('the_generator', [self::class, 'noGenerator'], PHP_INT_MAX, 2);
         add_filter('wp_sitemaps_enabled', [self::class, 'noSitemaps'], PHP_INT_MAX);
+        add_filter('404_template', [self::class, 'bareNotFoundTemplate'], PHP_INT_MAX);
+        add_action('wp', [self::class, 'sendPeepSoPagesToTheApp'], self::PEEPSO_PAGE_PRIORITY);
 
         // Core hooks these in default-filters.php, which runs before any
         // plugin loads, so they are there to remove now.
@@ -160,6 +178,52 @@ final class WordPressFrontEndGate
         }
 
         self::bareNotFound();
+    }
+
+    /**
+     * `404_template`, last: the theme's 404 page is never rendered for a
+     * signed-out visitor, whoever asked for it. A signed-in visitor gets the
+     * template unchanged.
+     *
+     * @param mixed $template
+     * @return mixed
+     */
+    public static function bareNotFoundTemplate($template = '')
+    {
+        if (is_user_logged_in()) {
+            return $template;
+        }
+
+        self::bareNotFound();
+    }
+
+    /**
+     * `wp`, first: a page built from a PeepSo shortcode sends a non-admin to
+     * the app's front page (302), or answers a bare 403 if home is this same
+     * host.
+     */
+    public static function sendPeepSoPagesToTheApp(): void
+    {
+        $userId = get_current_user_id();
+        if (($userId > 0 && user_can($userId, WordPressSignInGate::CAPABILITY)) || !is_singular('page')) {
+            return;
+        }
+        $post = get_queried_object();
+        if (!$post instanceof \WP_Post || preg_match('/\[peepso_/i', (string) $post->post_content) !== 1) {
+            return;
+        }
+
+        $target     = home_url('/');
+        $targetHost = strtolower((string) parse_url($target, PHP_URL_HOST));
+        $thisHost   = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+        if ($targetHost === '' || $targetHost === $thisHost) {
+            nocache_headers();
+            status_header(403);
+            exit;
+        }
+
+        wp_safe_redirect($target, 302, self::REDIRECT_BY);
+        exit;
     }
 
     /** A bare 404: no-cache headers, no body, no handler after it. */

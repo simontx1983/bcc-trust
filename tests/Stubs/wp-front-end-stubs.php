@@ -52,6 +52,31 @@ namespace {
         }
     }
 
+    // 'singular_page' answers is_singular('page'); 'queried' answers
+    // get_queried_object().
+    if (!function_exists('is_singular')) {
+        /** @param mixed $postTypes */
+        function is_singular($postTypes = ''): bool
+        {
+            return $postTypes === 'page' && (bool) ($GLOBALS['__bcc_sig']['singular_page'] ?? false);
+        }
+    }
+
+    if (!function_exists('get_queried_object')) {
+        /** @return mixed */
+        function get_queried_object()
+        {
+            return $GLOBALS['__bcc_sig']['queried'] ?? null;
+        }
+    }
+
+    if (!class_exists('WP_Post', false)) {
+        final class WP_Post
+        {
+            public string $post_content = '';
+        }
+    }
+
     if (!function_exists('remove_action')) {
         /** @param mixed $callback */
         function remove_action(string $hook, $callback, int $priority = 10): bool

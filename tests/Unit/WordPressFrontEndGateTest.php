@@ -49,6 +49,8 @@ final class WordPressFrontEndGateTest extends TestCase
                 ['template_redirect', [WordPressFrontEndGate::class, 'bareNotFoundWhenSignedOut'], 1, 1],
                 ['the_generator', [WordPressFrontEndGate::class, 'noGenerator'], PHP_INT_MAX, 2],
                 ['wp_sitemaps_enabled', [WordPressFrontEndGate::class, 'noSitemaps'], PHP_INT_MAX, 1],
+                ['404_template', [WordPressFrontEndGate::class, 'bareNotFoundTemplate'], PHP_INT_MAX, 1],
+                ['wp', [WordPressFrontEndGate::class, 'sendPeepSoPagesToTheApp'], -1000, 1],
             ],
             $GLOBALS['__bcc_sig']['hooks']
         );
@@ -365,5 +367,245 @@ final class WordPressFrontEndGateTest extends TestCase
         }
 
         self::assertSame('', $value);
+    }
+
+    // ── No themed 404 for a signed-out visitor, whoever asks for it ───────
+
+    /**
+     * A request served the way core orders it (wp-includes/template-loader.php
+     * and default-filters.php, 7.0.2):
+     *   1. `template_redirect` callbacks by priority: the gate's at 1, then
+     *      redirect_canonical and core's sitemap handler at 10. With sitemaps
+     *      off, the sitemap handler marks a sitemap request a 404 there.
+     *   2. The template loader: a 404 asks get_404_template(), which runs the
+     *      `404_template` filters, and the theme renders what it returns.
+     *
+     * @return list<string>
+     */
+    private static function serveThroughTheLoader(bool $sitemapRequest): array
+    {
+        $trace     = [];
+        $callbacks = [
+            [static function () use (&$trace): void { $trace[] = 'redirect_canonical'; }, 10],
+            [static function () use (&$trace, $sitemapRequest): void {
+                if ($sitemapRequest) {
+                    $GLOBALS['__bcc_sig']['404'] = true; // WP_Sitemaps::render_sitemaps(), sitemaps off
+                    $trace[] = 'sitemap handler: 404';
+                }
+            }, 10],
+        ];
+        foreach ($GLOBALS['__bcc_sig']['hooks'] as [$hook, $callback, $priority]) {
+            if ($hook === 'template_redirect') {
+                $callbacks[] = [$callback, $priority];
+            }
+        }
+        usort($callbacks, static fn(array $a, array $b): int => $a[1] <=> $b[1]);
+
+        try {
+            foreach ($callbacks as [$callback]) {
+                $callback();
+            }
+            if ((bool) ($GLOBALS['__bcc_sig']['404'] ?? false)) {
+                $trace[] = 'themed 404: ' . self::the404Template();
+                return $trace;
+            }
+        } catch (\SignInGateHalt) {
+            $trace[] = 'bare';
+            return $trace;
+        }
+        $trace[] = 'page served';
+
+        return $trace;
+    }
+
+    /** get_404_template(): the theme's template through the recorded `404_template` filters, by priority. */
+    private static function the404Template(): string
+    {
+        $filters = [[static fn($t) => $t, 10]]; // a theme or plugin filter that changes nothing
+        foreach ($GLOBALS['__bcc_sig']['hooks'] as [$hook, $callback, $priority]) {
+            if ($hook === '404_template') {
+                $filters[] = [$callback, $priority];
+            }
+        }
+        usort($filters, static fn(array $a, array $b): int => $a[1] <=> $b[1]);
+        $template = '/themes/twentytwentyfive/templates/404.html';
+        foreach ($filters as [$callback]) {
+            $template = $callback($template);
+        }
+
+        return (string) $template;
+    }
+
+    /**
+     * /wp-sitemap.xml signed out: core marks it a 404 at template_redirect
+     * 10, AFTER the gate's check at 1 (which therefore sees no 404). The
+     * loader then asks for the 404 template, and that answer is bare.
+     */
+    public function testASitemapRequestThatCoreMarks404LaterIsStillBare(): void
+    {
+        WordPressFrontEndGate::register();
+
+        ob_start();
+        $trace = self::serveThroughTheLoader(true);
+        $body  = (string) ob_get_clean();
+
+        self::assertSame(['redirect_canonical', 'sitemap handler: 404', 'bare'], $trace, 'the check at 1 saw no 404; the template asked last did');
+        self::assertSame(404, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
+        self::assertSame('', $body);
+        self::assertLessThan(10, WordPressFrontEndGate::REDIRECT_PRIORITY, "pinned: the first check runs before core's handlers at 10, so a later 404 needs the second");
+    }
+
+    public function testASignedInVisitorStillGetsTheThemedSitemap404(): void
+    {
+        WordPressFrontEndGate::register();
+        $GLOBALS['__bcc_sig']['logged_in'] = true;
+
+        self::assertSame(
+            ['redirect_canonical', 'sitemap handler: 404', 'themed 404: /themes/twentytwentyfive/templates/404.html'],
+            self::serveThroughTheLoader(true)
+        );
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /**
+     * A plugin that renders the 404 page itself, before `template_redirect`
+     * (it calls get_404_template() and includes the result): signed out,
+     * that is bare too.
+     */
+    public function testAPluginRenderingThe404PageItselfGetsTheBareAnswer(): void
+    {
+        WordPressFrontEndGate::register();
+
+        try {
+            self::the404Template();
+            self::fail('the theme template must not come back for a signed-out visitor');
+        } catch (\SignInGateHalt) {
+            // bare
+        }
+        self::assertSame(404, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
+    }
+
+    public function testTheTemplateFilterHandsASignedInVisitorTheTemplateUnchanged(): void
+    {
+        $GLOBALS['__bcc_sig']['logged_in'] = true;
+
+        self::assertSame('/x/404.php', WordPressFrontEndGate::bareNotFoundTemplate('/x/404.php'));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testAnExistingPageNeverReachesTheTemplateFilter(): void
+    {
+        WordPressFrontEndGate::register();
+
+        self::assertSame(['redirect_canonical', 'page served'], self::serveThroughTheLoader(false));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    // ── PeepSo's own pages send non-admins to the app ─────────────────────
+
+    /** A singular page with this content, requested at this host by this user (0 = signed out). */
+    private static function peepsoPage(string $content, string $host = 'cms.bcc-origin.test', int $user = 0, bool $isPage = true): void
+    {
+        $post               = new \WP_Post();
+        $post->post_content = $content;
+        $GLOBALS['__bcc_sig']['queried']       = $post;
+        $GLOBALS['__bcc_sig']['singular_page'] = $isPage;
+        $GLOBALS['__bcc_sig']['current']       = $user;
+        $_SERVER['HTTP_HOST']                  = $host;
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function peepsoPages(): iterable
+    {
+        yield 'profile'          => ['[peepso_profile]'];
+        yield 'activity, inline' => ['<p>Intro</p>[peepso_activity]'];
+        yield 'register'         => ['[peepso_register]'];
+        yield 'any case'         => ['[PeepSo_Members]'];
+    }
+
+    #[DataProvider('peepsoPages')]
+    public function testAPeepSoPageSendsANonAdminToTheApp(string $content): void
+    {
+        self::peepsoPage($content);
+
+        try {
+            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            self::fail('redirected');
+        } catch (\SignInGateHalt) {
+        }
+
+        self::assertSame(['https://cms.example.test/', 302], $GLOBALS['__bcc_sig']['redirect']);
+        self::assertSame('BCC', $GLOBALS['__bcc_sig']['redirect_by']);
+    }
+
+    public function testASignedInMemberIsSentToo(): void
+    {
+        self::peepsoPage('[peepso_profile]', 'cms.bcc-origin.test', 7);
+
+        try {
+            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            self::fail('redirected');
+        } catch (\SignInGateHalt) {
+        }
+
+        self::assertSame(302, $GLOBALS['__bcc_sig']['redirect'][1] ?? null);
+    }
+
+    public function testAnAdminKeepsPeepSosPages(): void
+    {
+        self::peepsoPage('[peepso_profile]', 'cms.bcc-origin.test', 1); // 'admins' => [1]
+
+        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /** @return iterable<string, array{0: string, 1: bool}> */
+    public static function notPeepSoPages(): iterable
+    {
+        yield 'a page without a PeepSo shortcode' => ['[gallery ids="1,2"] Hello', true];
+        yield 'a post with one (not a page)'      => ['[peepso_profile]', false];
+        yield "a word, not a shortcode"           => ['We use peepso_profile here', true];
+    }
+
+    #[DataProvider('notPeepSoPages')]
+    public function testAnythingElseIsNotRedirected(string $content, bool $isPage): void
+    {
+        self::peepsoPage($content, 'cms.bcc-origin.test', 0, $isPage);
+
+        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testNoQueriedPostIsNotRedirected(): void
+    {
+        $GLOBALS['__bcc_sig']['singular_page'] = true;
+        $GLOBALS['__bcc_sig']['queried']       = (object) ['post_content' => '[peepso_profile]'];
+
+        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+    }
+
+    /** Home on this same host would loop: a bare 403 instead. */
+    #[DataProvider('peepsoPages')]
+    public function testHomeOnThisHostAnswersABare403(string $content): void
+    {
+        self::peepsoPage($content, 'CMS.Example.Test');
+
+        try {
+            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            self::fail('refused');
+        } catch (\SignInGateHalt) {
+        }
+
+        self::assertSame(403, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
     }
 }
