@@ -331,7 +331,12 @@ class DisputeVoteService
 
         // Trust Neutral+ — the same canonical tier read the capability
         // gate uses (reputation tier + config tier ordering).
+        // F-469: a tier that could not be read is unavailable, never the
+        // neutral default.
         $tier = $this->tierOf($voterId);
+        if ($tier === null) {
+            throw $this->unavailable();
+        }
         if ($this->config->tierOrdFor($tier) < $this->config->tierOrdFor('neutral')) {
             throw $this->forbidden('tier_required', 'Reach Neutral standing to vote on disputes.');
         }
@@ -352,7 +357,12 @@ class DisputeVoteService
 
         // §16.6 snapshot + fraud hard-block (FraudDiscountCalculator via
         // the same input assembly VoteService feeds calculate()).
-        $snapshot = $this->weightSnapshot($voterId);
+        try {
+            $snapshot = $this->weightSnapshot($voterId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            // F-469: the weight depends on the voter's reputation row.
+            throw $this->unavailable();
+        }
         if ($snapshot['fraud_discount'] <= 0.0) {
             throw $this->forbidden('fraud_blocked', 'Voting is temporarily unavailable for this account.');
         }
@@ -521,6 +531,16 @@ class DisputeVoteService
         return new DisputeVoteException(DisputeVoteException::KIND_FORBIDDEN, $reason, $message);
     }
 
+    /** F-469: the voter's standing could not be read; retryable (503). */
+    private function unavailable(): DisputeVoteException
+    {
+        return new DisputeVoteException(
+            DisputeVoteException::KIND_UNAVAILABLE,
+            'standing_unavailable',
+            'We could not check your standing right now. Please try again.'
+        );
+    }
+
     // ── delegate seams (overridden by unit tests) ────────────────────
 
     protected function getDispute(int $disputeId): ?DisputeCoreDTO
@@ -534,9 +554,10 @@ class DisputeVoteService
         return \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($userId);
     }
 
-    protected function tierOf(int $userId): string
+    /** F-469: null when the tier could not be read (the gate answers unavailable). */
+    protected function tierOf(int $userId): ?string
     {
-        return \BCC\Trust\Core\Plugin::instance()->reputationRepository()->getTier($userId);
+        return \BCC\Trust\Core\Plugin::instance()->reputationRepository()->getTierOrUnknown($userId);
     }
 
     protected function notSuspended(int $userId): bool

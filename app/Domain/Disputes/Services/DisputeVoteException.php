@@ -40,6 +40,9 @@ final class DisputeVoteException extends \RuntimeException
     /** Withdraw with no active ballot. */
     public const KIND_NO_BALLOT = 'no_ballot';
 
+    /** F-469: a check the vote depends on (the voter's standing) could not run (503). */
+    public const KIND_UNAVAILABLE = 'unavailable';
+
     public function __construct(
         public readonly string $kind,
         public readonly string $reason,

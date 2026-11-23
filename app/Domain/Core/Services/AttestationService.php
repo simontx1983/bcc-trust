@@ -313,7 +313,17 @@ final class AttestationService
         // names the threshold without explaining the math (per §J.4.1
         // synthesis invisibility + §J.7 heuristic #2 "no synthesis
         // mechanics in copy").
-        $viewerTier = $this->reputationRepo->getTier($viewerUserId);
+        // F-469: a standing that could not be read allows nothing. It is
+        // not presented as "below Neutral" either: the hint says so.
+        $viewerTier = $this->reputationRepo->getTierOrUnknown($viewerUserId);
+        if ($viewerTier === null) {
+            $unknown = ['allowed' => false, 'unlock_hint' => 'Your standing could not be checked right now. Please try again.'];
+            return [
+                'can_vouch'        => $unknown,
+                'can_stand_behind' => $unknown,
+                'can_report'       => $unknown,
+            ];
+        }
         $isNeutralPlus = in_array($viewerTier, UserViewService::GOOD_STANDING_TIERS, true);
 
         if (!$isNeutralPlus) {
@@ -443,8 +453,9 @@ final class AttestationService
         if ($viewerUserId <= 0) {
             return false;
         }
-        $tier = $this->reputationRepo->getTier($viewerUserId);
-        return in_array($tier, self::TRUSTED_PLUS_TIERS, true);
+        // F-469: a tier that could not be read is not Trusted+.
+        $tier = $this->reputationRepo->getTierOrUnknown($viewerUserId);
+        return $tier !== null && in_array($tier, self::TRUSTED_PLUS_TIERS, true);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1068,7 +1079,16 @@ final class AttestationService
      */
     private function assertStandBehindSlotAvailable(int $attestorUserId): void
     {
-        $tier      = $this->reputationRepo->getTier($attestorUserId);
+        // F-469: the slot baseline depends on the tier; one that could not
+        // be read is unavailable, never the neutral baseline.
+        $tier = $this->reputationRepo->getTierOrUnknown($attestorUserId);
+        if ($tier === null) {
+            throw new AttestationException(
+                AttestationException::CODE_UNAVAILABLE,
+                'We could not complete this right now. Please try again.',
+                503
+            );
+        }
         $baseline  = self::standBehindBaselineFor($tier);
         $graduated = $this->resolveGraduatedSlots($attestorUserId); // §J.1 (Slice 4)
         $total     = $baseline + $graduated;
@@ -1871,7 +1891,16 @@ final class AttestationService
      */
     private function assertAttestorInGoodStanding(int $attestorUserId, string $kind): void
     {
-        $attestorTier = $this->reputationRepo->getTier($attestorUserId);
+        // F-469: a standing that could not be read is unavailable (503),
+        // never the neutral default and never "Reach Neutral" either.
+        $attestorTier = $this->reputationRepo->getTierOrUnknown($attestorUserId);
+        if ($attestorTier === null) {
+            throw new AttestationException(
+                AttestationException::CODE_UNAVAILABLE,
+                'We could not complete this right now. Please try again.',
+                503
+            );
+        }
         if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
             $verb = $kind === 'vouch'
                 ? 'vouch'
