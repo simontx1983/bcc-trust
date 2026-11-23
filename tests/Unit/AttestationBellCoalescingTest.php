@@ -99,12 +99,18 @@ namespace BCC\Trust\Core\Tests\Unit {
                 $end  = strpos($src, "\n    }\n", $start) ?: strpos($src, "\r\n    }\r\n", $start);
                 $body = substr($src, $start, (int) $end - $start);
 
+                // The bell is written through writeBell() (F-516: it answers the
+                // row id the push carries); dispatch() is the same write.
                 $gate     = strpos($body, '$this->attestationBellOpen(' . $event);
-                $dispatch = strpos($body, '$this->dispatch(');
+                $dispatch = strpos($body, '$this->writeBell(');
                 self::assertNotFalse($gate, "{$handler} must consult the bell gate");
                 self::assertNotFalse($dispatch, "{$handler} must still write the bell");
                 self::assertLessThan($dispatch, $gate, "{$handler}: the gate must come before the write");
-                self::assertSame(1, substr_count($body, '$this->dispatch('), "{$handler}: exactly one bell write");
+                self::assertSame(
+                    1,
+                    substr_count($body, '$this->writeBell(') + substr_count($body, '$this->dispatch('),
+                    "{$handler}: exactly one bell write"
+                );
             }
         }
     }

@@ -213,7 +213,7 @@ final class NotificationDispatcher
                     : sprintf('@%s reviewed your page.', $actorHandle);
             }
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $authorId,
                 $ownerId,
                 $message,
@@ -227,9 +227,10 @@ final class NotificationDispatcher
             // to call unconditionally — bell + push toggles are
             // independent surfaces.
             $this->pushDispatcher->enqueue($ownerId, 'review', [
-                'actor_handle' => $actorHandle,
-                'page_id'      => $pageId,
-                'page_name'    => $pageName,
+                'actor_handle'    => $actorHandle,
+                'page_id'         => $pageId,
+                'page_name'       => $pageName,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] review dispatch failed', [
@@ -869,8 +870,9 @@ final class NotificationDispatcher
             // A later mention in the window folds into the bell already
             // written; the push below still counts it.
             $windowKey = self::mentionBellWindowKey($authorId, $mentioneeId);
+            $bellId    = 0;
             if (self::claimBellWindow($windowKey, self::MENTION_BELL_WINDOW_SECS)) {
-                $wrote = $this->dispatch(
+                $bellId = $this->writeBell(
                     $authorId,
                     $mentioneeId,
                     $message,
@@ -878,7 +880,7 @@ final class NotificationDispatcher
                     $postId,
                     $actId
                 );
-                if (!$wrote) {
+                if ($bellId === self::BELL_WRITE_FAILED) {
                     // The bell this window was claimed for was never written:
                     // release it, or the next mention would fold into nothing.
                     delete_transient($windowKey);
@@ -891,10 +893,11 @@ final class NotificationDispatcher
             // passed the audience gate get here (dispatchMentionsFor()).
             // PushDispatcher::enqueue self-gates on push prefs.
             $this->pushDispatcher->enqueue($mentioneeId, 'mention', [
-                'actor_handle' => $actorHandle,
-                'post_id'      => $postId,
-                'act_id'       => $actId,
-                'is_comment'   => $isComment,
+                'actor_handle'    => $actorHandle,
+                'post_id'         => $postId,
+                'act_id'          => $actId,
+                'is_comment'      => $isComment,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] mention dispatch failed', [
@@ -1030,12 +1033,13 @@ final class NotificationDispatcher
                 $groupId
             );
 
+            $bellId = 0;
             if (self::claimBellWindow($transientKey, self::HALL_POST_BELL_WINDOW_SECS)) {
                 $message = $hallName !== ''
                     ? sprintf('@%s posted in %s.', $authorHandle, $hallName)
                     : sprintf('@%s posted in your Hall.', $authorHandle);
 
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $authorId,
                     $recipientId,
                     $message,
@@ -1051,11 +1055,12 @@ final class NotificationDispatcher
             // on the same 5-min window so a user sees at most one bell +
             // one push per Hall per window.
             $this->pushDispatcher->enqueue($recipientId, 'hall_post', [
-                'actor_handle' => $authorHandle,
-                'group_id'     => $groupId,
-                'hall_name'    => $hallName,
-                'hall_slug'    => $hallSlug,
-                'act_id'       => $actId,
+                'actor_handle'    => $authorHandle,
+                'group_id'        => $groupId,
+                'hall_name'       => $hallName,
+                'hall_slug'       => $hallSlug,
+                'act_id'          => $actId,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] hall-post dispatch failed', [
@@ -1245,8 +1250,9 @@ final class NotificationDispatcher
             $parentPostId
         );
 
+        $bellId = 0;
         if (self::claimBellWindow($transientKey, self::COMMENT_RECEIVED_BELL_WINDOW_SECS)) {
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $commenterId,
                 $recipientId,
                 $message,
@@ -1261,9 +1267,10 @@ final class NotificationDispatcher
         // aggregation; both align on the same 5-min window so a user
         // sees at most one bell + one push per post per window.
         $payload = [
-            'actor_handle' => $actorHandle,
-            'post_id'      => $parentPostId,
-            'act_id'       => $parentActId,
+            'actor_handle'    => $actorHandle,
+            'post_id'         => $parentPostId,
+            'act_id'          => $parentActId,
+            'notification_id' => $bellId,
         ];
         if ($isReply) {
             // PushPayload::forCommentReceived branches its copy on this.
@@ -1326,8 +1333,9 @@ final class NotificationDispatcher
                 ? 'attestation_vouch_received'
                 : 'attestation_stand_behind_received';
 
+            $bellId = 0;
             if ($this->attestationBellOpen('created', $attestorId, $targetOwnerId, $kind)) {
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $attestorId,
                     $targetOwnerId,
                     $message,
@@ -1345,6 +1353,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-created dispatch failed', [
@@ -1414,8 +1423,9 @@ final class NotificationDispatcher
                 ? sprintf('@%s is no longer backing you.', $actorHandle)
                 : sprintf('@%s revoked their vouch.', $actorHandle);
 
+            $bellId = 0;
             if ($this->attestationBellOpen('revoked', $attestorId, $targetOwnerId, $kind)) {
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $attestorId,
                     $targetOwnerId,
                     $message,
@@ -1431,6 +1441,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-revoked dispatch failed', [
@@ -1473,7 +1484,7 @@ final class NotificationDispatcher
                 ? sprintf('@%s reaffirmed backing you.', $actorHandle)
                 : sprintf('@%s reaffirmed their vouch.', $actorHandle);
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $attestorId,
                 $targetOwnerId,
                 $message,
@@ -1488,6 +1499,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-reaffirmed dispatch failed', [
@@ -1567,7 +1579,7 @@ final class NotificationDispatcher
                 return;
             }
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $senderId,
                 $targetOwnerId,
                 $message,
@@ -1582,9 +1594,10 @@ final class NotificationDispatcher
             // (last_notified_at), the recipient sees at most one
             // push per state-transition.
             $this->pushDispatcher->enqueue($targetOwnerId, 'divergence_state_warning', [
-                'new_state'    => $newState,
-                'target_kind'  => $targetKind,
-                'target_id'    => $targetId,
+                'new_state'       => $newState,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'notification_id' => $bellId,
             ]);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] divergence-state-warning dispatch failed', [
@@ -1669,7 +1682,7 @@ final class NotificationDispatcher
             $delivered = [];
             foreach ($pending as $userId) {
                 try {
-                    $this->dispatch(
+                    $bellId = $this->writeBell(
                         $senderId,
                         $userId,
                         $message,
@@ -1700,6 +1713,7 @@ final class NotificationDispatcher
                         'collection_id'    => $collectionId,
                         'chain_id'         => $chainId,
                         'contract_address' => $contract,
+                        'notification_id'  => $bellId,
                     ]);
                 } catch (\Throwable $e) {
                     Logger::warning('[NotificationDispatcher] holder-community-live push enqueue failed', [
@@ -2071,13 +2085,34 @@ final class NotificationDispatcher
         int $externalId,
         int $actId
     ): bool {
+        return $this->writeBell($fromUserId, $toUserId, $message, $type, $externalId, $actId) !== self::BELL_WRITE_FAILED;
+    }
+
+    /** writeBell(): the write was attempted and failed. */
+    private const BELL_WRITE_FAILED = -1;
+
+    /**
+     * dispatch(), answering WHICH bell row was written (F-516): the row id
+     * (> 0); 0 when nothing was owed or PeepSo suppressed it (the bell is
+     * off for this recipient, opt-out, block); BELL_WRITE_FAILED when the
+     * write failed. A push enqueued for the same event carries the id as
+     * `notification_id`, so opening the push can mark this row read.
+     */
+    private function writeBell(
+        int $fromUserId,
+        int $toUserId,
+        string $message,
+        string $type,
+        int $externalId,
+        int $actId
+    ): int {
         // §I1 — per-event bell preference. When the recipient has
         // disabled this event type, drop the write before it touches
         // peepso_notifications. The originating action still completes
         // (per §A3 dispatchers don't break their producers); we just
         // skip the side-effect.
         if (!NotificationPrefs::isBellEnabled($toUserId, $type)) {
-            return true;
+            return 0;
         }
 
         $result = PeepSoNotificationWriter::addNotification(
@@ -2097,7 +2132,7 @@ final class NotificationDispatcher
                 'type'         => $type,
                 'reason'       => $result['reason'] ?? 'unknown',
             ]);
-            return false;
+            return self::BELL_WRITE_FAILED;
         }
 
         // Invalidate the recipient's /me/badges cache so the next poll
@@ -2107,11 +2142,12 @@ final class NotificationDispatcher
         // this bump; the 15s TTL is the safety net for that case.
         // Skipped when PeepSo silently suppressed the write
         // (notification_id === 0 for opt-out / blocked).
-        if (($result['notification_id'] ?? 0) > 0) {
+        $notificationId = (int) ($result['notification_id'] ?? 0);
+        if ($notificationId > 0) {
             BadgesService::bumpForUser($toUserId);
         }
 
-        return true;
+        return max(0, $notificationId);
     }
 
     // ──────────────────────────────────────────────────────────────────
