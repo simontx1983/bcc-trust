@@ -61,6 +61,71 @@ final class UserSyncRepository
     }
 
     /**
+     * The usermeta keys that take a member out of every listing: the one
+     * live hide-from-listings flag, and the legacy F-257 opt-out it was
+     * folded from (nothing writes the legacy key any more).
+     */
+    public const LISTING_OPTOUT_KEYS = [
+        'peepso_is_hide_profile_from_user_listing',
+        'bcc_privacy_discovery_optout',
+    ];
+
+    /** Every stored value that means "opted out" (compared case-insensitively by the column collation). */
+    public const LISTING_OPTOUT_TRUTHY = ['1', 'true', 'on', 'yes'];
+
+    /**
+     * F-518 / F-519 — the ONE SQL fragment that leaves listing opt-outs out
+     * of a member listing. Shared on purpose: the app sitemap's public index
+     * (PublicIndexRepository) and the member directory / search
+     * (PrivacySettings::filterPeepSoUserQuery) must agree on who opted out.
+     *
+     *     $where .= ' AND ' . UserSyncRepository::listingOptOutSql("{$wpdb->users}.ID");
+     *
+     * TRUE when the member has NO row, on either key, holding a truthy
+     * value. Any truthy row excludes, so a member with both a '0' and a '1'
+     * row stays out (the direction that cannot leak).
+     *
+     * WHY THE TRUTHY SET, not just '1'. The writers, verified in code:
+     *   - PeepSo's own preferences form saves the client's value RAW
+     *     (peepso/classes/profilepreferencesajax.php, savepreference:
+     *     `$this->_input->raw('value')`), so the hide key can hold any string;
+     *   - BCC's writers store '1' / '0' (MyProfilePrefsEndpoint, the profile
+     *     prefs write; PrivacySettings::writePartial, /me/privacy's
+     *     `discovery_optout`);
+     *   - the fold migration (includes/database/fold-discovery-optout.php)
+     *     writes '1', and reads the legacy key as this same set.
+     * Excluding too many is the safe direction for a privacy setting.
+     *
+     * BOTH KEYS, ALWAYS: no FOLD_DONE_OPTION read. Nothing writes the legacy
+     * key, so once the fold has run it matches nothing; and an option read
+     * that could fail cannot flip this answer.
+     *
+     * Pure SQL: no admin exemption here. A caller that exempts admins (the
+     * directory) does so around this; the public index never exempts anyone.
+     * No `%` in the output, so it is safe inside prepare().
+     *
+     * @param string $userIdColumn a column reference such as `wp_users.ID`, never input
+     * @throws \InvalidArgumentException when `$userIdColumn` is not a column reference
+     */
+    public static function listingOptOutSql(string $userIdColumn): string
+    {
+        if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $userIdColumn) !== 1) {
+            throw new \InvalidArgumentException('listingOptOutSql() takes a column reference such as wp_users.ID.');
+        }
+
+        global $wpdb;
+
+        // Constants of [a-z0-9_] only, so quoting them inline is safe.
+        $keys   = "'" . implode("', '", self::LISTING_OPTOUT_KEYS) . "'";
+        $truthy = "'" . implode("', '", self::LISTING_OPTOUT_TRUTHY) . "'";
+
+        return "NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} bcc_optout"
+            . " WHERE bcc_optout.user_id = {$userIdColumn}"
+            . " AND bcc_optout.meta_key IN ({$keys})"
+            . " AND bcc_optout.meta_value IN ({$truthy}))";
+    }
+
+    /**
      * Batch-fetch aggregate counts for a chunk of user IDs.
      *
      * Returns pages_owned, groups_owned, posts_created, comments_made,

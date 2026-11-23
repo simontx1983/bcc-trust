@@ -151,6 +151,10 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
             yield 'negative after'   => [['after' => '-1', 'limit' => '10']];
             yield 'non-numeric'      => [['after' => 'x', 'limit' => '10']];
             yield 'fractional limit' => [['after' => '0', 'limit' => '2.5']];
+            // A JSON body hands the handler INTEGERS, which skip the digit check.
+            yield 'integer negative after'  => [['after' => -1, 'limit' => 10]];
+            yield 'integer limit 0'         => [['after' => 0, 'limit' => 0]];
+            yield 'integer limit over 1000' => [['after' => 0, 'limit' => 1001]];
         }
 
         #[\PHPUnit\Framework\Attributes\DataProvider('refusedParams')]
@@ -214,7 +218,7 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
         /**
          * The member SQL is the ANONYMOUS rule whoever asks: public access
          * only, the three unlisted roles, the suspension clause for viewer 0,
-         * and the hide-from-listings row.
+         * and the shared listing opt-out fragment.
          */
         public function testTheMemberSqlIsTheAnonymousRule(): void
         {
@@ -225,7 +229,11 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
             self::assertStringContainsString('bcc_pub_acc.usr_profile_acc <= 10', $sql);
             self::assertStringContainsString('INNER JOIN wp_peepso_users bcc_pub_acc', $sql);
             self::assertStringContainsString('bcc_f182.is_suspended IS NULL OR bcc_f182.is_suspended = 0 OR wp_users.ID = 0', $sql);
-            self::assertStringContainsString("bcc_pub_hide.meta_key = 'peepso_is_hide_profile_from_user_listing' AND bcc_pub_hide.meta_value = '1'", $sql);
+            self::assertStringContainsString(
+                \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql('wp_users.ID'),
+                $sql,
+                'the shared listing opt-out fragment (F-519)'
+            );
         }
 
         public function testMembersCarryTheirCanonicalPathAndAShortScanEnds(): void

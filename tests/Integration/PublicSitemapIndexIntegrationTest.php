@@ -69,6 +69,14 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951822 => ['F518-Upper', $member, null, [], false, 'not the current handle shape (upper case)'],
             951823 => ['f518--double', $member, null, [], false, 'not the current handle shape (double hyphen)'],
             951824 => ['f518-two-hide-rows', $member, null, [[$hide, '0'], [$hide, '1']], false, 'any hide row reading 1 excludes'],
+            // The shared listing opt-out fragment (F-519): both keys, the truthy set.
+            951825 => ['f518-legacy-optout', $member, null, [['bcc_privacy_discovery_optout', '1']], false, 'the legacy opt-out key'],
+            951826 => ['f518-hide-yes', $member, null, [[$hide, 'yes']], false, 'hide stored as "yes" (PeepSo saves the raw value)'],
+            951827 => ['f518-hide-true-upper', $member, null, [[$hide, 'TRUE']], false, 'hide stored as "TRUE" (case-insensitive)'],
+            951828 => ['f518-legacy-off', $member, null, [['bcc_privacy_discovery_optout', '0']], true, 'a legacy opt-out row reading 0'],
+            951829 => ['f518-hide-off-legacy-on', $member, null, [[$hide, '0'], ['bcc_privacy_discovery_optout', '1']], false, "hide '0' but legacy '1'"],
+            951830 => ['f518-hide-on', $member, null, [[$hide, 'on']], false, 'hide stored as "on"'],
+            951831 => ['f518-hide-true', $member, null, [[$hide, 'true']], false, 'hide stored as "true"'],
         ];
     }
 

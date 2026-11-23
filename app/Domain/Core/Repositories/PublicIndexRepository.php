@@ -27,7 +27,6 @@ namespace BCC\Trust\Core\Repositories;
 
 use BCC\Core\Repositories\PeepSoPagePrivacy;
 use BCC\Core\Repositories\ProbesReads;
-use BCC\Trust\Core\Support\PrivacySettings;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -210,9 +209,9 @@ final class PublicIndexRepository
      *   - the profile access is public (≤ 10);
      *   - not suspended: UserInfoRepository's own listing clause, the one the
      *     member directory uses, for viewer 0 (so no self-exemption applies);
-     *   - not hidden from listings: no `peepso_is_hide_profile_from_user_listing`
-     *     row reading '1'. ANY such row excludes, so a member with both a '1'
-     *     and a '0' row stays out.
+     *   - not opted out of listings: UserSyncRepository::listingOptOutSql(),
+     *     the ONE fragment the member directory shares (F-519): no truthy row
+     *     on the hide-from-listings key or its legacy predecessor.
      *
      * @return array{0: string, 1: string}
      */
@@ -233,10 +232,7 @@ final class PublicIndexRepository
         $where = "bcc_pub_acc.usr_role NOT IN ({$roles})"
             . ' AND bcc_pub_acc.usr_profile_acc <= ' . self::PUBLIC_PROFILE_ACC_MAX
             . $suspension['where']
-            . " AND NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} bcc_pub_hide"
-            . " WHERE bcc_pub_hide.user_id = {$wpdb->users}.ID"
-            . " AND bcc_pub_hide.meta_key = '" . PrivacySettings::HIDE_FROM_LISTING_META . "'"
-            . " AND bcc_pub_hide.meta_value = '1')";
+            . ' AND ' . UserSyncRepository::listingOptOutSql("{$wpdb->users}.ID");
 
         return [$from, $where];
     }
