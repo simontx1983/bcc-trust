@@ -14,13 +14,11 @@ if (!defined('ABSPATH')) {
  * What WordPress's own front end on the cms host may still say to a
  * signed-out visitor.
  *
- * Security review, 2026-11-19: cms served the WordPress feeds to anyone.
- * `/feed/` carried the five newest `post` items in full with their
- * authors' names, and `/comments/feed/` was open too. Every page's head
- * carried a generator tag naming the exact WordPress version. BCC is
- * headless and nothing reads these feeds: the app has no RSS, and BCC's
- * own `/bcc/v1/feed/*` routes are REST, which core answers at
- * `parse_request`, before any of this runs. So:
+ * BCC is headless: the app has no RSS and reads no sitemap, and BCC's own
+ * `/bcc/v1/feed/*` routes are REST, which core answers at `parse_request`,
+ * before any of this runs. So WordPress's own feeds, sitemaps and
+ * self-description stay off on cms. Rationale: security review 2026-11-19
+ * (private tracker).
  *
  *   1. A feed request 301s to the app's front page.
  *      - `template_redirect` at priority 1: before `redirect_canonical`
@@ -46,8 +44,19 @@ if (!defined('ABSPATH')) {
  *        at `/wp-json/oembed/…`, which RestRouteAllowlist refuses to a
  *        signed-out caller anyway, and cms serves nothing to embed.
  *
- * The sitemaps need nothing here: Rank Math already 301s `/wp-sitemap.xml`
- * to the app.
+ *   4. Core's XML sitemaps are off (`wp_sitemaps_enabled` → false, last
+ *      word), so `/wp-sitemap.xml` and every `?sitemap=` answer 404. No
+ *      SEO plugin provides them on cms any more (F-509), and nothing BCC
+ *      runs needs them.
+ *   5. An author archive (`?author=N`, `/author/{slug}/`) answers a bare 404
+ *      at `template_redirect` priority 1, before `redirect_canonical` (10)
+ *      runs, for every caller. It is decided on the REQUEST (its query
+ *      vars), never on whether that author exists, so every author request
+ *      gets the same answer. BCC's member pages live in the app; nothing
+ *      links to these.
+ *   6. Every other 404 a signed-out visitor would get is the same bare 404:
+ *      no themed page is rendered for them. A signed-in admin still gets
+ *      the themed page.
  */
 final class WordPressFrontEndGate
 {
@@ -60,7 +69,10 @@ final class WordPressFrontEndGate
     public static function register(): void
     {
         add_action('template_redirect', [self::class, 'sendFeedsToTheApp'], self::REDIRECT_PRIORITY);
+        add_action('template_redirect', [self::class, 'refuseAuthorArchives'], self::REDIRECT_PRIORITY);
+        add_action('template_redirect', [self::class, 'bareNotFoundWhenSignedOut'], self::REDIRECT_PRIORITY);
         add_filter('the_generator', [self::class, 'noGenerator'], PHP_INT_MAX, 2);
+        add_filter('wp_sitemaps_enabled', [self::class, 'noSitemaps'], PHP_INT_MAX);
 
         // Core hooks these in default-filters.php, which runs before any
         // plugin loads, so they are there to remove now.
@@ -107,5 +119,54 @@ final class WordPressFrontEndGate
         unset($generator, $type);
 
         return '';
+    }
+
+    /**
+     * `wp_sitemaps_enabled`, last: core's XML sitemaps stay off, whatever an
+     * earlier filter answered (F-509).
+     *
+     * @param mixed $enabled
+     */
+    public static function noSitemaps($enabled = true): bool
+    {
+        unset($enabled);
+
+        return false;
+    }
+
+    /**
+     * `template_redirect`, first (F-509): an author request answers a bare 404
+     * and nothing else: no page is rendered. Decided on the request's query
+     * vars, which keep their values whether or not the author exists, so
+     * every author request gets this same answer.
+     */
+    public static function refuseAuthorArchives(): void
+    {
+        if ((string) get_query_var('author') === '' && (string) get_query_var('author_name') === '') {
+            return;
+        }
+
+        self::bareNotFound();
+    }
+
+    /**
+     * `template_redirect`, first (F-509): a signed-out visitor's 404 is a bare
+     * 404, never a themed page.
+     */
+    public static function bareNotFoundWhenSignedOut(): void
+    {
+        if (!is_404() || is_user_logged_in()) {
+            return;
+        }
+
+        self::bareNotFound();
+    }
+
+    /** A bare 404: no-cache headers, no body, no handler after it. */
+    private static function bareNotFound(): never
+    {
+        nocache_headers();
+        status_header(404);
+        exit;
     }
 }

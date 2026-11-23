@@ -120,20 +120,16 @@ final class WordPressSignInGate
     public const SIGNED_OUT_DENIED_PREFIX = 'peepso';
 
     /**
-     * Other signed-out admin-ajax actions refused by exact name (F-496): bulk
-     * write and migration actions, anonymous image processing, and a local
-     * debug plugin's logger. A DENY-list on purpose: an allowlist would break
+     * Other signed-out admin-ajax actions refused by exact name (F-496): a
+     * local debug plugin's logger (harmless while it is not installed). The
+     * SEO plugin's actions left with the plugin (F-509). A DENY-list on
+     * purpose: an allowlist would break
      * sign-in and background work whenever a plugin update adds an action.
      * An entry needs a reason and a test of its own.
      *
      * @var list<string>
      */
     public const SIGNED_OUT_DENIED_ACTIONS = [
-        'wp_convert_aioseo_blocks',
-        'wp_convert_yoast_blocks',
-        'wp_bulk_edit_seo_meta',
-        'wp_bulk_image_alt',
-        'rank_math_overlay_thumb',
         'log_js_errors',
     ];
 

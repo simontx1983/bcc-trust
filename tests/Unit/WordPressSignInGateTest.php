@@ -390,11 +390,6 @@ final class WordPressSignInGateTest extends TestCase
     {
         self::assertSame('peepso', WordPressSignInGate::SIGNED_OUT_DENIED_PREFIX);
         self::assertSame([
-            'wp_convert_aioseo_blocks',
-            'wp_convert_yoast_blocks',
-            'wp_bulk_edit_seo_meta',
-            'wp_bulk_image_alt',
-            'rank_math_overlay_thumb',
             'log_js_errors',
         ], WordPressSignInGate::SIGNED_OUT_DENIED_ACTIONS);
     }
@@ -424,7 +419,7 @@ final class WordPressSignInGateTest extends TestCase
             'no action at all'            => [''],
             'the prefix in another case'  => ['PeepSo_vip_user_icons'],
             'the prefix not at the start' => ['x_peepso'],
-            'a denied name, longer'       => ['wp_bulk_image_alt_x'],
+            'a denied name, longer'       => ['log_js_errors_x'],
             'a denied name, upper case'   => ['WP_BULK_IMAGE_ALT'],
         ];
     }
@@ -448,11 +443,6 @@ final class WordPressSignInGateTest extends TestCase
             'PeepSo: should_get_chats'    => ['peepso_should_get_chats'],
             'any other peepso* action'    => ['peepso_some_new_action'],
             'the bare prefix'             => ['peepso'],
-            'AIOSEO block conversion'     => ['wp_convert_aioseo_blocks'],
-            'Yoast block conversion'      => ['wp_convert_yoast_blocks'],
-            'bulk SEO meta edit'          => ['wp_bulk_edit_seo_meta'],
-            'bulk image alt'              => ['wp_bulk_image_alt'],
-            'Rank Math overlay thumbnail' => ['rank_math_overlay_thumb'],
             'debug JS logger'             => ['log_js_errors'],
         ];
     }
