@@ -453,6 +453,95 @@ final class CapabilityMatrixTest extends TestCase
     }
 
     /**
+     * ⭐⭐ DURING A COUNT FAULT, RECEIVERS MUST BE INDISTINGUISHABLE.
+     *
+     * The receive decision is evaluated FOR the receiver and reported to the
+     * GIVER, so every real sub-reason collapses to `receiver_ineligible`.
+     * `unavailable` does NOT collapse — it is retryable rather than a
+     * refusal — so with the count read AFTER the status gates, a count fault
+     * would hand the giver a status probe:
+     *
+     *   a suspended receiver  → `suspended`   (→ 403 receiver_ineligible)
+     *   an eligible receiver  → `unavailable` (→ 503)
+     *
+     * open for the length of the fault, and exactly what the v1.65 collapse
+     * exists to close. Reading the count first makes the reason independent
+     * of the receiver.
+     *
+     * ⚠ This asserts the two reasons are the SAME, not merely that each is
+     * `unavailable`. Sameness is the property a probe needs broken, and an
+     * assertion on one receiver alone would not notice the other diverging.
+     */
+    public function testDuringACountFaultEveryReceiverGetsTheSameReason(): void
+    {
+        $suspended = $this->resolver(
+            notSuspended: false,
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+        $eligible = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+        self::assertSame(
+            $eligible->reason,
+            $suspended->reason,
+            'a count fault lets the giver tell a suspended receiver from an eligible one'
+        );
+        self::assertSame('unavailable', $suspended->reason);
+        self::assertFalse($suspended->isAllowed());
+        self::assertFalse($eligible->isAllowed());
+    }
+
+    /**
+     * ⚠ And for every OTHER status gate too, not just suspension — which is
+     * the one a reader would check and stop at.
+     */
+    public function testTheSameHoldsForEveryStatusGateOnReceive(): void
+    {
+        $variants = [
+            'new member'    => ['rank' => null,         'tier' => 'neutral', 'rec' => false],
+            'below neutral' => ['rank' => 'journeyman', 'tier' => 'risky',   'rec' => false],
+            'in recovery'   => ['rank' => 'journeyman', 'tier' => 'neutral', 'rec' => true],
+        ];
+
+        foreach ($variants as $label => $v) {
+            $decision = $this->resolver(
+                rank: $v['rank'],
+                tier: $v['tier'],
+                inRecovery: $v['rec'],
+                custodyUnavailable: true
+            )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+            self::assertSame('unavailable', $decision->reason, "receiver status: {$label}");
+        }
+    }
+
+    /**
+     * ⚠ THE SCOPE CONTROL: CREATE's order is UNCHANGED. Its reasons are the
+     * caller's own, there is no third party to disclose to, and the contract
+     * documents the sequence — so a suspended creator still reads
+     * `suspended`, not `unavailable`, even when the count cannot be read.
+     *
+     * Without this, moving the read for BOTH keys would look correct.
+     */
+    public function testCreateKeepsItsDocumentedGateOrder(): void
+    {
+        $decision = $this->resolver(
+            notSuspended: false,
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertSame('suspended', $decision->reason, "create's documented gate order changed");
+    }
+
+    /**
      * ⭐ THE ANTI-VACUITY CONTROL. The member below is fully eligible — the
      * ONLY difference from an allowed case is that the count could not be
      * read. Without this, the test above would also pass for a gate that

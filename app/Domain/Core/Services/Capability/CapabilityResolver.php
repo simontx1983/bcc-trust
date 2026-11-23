@@ -90,12 +90,37 @@ class CapabilityResolver
                 return CapabilityDecision::unknown('deferred_to_live_gate', 'live_gate');
 
             case CapabilityCatalog::CREATE_COMMUNITY:
-            case CapabilityCatalog::RECEIVE_COMMUNITY:
-                // §21.2 — create and receive share the full custody gate
-                // (rank/tier/recovery + cap + cooldown). Transfer-away is
-                // deliberately looser (below): the cooldown blocks
-                // ACQUIRING custody, never relinquishing it.
+                // §21.2 — the full custody gate (rank/tier/recovery + cap +
+                // cooldown). Transfer-away is deliberately looser (below):
+                // the cooldown blocks ACQUIRING custody, never
+                // relinquishing it.
                 return $this->resolveCustodyAcquisition($userId);
+
+            case CapabilityCatalog::RECEIVE_COMMUNITY:
+                // ⚠⚠ THE SAME GATE, BUT THE COUNT IS READ FIRST — and the
+                // reason is disclosure, not ordering taste.
+                //
+                // This decision is evaluated FOR the receiver and reported
+                // to the GIVER, who must never learn the receiver's status;
+                // every real sub-reason therefore collapses to the single
+                // generic `receiver_ineligible`. But `unavailable` does NOT
+                // collapse, because it is retryable rather than a refusal.
+                // So with the count read AFTER the status gates, a count
+                // fault would show the giver:
+                //
+                //   403 receiver_ineligible — receiver fails a status gate
+                //   503 unavailable         — receiver passes all of them
+                //
+                // which is exactly the status probe the collapse exists to
+                // close, open for the length of the fault. Reading the
+                // count FIRST makes `unavailable` independent of the
+                // receiver: during a fault every receiver gets the same
+                // 503, whatever their status.
+                //
+                // ⚠ Create keeps its own order, which the contract
+                // documents as the gate sequence. There is no third party
+                // to disclose to there — the reasons are the caller's own.
+                return $this->resolveCustodyAcquisition($userId, countBeforeStatusGates: true);
 
             case CapabilityCatalog::TRANSFER_COMMUNITY:
                 return $this->resolveTransferCommunity($userId);
@@ -133,8 +158,23 @@ class CapabilityResolver
      * AND under the per-rank ownership cap AND outside the 30-day
      * global custody cooldown.
      */
-    private function resolveCustodyAcquisition(int $userId): CapabilityDecision
-    {
+    private function resolveCustodyAcquisition(
+        int $userId,
+        bool $countBeforeStatusGates = false
+    ): CapabilityDecision {
+        // ⚠⚠ RECEIVE reads the count HERE, before any status gate, so that
+        // `unavailable` cannot depend on the receiver — see the
+        // RECEIVE_COMMUNITY case in can() for why that matters. The default
+        // is false, so CREATE's order is unchanged and every other caller
+        // keeps the documented sequence.
+        $custody = null;
+        if ($countBeforeStatusGates) {
+            $custody = $this->custodyState($userId);
+            if ($custody === null) {
+                return CapabilityDecision::denied('unavailable', 'community_custody');
+            }
+        }
+
         if (!$this->notSuspended($userId)) {
             return CapabilityDecision::denied('suspended', 'community_custody');
         }
@@ -152,7 +192,9 @@ class CapabilityResolver
             return CapabilityDecision::denied('in_recovery', 'community_custody');
         }
 
-        $custody = $this->custodyState($userId);
+        // Already read above when the caller asked for it; otherwise read
+        // here, in the documented position.
+        $custody ??= $this->custodyState($userId);
 
         // ⛔ FAIL CLOSED ON AN UNREADABLE COUNT, and before the comparison.
         // This gate decides a DURABLE write: both keys that reach here —
