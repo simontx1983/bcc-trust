@@ -395,9 +395,11 @@ final class FeedRankingService
      */
     private function buildHotFeed(?string $cursor, int $limit): array
     {
-        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
-        // F-438: a hidden list that could not be read throws (503), and
-        // nothing is cached: hotFeedPayload() writes only what this returns.
+        // F-438 / F-454: a caution or hidden list that could not be read
+        // throws (503), and nothing is cached: hotFeedPayload() writes only
+        // what this returns. A page built from the caution list's last-good
+        // copy is a real list, and may be cached.
+        $excluded = $this->cautionListOrThrow();
         $hidden   = $this->hiddenIdsOrThrow();
 
         // ⚠ NO RESTRICTED-GROUP LIST IS COMPUTED HERE, DELIBERATELY.
@@ -480,7 +482,7 @@ final class FeedRankingService
      * method is therefore a literal mirror of `getHotFeed()` for everything
      * that governs VISIBILITY:
      *
-     *   - same `$excluded` set: $this->reputationRepo->getCautionAndRiskyUserIds()
+     *   - same `$excluded` set: $this->cautionListOrThrow()
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, PLUS the
      *     viewer's mutual blocks (F-297). Extra exclusions only NARROW, so
      *     the subset relation holds; the hot feed has no viewer to block for.
@@ -2026,6 +2028,33 @@ final class FeedRankingService
     }
 
     /**
+     * The §O4.1 caution/risky shadow-limit list, whole, or a throw the
+     * routes answer with 503.
+     *
+     * ⚠ F-454: THE EXCLUDING READER. getCautionAndRiskyUserIdsForExclusion()
+     * serves its last-good list (24 h at most) when a read fails, and throws
+     * when it has none; that becomes the read-failure every feed route
+     * answers with a retryable 503. The old getCautionAndRiskyUserIds()
+     * answered [] on a failed read, and every surface here EXCLUDES these
+     * members, so it is not used here.
+     *
+     * @return list<int>
+     * @throws ActivityReadFailedException when the list could not be read and no usable last-good list exists
+     */
+    private function cautionListOrThrow(): array
+    {
+        try {
+            return $this->reputationRepo->getCautionAndRiskyUserIdsForExclusion();
+        } catch (RepositoryException $e) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: the caution/risky list could not be read, and no usable last-good copy exists.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
      * The §O4.1 caution/risky shadow-limit list, WITHOUT the viewer.
      *
      * F-269 (user decision 2026-11-12): an author ALWAYS sees their own
@@ -2036,10 +2065,11 @@ final class FeedRankingService
      * surface; the anonymous hot feed has no viewer and keeps the full list.
      *
      * @return list<int>
+     * @throws ActivityReadFailedException when the list could not be read (see cautionListOrThrow())
      */
     private function cautionListExceptViewer(int $viewerId): array
     {
-        $ids = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $ids = $this->cautionListOrThrow();
         if ($viewerId <= 0) {
             return $ids;
         }

@@ -201,6 +201,9 @@ final class TokenStatePoisonTest extends TestCase
 
         self::assertContains(['rest_authentication_errors', [BearerAuth::class, 'refuseUnknownTokenState'], 1, 1], $GLOBALS['__bcc_sig']['hooks']);
         self::assertContains(['rest_send_nocache_headers', [BearerAuth::class, 'noCacheWhenTokenStateUnknown'], 10, 1], $GLOBALS['__bcc_sig']['hooks']);
+        // F-525: the backstop runs after core's rest_api_loaded (10), which
+        // serves a REST request and exits.
+        self::assertContains(['parse_request', [BearerAuth::class, 'signOutBearerOutsideRest'], 11, 1], $GLOBALS['__bcc_sig']['hooks']);
     }
 
     /** Only the unknown state is refused; an earlier error stands. */

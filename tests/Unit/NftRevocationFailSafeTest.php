@@ -1132,7 +1132,7 @@ final class NftRevocationFailSafeTest extends TestCase
         $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 5);
         $svc = new NftGroupGateService();
         $svc->recordPermanentOptOut(self::USER, self::GROUP);
-        $GLOBALS['__bcc_trusted_meta_fails'] = true;
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::USER] = true;
 
         self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, $svc->joinIfEligible(self::USER, self::GROUP)->code);
         self::assertSame([], \BccRevokeWorld::$joins, 'an evicted holder is never written back in');
@@ -1144,7 +1144,7 @@ final class NftRevocationFailSafeTest extends TestCase
         $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
         $this->linkCosmos();
         $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
-        $GLOBALS['__bcc_trusted_meta_fails'] = true;
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::USER] = true;
 
         self::assertSame([], (new NftGroupGateService())->findEligibleGroups(self::USER));
     }

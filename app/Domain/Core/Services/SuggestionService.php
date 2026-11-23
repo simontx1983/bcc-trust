@@ -266,6 +266,12 @@ final class SuggestionService
         // hundreds). One update_meta_cache collapses it.
         update_meta_cache('user', array_keys($pool));
         $exclude = $this->buildExclusionSet($viewerId, $following);
+        if ($exclude === null) {
+            // F-454: a list that must be excluded could not be read. No
+            // suggestions rather than suggestions without it (they are an
+            // optional panel; the next request retries).
+            return [];
+        }
         foreach (array_keys($pool) as $cid) {
             if (isset($exclude[$cid]) || $this->isPrivacyOptedOut($cid)) {
                 unset($pool[$cid]);
@@ -562,10 +568,16 @@ final class SuggestionService
      * NEVER a ranking term, but reputation IS an exclusion (caution/risky
      * and active-suspended accounts are removed here).
      *
+     * ⚠ F-454: NULL WHEN THE CAUTION LIST OR A BLOCK LIST COULD NOT BE READ,
+     * and the caller then suggests no one, rather than suggesting without
+     * them. The caution list comes from the EXCLUDING reader (its last-good list, up to
+     * 24 h, else a throw), and the block lists from bcc-core's OrUnknown
+     * readers.
+     *
      * @param list<int> $following  viewer→candidate uf_follow=1 set
-     * @return array<int, true>
+     * @return array<int, true>|null
      */
-    private function buildExclusionSet(int $viewerId, array $following): array
+    private function buildExclusionSet(int $viewerId, array $following): ?array
     {
         $exclude = [$viewerId => true];
 
@@ -575,7 +587,15 @@ final class SuggestionService
         }
 
         // caution / risky reputation tiers
-        foreach ($this->reputationRepository->getCautionAndRiskyUserIds() as $uid) {
+        try {
+            $cautioned = $this->reputationRepository->getCautionAndRiskyUserIdsForExclusion();
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] suggestions: caution/risky list unreadable; no suggestions', [
+                'viewer_id' => $viewerId,
+            ]);
+            return null;
+        }
+        foreach ($cautioned as $uid) {
             $exclude[$uid] = true;
         }
 
@@ -585,10 +605,15 @@ final class SuggestionService
         }
 
         // blocks — BOTH directions
-        foreach (PeepSoBlockRepository::getBlockedIds($viewerId) as $uid) {
-            $exclude[$uid] = true;
+        $blocked  = PeepSoBlockRepository::getBlockedIdsOrUnknown($viewerId);
+        $blockers = PeepSoBlockRepository::getBlockerIdsOrUnknown($viewerId);
+        if ($blocked === null || $blockers === null) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] suggestions: block lists unreadable; no suggestions', [
+                'viewer_id' => $viewerId,
+            ]);
+            return null;
         }
-        foreach (PeepSoBlockRepository::getBlockerIds($viewerId) as $uid) {
+        foreach ([...$blocked, ...$blockers] as $uid) {
             $exclude[$uid] = true;
         }
 

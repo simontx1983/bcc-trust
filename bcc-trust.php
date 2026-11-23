@@ -952,6 +952,11 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
     return $hooks;
 });
 
+// F-454: the caution/risky list reaching its ceiling with risky members
+// alone pages as P1 (bcc-core's DegradationAlerter reads this filter at
+// alert time); caution_list's own ceiling_reached stays P2.
+add_filter('bcc_degradation_p1_subsystems', [\BCC\Trust\Core\Repositories\ReputationRepository::class, 'withRiskyCeilingAsP1']);
+
 // V2 Phase 1b: dedupe-sweep cron handler. Bounded operationally —
 // see HeliusSeenSignaturesRepository for the cap + alarm rules.
 add_action('bcc_helius_dedupe_sweep', static function (): void {
@@ -1367,10 +1372,25 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if (!$isGatedGroup) {
         return; // Neither a holder group nor a delegator community.
     }
+    // A rejoin block that cannot be recorded now is audited and retried
+    // (NftGroupGateService::recordEvictionRejoinBlock).
     \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
-        ->recordPermanentOptOut($userId, $groupId);
+        ->recordEvictionRejoinBlock($userId, $groupId);
 }, 10, 2);
+
+// The rejoin block's retry: one single event per attempt, scheduled by
+// recordEvictionRejoinBlock() itself, which also decides when to stop.
+add_action(
+    \BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_HOOK,
+    static function ($userId, $groupId, $attempt): void {
+        \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->nftGroupGateService()
+            ->recordEvictionRejoinBlock((int) $userId, (int) $groupId, (int) $attempt);
+    },
+    10,
+    3
+);
 
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();

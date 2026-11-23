@@ -133,7 +133,21 @@ final class FeedExclusionReadFailureTest extends TestCase
         self::assertInstanceOf(RepositoryException::class, $e->getPrevious(), 'the cause is kept for the log');
     }
 
-    /** ANTI-VACUITY for the three above: with every list readable, each surface reads. */
+    /**
+     * F-454: the caution list's excluding reader serves its last-good copy
+     * (24 h at most) and throws only when it has none; that throw is the
+     * same read-failure, before any read.
+     */
+    #[DataProvider('surfaces')]
+    public function testAnUnreadableCautionListThrowsTheReadFailureBeforeAnyRead(string $surface): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution_throws'] = true;
+
+        $e = $this->assertThrowsBeforeAnyRead($surface);
+        self::assertInstanceOf(RepositoryException::class, $e->getPrevious(), 'the cause is kept for the log');
+    }
+
+    /** ANTI-VACUITY for the four above: with every list readable, each surface reads. */
     #[DataProvider('surfaces')]
     public function testWithEveryListReadableEachSurfaceReads(string $surface): void
     {
@@ -176,6 +190,31 @@ final class FeedExclusionReadFailureTest extends TestCase
 
         unset($GLOBALS['__bcc_f02feed']['hidden_throws']);
         $this->service()->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, 0);
+        self::assertCount(1, $GLOBALS['__bcc_f02feed']['cache_writes'] ?? [], 'control: a good build is cached');
+    }
+
+    /**
+     * F-454: the anonymous hot page excludes the WHOLE caution list. With no
+     * usable copy of it, the build throws and nothing reaches the shared
+     * cache; a later good build is cached.
+     */
+    public function testTheAnonymousHotFeedThrowsAndCachesNothingWhenTheCautionListIsUnreadable(): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution_throws'] = true;
+
+        try {
+            $this->service()->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, 0);
+            self::fail('the hot feed answered a page without the caution list');
+        } catch (ActivityReadFailedException) {
+            // the route's 503
+        }
+        self::assertSame([], $GLOBALS['__bcc_f02feed']['cache_writes'] ?? [], 'nothing cached');
+        self::assertSame([], $GLOBALS['__bcc_f02feed']['calls'], 'no page was read');
+
+        unset($GLOBALS['__bcc_f02feed']['caution_throws']);
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::AUTHOR];
+        $this->service()->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, 0);
+        self::assertSame([self::AUTHOR], $GLOBALS['__bcc_f02feed']['excluded']['getFeed:for_you'] ?? null, 'the list is applied');
         self::assertCount(1, $GLOBALS['__bcc_f02feed']['cache_writes'] ?? [], 'control: a good build is cached');
     }
 

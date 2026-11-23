@@ -45,6 +45,7 @@ if (!defined('ABSPATH')) {
  *     chain_id: string,
  *     chain_slug: string,
  *     chain_type: string,
+ *     chain_name?: string,
  *     operator_address?: string,
  *     moniker?: string|null,
  *     contract_address?: string,
@@ -110,7 +111,7 @@ class ClaimService {
      * Checks if the user has a connected wallet that matches the entity's
      * on-chain owner/operator. If matched, records a verified claim.
      *
-     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool}
+     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string}
      */
     public static function claim(int $userId, string $entityType, int $entityId): array {
         // §M suspension gate at the SERVICE boundary (F-109), admin bypass
@@ -139,6 +140,27 @@ class ClaimService {
         }
 
         $entityChainSlug = $entity->chain_slug ?? '';
+
+        // F-515: a validator BCC cannot prove an operator for is refused up
+        // front, with the same code and hint the card shows
+        // (ValidatorClaimSupport), never as "connect a wallet" or a wallet
+        // mismatch. The card and this write read the one rule.
+        if ($entityType === 'validator') {
+            $support = ValidatorClaimSupport::assess(
+                (string) ($entity->chain_type ?? ''),
+                (string) $entityChainSlug,
+                (string) ($entity->chain_name ?? ''),
+                (string) ($entity->operator_address ?? '')
+            );
+            if (!$support['claimable']) {
+                return [
+                    'success'     => false,
+                    'error'       => 'not_claimable',
+                    'reason_code' => (string) $support['reason_code'],
+                    'message'     => (string) $support['hint'],
+                ];
+            }
+        }
 
         // Get user's verified wallets only — unverified wallets must not
         // be eligible for claims (prevents address-squatting attacks).

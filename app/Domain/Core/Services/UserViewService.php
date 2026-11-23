@@ -475,13 +475,16 @@ final class UserViewService
             $primaryHall = null;
         }
 
-        // Owned-pages count — `member_owner` rows in
-        // `peepso_page_members`. Distinguishes "regular community
-        // member" from "operator/builder" at a glance on the directory.
+        // Owned-pages count — published, non-secret `member_owner`
+        // pages. Distinguishes "regular community member" from
+        // "operator/builder" at a glance on the directory. The fallback
+        // uses the SAME reader as the prefetch (not fetchCountsForUser(),
+        // whose count feeds the internal user_info sync), so a profile and
+        // its directory card always show the same number.
         if ($prefetched !== null && isset($prefetched['owned_pages_counts'])) {
             $ownedPagesCount = $prefetched['owned_pages_counts'][$userId] ?? 0;
         } else {
-            $ownedPagesCount = UserSyncRepository::fetchCountsForUser($userId)['pages_owned'];
+            $ownedPagesCount = UserSyncRepository::getOwnedPageCountsForUsers([$userId])[$userId] ?? 0;
         }
 
         // Owned-pages typed breakdown — joins page-categories to
