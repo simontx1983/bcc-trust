@@ -183,6 +183,36 @@ final class PageClaimRolePolicyTest extends TestCase
         self::assertFalse(P::mayRemove('representative', 'representative', [], true));
     }
 
+    /**
+     * You cannot grant a power you do not hold: an administrator may add a
+     * representative only when it holds every power the representative role
+     * carries under the current settings. Removing is not restricted.
+     */
+    public function testAnAdministratorCannotGrantAPowerItDoesNotHold(): void
+    {
+        $adminMuted = ['administrator' => ['publish_announcements' => false]]; // reps keep it by default
+        self::assertFalse(P::mayInvite('administrator', 'representative', $adminMuted, true), 'reps announce, the admin cannot');
+        self::assertTrue(P::mayRemove('administrator', 'representative', $adminMuted, true), 'removing only takes power away');
+        self::assertFalse(P::capabilities('administrator', $adminMuted, true)['invite_representative']);
+
+        foreach (self::POWERS as $power) {
+            $settings = [
+                'administrator'  => [$power => false],
+                'representative' => [$power => true],
+            ];
+            if ($power === 'manage_representatives') {
+                continue; // without it the admin cannot invite at all
+            }
+            self::assertFalse(P::mayInvite('administrator', 'representative', $settings, true), $power);
+        }
+
+        self::assertTrue(P::mayInvite('operator', 'representative', $adminMuted, false), 'the owner is unaffected');
+        self::assertTrue(P::mayInvite('administrator', 'representative', [], true), 'defaults: the admin holds every rep power');
+        self::assertFalse(P::mayInvite('administrator', 'representative', [], false), 'an admin not re-confirmed lacks the reaching powers reps carry');
+        $quietReps = ['representative' => array_fill_keys(self::POWERS, false)];
+        self::assertTrue(P::mayInvite('administrator', 'representative', $quietReps, false), 'reps carrying nothing grant nothing');
+    }
+
     public function testNobodyInvitesIntoOwnershipOrAnUnknownRole(): void
     {
         foreach (['operator', 'creator', 'holder', 'staff', ''] as $target) {
