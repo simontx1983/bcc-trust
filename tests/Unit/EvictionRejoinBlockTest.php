@@ -129,6 +129,29 @@ namespace BCC\Trust\Core\Tests\Unit {
             self::assertSame([], $GLOBALS['__bcc_optout_scheduled'], 'no retry after the last attempt');
         }
 
+        // ── wiring (bcc-trust.php cannot be loaded in a unit process) ─────
+
+        /**
+         * A source pin, not a behaviour test: the moderator-eviction listener
+         * goes through the retrying entry point, and the retry hook is
+         * registered with all three arguments.
+         */
+        public function testTheEvictionListenerAndTheRetryHookAreWired(): void
+        {
+            $src = (string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php');
+            $src = (string) preg_replace('/\s+/', ' ', $src);
+
+            $start    = (int) strpos($src, "add_action('peepso_action_group_user_delete'");
+            $listener = substr($src, $start, (int) strpos($src, '}, 10, 2);', $start) - $start);
+            self::assertStringContainsString('->recordEvictionRejoinBlock($userId, $groupId);', $listener);
+            self::assertStringNotContainsString('->recordPermanentOptOut(', $listener);
+
+            self::assertStringContainsString(
+                '\BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_HOOK, static function ($userId, $groupId, $attempt): void { \BCC\Trust\Onchain\OnchainPlugin::instance() ->nftGroupGateService() ->recordEvictionRejoinBlock((int) $userId, (int) $groupId, (int) $attempt); }, 10, 3 );',
+                $src
+            );
+        }
+
         // ── the per-user lock ──────────────────────────────────────────────
 
         public function testAChangeRunsUnderThePerUserLock(): void
