@@ -8,8 +8,9 @@ if (!defined('ABSPATH')) {
 
 /**
  * Claim status — string-backed validator (mirrors the Disputes
- * DisputeStatus idiom). Only these three values may appear in the
- * bcc_onchain_claims.status column.
+ * DisputeStatus idiom). Only these values may appear in the
+ * bcc_onchain_claims.status column: the three claim states, and the two
+ * page team states (INVITED, ACTIVE).
  *
  * The Onchain context historically carried these states as bare string
  * literals with no typed home (domain-audit F5: the weakest-typed context).
@@ -32,11 +33,25 @@ final class ClaimStatus
     /** Previously verified, since revoked (e.g. wallet unlinked / re-verify failed). */
     public const REVOKED = 'revoked';
 
+    /**
+     * A page TEAM row (administrator, representative) invited but not yet
+     * accepted. Holds no capability.
+     */
+    public const INVITED = 'invited';
+
+    /**
+     * A page TEAM row the invitee accepted. Never 'verified': a team row is
+     * not a claim, so readers of verified claims never see it.
+     */
+    public const ACTIVE = 'active';
+
     /** @var list<string> */
     private const ALL = [
         self::PENDING,
         self::VERIFIED,
         self::REVOKED,
+        self::INVITED,
+        self::ACTIVE,
     ];
 
     /**

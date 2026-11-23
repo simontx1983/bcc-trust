@@ -864,6 +864,9 @@ if (!class_exists(\BCC\Core\DB\DB::class)) {
 require_once dirname(__DIR__, 2) . '/includes/database/schema-claims.php';
 bcc_onchain_create_claims_table();
 
+require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-relationship-log.php';
+bcc_trust_create_validator_relationship_log_table();
+
 require_once dirname(__DIR__, 2) . '/includes/database/schema-validators.php';
 bcc_onchain_create_validators_table();
 

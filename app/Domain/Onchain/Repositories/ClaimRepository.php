@@ -915,7 +915,14 @@ class ClaimRepository {
         $where = "user_id = %d AND status = 'verified' AND entity_type IN ('validator', 'collection')";
         $args  = [$userId];
         if ($walletAddress !== null) {
-            $where .= ' AND wallet_address = %s';
+            // A wallet's claims are the ones PROVEN by that wallet. A staff
+            // or proof claim stores no linked wallet ('' / 0) and never
+            // matches, and a blank address is refused: it would otherwise
+            // match every claim that has none.
+            if (trim($walletAddress) === '') {
+                throw new \InvalidArgumentException('A blank wallet address matches no claim.');
+            }
+            $where .= " AND wallet_address = %s AND verification_method = 'wallet'";
             $args[] = $walletAddress;
             if ($chainId !== null) {
                 $where .= ' AND chain_id = %d';
@@ -951,12 +958,19 @@ class ClaimRepository {
      * @return int Number of rows deleted.
      */
     public static function deleteByUserAndWallet(int $userId, string $walletAddress, ?int $chainId = null): int {
+        // Only claims PROVEN by this wallet are its claims: a staff or proof
+        // claim ('' / 0, its own verification_method) is never purged with a
+        // wallet, and a blank address is refused outright.
+        if (trim($walletAddress) === '') {
+            throw new \InvalidArgumentException('A blank wallet address matches no claim.');
+        }
         global $wpdb;
         $table = self::table();
 
         if ($chainId !== null) {
             return (int) $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s AND chain_id = %d",
+                "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s AND chain_id = %d
+                    AND verification_method = 'wallet'",
                 $userId,
                 $walletAddress,
                 $chainId
@@ -965,7 +979,8 @@ class ClaimRepository {
 
         // Fallback for callers that don't have chain context (backward compat).
         return (int) $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s",
+            "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s
+                AND verification_method = 'wallet'",
             $userId,
             $walletAddress
         ));
@@ -1448,9 +1463,10 @@ class ClaimRepository {
         $collections = \BCC\Core\DB\DB::table('onchain_collections');
         $chains      = \BCC\Core\DB\DB::table('chains');
 
-        /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}> $rows */
+        /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, verification_method: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}> $rows */
         $rows = self::runRead($wpdb->prepare(
             "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address, cl.chain_id, cl.claim_role,
+                    cl.verification_method,
                     COALESCE(v.id, c.id)                 AS entity_row_id,
                     v.operator_address                   AS operator_address,
                     c.contract_address                   AS contract_address,
