@@ -155,6 +155,22 @@ namespace {
             }
 
             /**
+             * PeepSo's `usr_role`. Fixture `roles[<uid>]`, default
+             * `member`, so no existing test changes. A fixture may store a
+             * non-string to model an unreadable role.
+             *
+             * @return mixed
+             */
+            public function get_user_role()
+            {
+                $roles = $GLOBALS['__bcc_profile_access']['roles'] ?? [];
+
+                return is_array($roles) && array_key_exists($this->userId, $roles)
+                    ? $roles[$this->userId]
+                    : 'member';
+            }
+
+            /**
              * Stub + spy. The real one lives in peepso/classes/user.php
              * and applies owner-exempt, admin-exempt, the 10/20/40 switch
              * and then the `peepso_user_is_accessible` filter (where

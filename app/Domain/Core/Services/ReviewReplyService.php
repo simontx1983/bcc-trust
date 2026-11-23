@@ -94,10 +94,19 @@ final class ReviewReplyService
      * no check. ⚠ filterVisible() reads the CURRENT user, so $viewerId must
      * be the request's viewer, as it is on both Reviews tabs.
      *
+     * $pageMayAnswer (the page's own Reviews tab only): a reply whose author
+     * is hidden from this viewer ONLY by the level they chose for their
+     * profile (ProfileAccess::hiddenOnlyByProfileLevel()) is kept, marked
+     * `as_page`, and shown as the PAGE's response with nothing of the
+     * person (CardReviewsService::withReply()). A block either way, a
+     * suspension, a banned author, or anything unread still hides it. The
+     * member's Reviews tab never passes it. The `as_page` marker never
+     * reaches the wire: both shapers copy named keys only.
+     *
      * @param list<array{id: int, page_id: int, voter_user_id: int}> $reviews
-     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
+     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
      */
-    public function forReviews(int $viewerId, array $reviews): array
+    public function forReviews(int $viewerId, array $reviews, bool $pageMayAnswer = false): array
     {
         $voteIds = [];
         foreach ($reviews as $r) {
@@ -147,8 +156,28 @@ final class ReviewReplyService
         }
         if ($authorIds !== []) {
             $visible = array_flip(ProfileAccess::filterVisible($authorIds, false));
-            foreach ($out as $voteId => $bundle) {
+
+            $hidden = [];
+            foreach ($out as $bundle) {
                 if ($bundle['reply'] !== null && !isset($visible[$bundle['reply']['author_id']])) {
+                    $hidden[$bundle['reply']['author_id']] = $bundle['reply']['author_id'];
+                }
+            }
+            // Only for the page's own tab, and only the authors the viewer
+            // may not see for their profile level alone (see above).
+            $asPage = $pageMayAnswer && $hidden !== []
+                ? array_flip(ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)))
+                : [];
+
+            foreach ($out as $voteId => $bundle) {
+                $reply = $bundle['reply'];
+                if ($reply === null || isset($visible[$reply['author_id']])) {
+                    continue;
+                }
+                if (isset($asPage[$reply['author_id']])) {
+                    $reply['as_page']      = true;
+                    $out[$voteId]['reply'] = $reply;
+                } else {
                     $out[$voteId]['reply'] = null;
                 }
             }
@@ -161,8 +190,10 @@ final class ReviewReplyService
      * The author ids a list path must prefetch for forReviews() output: the
      * shown reply's and the viewer's stale reply's. A summary built without
      * its prefetch rows would show zero followers rather than re-reading.
+     * A reply shown as the page's (`as_page`) shows no person, so its
+     * author is never prefetched.
      *
-     * @param array<int, array{reply: array{author_id: int}|null, viewer_stale_reply: array{author_id: int}|null}> $bundles
+     * @param array<int, array{reply: array{author_id: int, as_page?: true}|null, viewer_stale_reply: array{author_id: int}|null}> $bundles
      * @return list<int>
      */
     public static function replyAuthorIds(array $bundles): array
@@ -170,7 +201,7 @@ final class ReviewReplyService
         $ids = [];
         foreach ($bundles as $bundle) {
             foreach ([$bundle['reply'], $bundle['viewer_stale_reply']] as $reply) {
-                if ($reply !== null) {
+                if ($reply !== null && !isset($reply['as_page'])) {
                     $ids[$reply['author_id']] = true;
                 }
             }
@@ -396,11 +427,12 @@ final class ReviewReplyService
      * member-summary shape the review rows carry as their `author` (so a
      * Reviews list renders both with one component). Returns null when the
      * author no longer exists, as a review row whose author vanished is
-     * skipped rather than shown faceless.
+     * skipped rather than shown faceless. `author_kind` is `member`; see
+     * asPage() for the other kind.
      *
-     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>} $reply
+     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true} $reply
      * @param array<string, mixed>|null $prefetched a MemberSummaryPrefetcher bundle on list paths
-     * @return array{id: int, body: string, author: array<string, mixed>, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null
+     * @return array{id: int, body: string, author_kind: 'member', author: array<string, mixed>, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null
      */
     public function withAuthor(array $reply, int $viewerId, ?array $prefetched): ?array
     {
@@ -412,7 +444,42 @@ final class ReviewReplyService
         return [
             'id'          => $reply['id'],
             'body'        => $reply['body'],
+            'author_kind' => 'member',
             'author'      => $author,
+            'posted_at'   => $reply['posted_at'],
+            'edited_at'   => $reply['edited_at'],
+            'feed_id'     => $reply['feed_id'],
+            'permissions' => $reply['permissions'],
+        ];
+    }
+
+    /**
+     * The wire shape of a reply shown as the PAGE's response (forReviews()
+     * with $pageMayAnswer): the page in place of the person.
+     *
+     * ⚠ NAMED KEYS ONLY. Nothing of the author is copied: no `author`, no
+     * id, handle, name, avatar or anything else of theirs. `permissions`
+     * were computed server-side for this viewer, who is never the author
+     * (the author's own view always sees themselves), so edit and delete
+     * are `not_author`. `feed_id` is the report target, which names no one.
+     *
+     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true} $reply
+     * @param array{id: int, card_kind: string, name: string, handle: string, avatar_url: string} $page the reviewed page, as its Card shows it
+     * @return array{id: int, body: string, author_kind: 'page', page: array{id: int, card_kind: string, name: string, handle: string, avatar_url: string}, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}
+     */
+    public static function asPage(array $reply, array $page): array
+    {
+        return [
+            'id'          => $reply['id'],
+            'body'        => $reply['body'],
+            'author_kind' => 'page',
+            'page'        => [
+                'id'         => $page['id'],
+                'card_kind'  => $page['card_kind'],
+                'name'       => $page['name'],
+                'handle'     => $page['handle'],
+                'avatar_url' => $page['avatar_url'],
+            ],
             'posted_at'   => $reply['posted_at'],
             'edited_at'   => $reply['edited_at'],
             'feed_id'     => $reply['feed_id'],

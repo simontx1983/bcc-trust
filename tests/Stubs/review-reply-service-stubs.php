@@ -159,6 +159,18 @@ namespace BCC\Core\Permissions {
             {
                 return !isset(\ReplyWorld::$suspended[(int) $userId]);
             }
+
+            /** ProfileAccess::viewerIsExemptFromVisibility(): nobody here is a site admin. */
+            public static function is_admin(): bool
+            {
+                return false;
+            }
+
+            /** ProfileAccess::hiddenOnlyByProfileLevel(): tri-state, from the same set. */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                return isset(\ReplyWorld::$suspended[(int) $userId]);
+            }
         }
     }
 }
