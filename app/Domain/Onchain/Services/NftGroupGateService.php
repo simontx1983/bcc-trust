@@ -387,14 +387,62 @@ final class NftGroupGateService {
      * Record a permanent opt-out (mod removals; never expires).
      *
      * H7: through mutateOptOutMap(), so it is only ever written over the
-     * map it read. If the map cannot be read at all this eviction is not
-     * recorded, and that is logged at ERROR.
+     * map it read. True when the marker is recorded; false when it is NOT
+     * (the map could not be read, or kept changing underneath), which is
+     * also logged at ERROR. A moderator eviction goes through
+     * recordEvictionRejoinBlock(), which retries and leaves an audit trail.
      */
-    public function recordPermanentOptOut(int $userId, int $groupId): void {
-        $this->mutateOptOutMap($userId, $groupId, 'record_permanent_opt_out', static function (array $map) use ($groupId): array {
+    public function recordPermanentOptOut(int $userId, int $groupId): bool {
+        return $this->mutateOptOutMap($userId, $groupId, 'record_permanent_opt_out', static function (array $map) use ($groupId): array {
             $map[$groupId] = self::PERMANENT_OPT_OUT_TIMESTAMP;
             return $map;
         });
+    }
+
+    /** Action Scheduler / WP-Cron hook that retries a rejoin block. */
+    public const REJOIN_BLOCK_RETRY_HOOK = 'bcc_trust_retry_rejoin_block';
+
+    /** Retries after the first attempt, at most. */
+    public const REJOIN_BLOCK_RETRY_ATTEMPTS = 3;
+
+    /** Seconds between attempts. */
+    public const REJOIN_BLOCK_RETRY_DELAY = 300;
+
+    /**
+     * A moderator eviction's rejoin block: the permanent opt-out, with a
+     * retry and an audit trail when it cannot be recorded.
+     *
+     * Attempt 0 is the eviction itself. When the marker is not recorded:
+     *   - an AuditLogger 'group_rejoin_block_failed' row (target: the
+     *     group; user: the removed member; meta: attempt, final);
+     *   - unless this was the last attempt, ONE single-event retry
+     *     REJOIN_BLOCK_RETRY_DELAY seconds later, with the next attempt
+     *     number.
+     * A retry that succeeds writes 'group_rejoin_block_recorded'. The
+     * Audit Log admin page lists both; a final failure shows BAD with what
+     * the admin can do.
+     */
+    public function recordEvictionRejoinBlock(int $userId, int $groupId, int $attempt = 0): bool {
+        if ($userId <= 0 || $groupId <= 0) {
+            return false;
+        }
+        if ($this->recordPermanentOptOut($userId, $groupId)) {
+            if ($attempt > 0) {
+                AuditLogger::log('group_rejoin_block_recorded', $groupId, ['attempt' => $attempt], 'group', $userId);
+            }
+            return true;
+        }
+
+        $final = $attempt >= self::REJOIN_BLOCK_RETRY_ATTEMPTS;
+        AuditLogger::log('group_rejoin_block_failed', $groupId, ['attempt' => $attempt, 'final' => $final], 'group', $userId);
+        if (!$final) {
+            wp_schedule_single_event(
+                time() + self::REJOIN_BLOCK_RETRY_DELAY,
+                self::REJOIN_BLOCK_RETRY_HOOK,
+                [$userId, $groupId, $attempt + 1]
+            );
+        }
+        return false;
     }
 
     public function clearOptOut(int $userId, int $groupId): void {
@@ -504,7 +552,13 @@ final class NftGroupGateService {
      *     never overwritten: the swap matches nothing, and we read again;
      *   - each attempt starts from a fresh read, at most
      *     OPT_OUT_WRITE_ATTEMPTS. Giving up is logged at ERROR and leaves
-     *     the stored map exactly as it was.
+     *     the stored map exactly as it was;
+     *   - the whole change runs under a per-user advisory lock, as
+     *     JwtToken's denylist does. wp_usermeta has no unique (user_id,
+     *     meta_key) index, so two FIRST writes for one member could both
+     *     find no row; the lock serialises them. If it cannot be had
+     *     (contended past OPT_OUT_LOCK_WAIT, or the driver errored), the
+     *     change still runs, guarded by the swap alone, and that is logged.
      *
      * @param callable(array<int, int>): array<int, int> $change
      */
@@ -513,32 +567,53 @@ final class NftGroupGateService {
             return false;
         }
 
-        $failedReads = 0;
-        for ($attempt = 0; $attempt < self::OPT_OUT_WRITE_ATTEMPTS; $attempt++) {
-            $state = $this->readOptOutMap($userId);
-            if ($state === null) {
-                $failedReads++;
-                continue;
-            }
-
-            $next = $change($state['map']);
-            if ($next === $state['map']) {
-                return true;
-            }
-            if (self::swapOptOutMap($userId, $state['raw'], $next)) {
-                return true;
-            }
+        $lockKey = self::OPT_OUT_LOCK_PREFIX . $userId;
+        $locked  = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, self::OPT_OUT_LOCK_WAIT);
+        if (!$locked) {
+            \BCC\Core\Log\Logger::warning('[NftGroupGateService] opt-out map changed without its lock', [
+                'operation' => $operation,
+                'user_id'   => $userId,
+            ]);
         }
 
-        \BCC\Core\Log\Logger::error('[NftGroupGateService] opt-out map not changed: it could not be read, or kept changing underneath', [
-            'operation'    => $operation,
-            'user_id'      => $userId,
-            'group_id'     => $groupId,
-            'attempts'     => self::OPT_OUT_WRITE_ATTEMPTS,
-            'failed_reads' => $failedReads,
-        ]);
-        return false;
+        try {
+            $failedReads = 0;
+            for ($attempt = 0; $attempt < self::OPT_OUT_WRITE_ATTEMPTS; $attempt++) {
+                $state = $this->readOptOutMap($userId);
+                if ($state === null) {
+                    $failedReads++;
+                    continue;
+                }
+
+                $next = $change($state['map']);
+                if ($next === $state['map']) {
+                    return true;
+                }
+                if (self::swapOptOutMap($userId, $state['raw'], $next)) {
+                    return true;
+                }
+            }
+
+            \BCC\Core\Log\Logger::error('[NftGroupGateService] opt-out map not changed: it could not be read, or kept changing underneath', [
+                'operation'    => $operation,
+                'user_id'      => $userId,
+                'group_id'     => $groupId,
+                'attempts'     => self::OPT_OUT_WRITE_ATTEMPTS,
+                'failed_reads' => $failedReads,
+            ]);
+            return false;
+        } finally {
+            if ($locked) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
     }
+
+    /** Per-user advisory lock around an opt-out map change. */
+    private const OPT_OUT_LOCK_PREFIX = 'bcc_optout_map_';
+
+    /** Seconds a change waits for the per-user lock. */
+    private const OPT_OUT_LOCK_WAIT = 2;
 
     /**
      * Replace the stored map, but only if it is still exactly $expectedRaw

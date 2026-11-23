@@ -1372,10 +1372,25 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if (!$isGatedGroup) {
         return; // Neither a holder group nor a delegator community.
     }
+    // A rejoin block that cannot be recorded now is audited and retried
+    // (NftGroupGateService::recordEvictionRejoinBlock).
     \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
-        ->recordPermanentOptOut($userId, $groupId);
+        ->recordEvictionRejoinBlock($userId, $groupId);
 }, 10, 2);
+
+// The rejoin block's retry: one single event per attempt, scheduled by
+// recordEvictionRejoinBlock() itself, which also decides when to stop.
+add_action(
+    \BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_HOOK,
+    static function ($userId, $groupId, $attempt): void {
+        \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->nftGroupGateService()
+            ->recordEvictionRejoinBlock((int) $userId, (int) $groupId, (int) $attempt);
+    },
+    10,
+    3
+);
 
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();

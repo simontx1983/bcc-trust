@@ -143,6 +143,57 @@ final class PeepSoChatPrefsTest extends TestCase
         self::assertCount(1, $this->db->queries);
     }
 
+    /** @return iterable<string, array{0: list<string>, 1: bool}> */
+    public static function duplicatedEnabledRows(): iterable
+    {
+        yield 'on, then off'     => [['1', '0'], false];
+        yield 'off, then on'     => [['0', '1'], false];
+        yield 'on, then on'      => [['1', '1'], true];
+        yield 'empty, then off'  => [['', '0'], false];
+        yield 'junk, then on'    => [['abc', '1'], true];
+    }
+
+    /**
+     * A key stored twice is read whole, and the strictest row wins: any row
+     * that turns DMs off turns them off, whichever row comes first.
+     *
+     * @param list<string> $rows
+     */
+    #[DataProvider('duplicatedEnabledRows')]
+    public function testADuplicatedChatEnabledKeyIsOffIfAnyRowIsOff(array $rows, bool $expected): void
+    {
+        foreach ($rows as $value) {
+            $this->db->put(self::USER, PeepSoChatPrefs::ENABLED_KEY, $value);
+        }
+
+        self::assertSame($expected, PeepSoChatPrefs::forUser(self::USER)['chat_enabled'] ?? null);
+    }
+
+    /** @return iterable<string, array{0: list<string>, 1: bool}> */
+    public static function duplicatedFriendsOnlyRows(): iterable
+    {
+        yield 'off, then on'  => [['0', '1'], true];
+        yield 'on, then off'  => [['1', '0'], true];
+        yield 'off, then off' => [['0', '0'], false];
+    }
+
+    /**
+     * Any row that turns friends-only ON turns it on, whichever row comes
+     * first.
+     *
+     * @param list<string> $rows
+     */
+    #[DataProvider('duplicatedFriendsOnlyRows')]
+    public function testADuplicatedFriendsOnlyKeyIsOnIfAnyRowIsOn(array $rows, bool $expected): void
+    {
+        require_once __DIR__ . '/../Stubs/peepso-friends-present-stub.php';
+        foreach ($rows as $value) {
+            $this->db->put(self::USER, PeepSoChatPrefs::FRIENDS_ONLY_KEY, $value);
+        }
+
+        self::assertSame($expected, PeepSoChatPrefs::forUser(self::USER)['chat_friends_only'] ?? null);
+    }
+
     /** No row at all: PeepSo's defaults, and still nothing written. */
     public function testNoRowIsEnabledAndNothingIsWritten(): void
     {
