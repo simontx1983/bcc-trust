@@ -513,6 +513,8 @@ namespace {
         /** @return null */
         function wp_set_current_user(int $id)
         {
+            // F-525: recorded so a test can pin the bearer backstop.
+            $GLOBALS['__bcc_ph']['set_current_user'][] = $id;
             return null;
         }
     }
