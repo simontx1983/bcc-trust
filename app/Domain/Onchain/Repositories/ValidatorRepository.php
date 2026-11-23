@@ -140,7 +140,8 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     voting_power_rank: string|null,
  *     chain_slug: string,
- *     chain_type: string
+ *     chain_type: string,
+ *     chain_name: string
  * }
  *
  * @phpstan-type ValidatorBulkExistingRow object{
@@ -272,7 +273,7 @@ final class ValidatorRepository
      * Validator pages typically map 1:1 to a single validator row; the
      * LIMIT 1 in each path is defensive against transitional re-indexing.
      *
-     * @return object{validator_id: numeric-string, chain_slug: string}|null
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
      */
     public static function findFirstByPageId(int $pageId): ?object
     {
@@ -285,9 +286,10 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
-        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT v.id AS validator_id, c.slug AS chain_slug
+            "SELECT v.id AS validator_id, c.slug AS chain_slug,
+                    c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$table} v
                JOIN {$wallets} w ON w.id = v.wallet_link_id
                JOIN {$chains} c ON c.id = v.chain_id
@@ -303,9 +305,10 @@ final class ValidatorRepository
         // Fallback: placeholder pages minted by ValidatorPageMinter have
         // no wallet_link yet — the page<->validator binding lives in
         // post_meta until a real claim creates a wallet_link.
-        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT v.id AS validator_id, c.slug AS chain_slug
+            "SELECT v.id AS validator_id, c.slug AS chain_slug,
+                    c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$wpdb->postmeta} pm
                JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
                JOIN {$chains} c ON c.id = v.chain_id
@@ -1070,7 +1073,7 @@ final class ValidatorRepository
             "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
                     v.status, v.commission_rate, v.total_stake, v.self_stake,
                     v.delegator_count, v.uptime_30d, v.jailed_count, v.voting_power_rank,
-                    c.slug AS chain_slug, c.chain_type
+                    c.slug AS chain_slug, c.chain_type, c.name AS chain_name
              FROM {$table} v
              INNER JOIN {$chains} c ON c.id = v.chain_id
              WHERE v.id = %d",

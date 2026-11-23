@@ -766,7 +766,7 @@ final class PagesEndpoint
     }
 
     /**
-     * @param array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool} $result
+     * @param array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string} $result
      */
     private static function mapClaimFailure(array $result): WP_REST_Response
     {
@@ -844,6 +844,21 @@ final class PagesEndpoint
                 "Holding an NFT doesn't make you this collection's creator.",
                 403,
                 ['reason' => 'holder_not_owner']
+            );
+        }
+
+        // F-515: the validator cannot be claimed at all (ValidatorClaimSupport).
+        // Final, never a wallet problem: the message is the same hint the
+        // card shows, and `unclaimable_reason_code` is the card's code.
+        if (($result['error'] ?? '') === 'not_claimable') {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                (string) $result['message'],
+                403,
+                [
+                    'reason'                  => 'not_claimable',
+                    'unclaimable_reason_code' => (string) ($result['reason_code'] ?? ''),
+                ]
             );
         }
 

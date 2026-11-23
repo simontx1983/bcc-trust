@@ -559,6 +559,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\Validation\\CosmosContractProbe' => $baseDir . '/app/Domain/Onchain/Services/Validation/CosmosContractProbe.php',
     'BCC\\Trust\\Onchain\\Services\\Validation\\EvmContractProbe' => $baseDir . '/app/Domain/Onchain/Services/Validation/EvmContractProbe.php',
     'BCC\\Trust\\Onchain\\Services\\Validation\\SolanaContractProbe' => $baseDir . '/app/Domain/Onchain/Services/Validation/SolanaContractProbe.php',
+    'BCC\\Trust\\Onchain\\Services\\ValidatorClaimSupport' => $baseDir . '/app/Domain/Onchain/Services/ValidatorClaimSupport.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupGateService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupGateService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupProvisioningService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupProvisioningService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupRevokeService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupRevokeService.php',

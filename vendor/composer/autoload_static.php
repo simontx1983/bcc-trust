@@ -715,6 +715,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\Validation\\CosmosContractProbe' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/Validation/CosmosContractProbe.php',
         'BCC\\Trust\\Onchain\\Services\\Validation\\EvmContractProbe' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/Validation/EvmContractProbe.php',
         'BCC\\Trust\\Onchain\\Services\\Validation\\SolanaContractProbe' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/Validation/SolanaContractProbe.php',
+        'BCC\\Trust\\Onchain\\Services\\ValidatorClaimSupport' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorClaimSupport.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupGateService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupGateService.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupProvisioningService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupProvisioningService.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupRevokeService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupRevokeService.php',
