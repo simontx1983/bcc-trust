@@ -11,11 +11,10 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Security review, 2026-11-19: the cms host served signed-out RSS (the five
- * newest posts in full, with their authors' names; the comments feed) and a
- * generator tag naming the WordPress version. WordPressFrontEndGate sends
- * every feed to the app with a 301, empties the generator and unlinks the
- * feeds from the head.
+ * Security review, 2026-11-19 (private tracker): WordPressFrontEndGate
+ * sends every feed to the app with a 301, empties the generator, unlinks
+ * the feeds from the head, and (F-509) keeps core's XML sitemaps off and
+ * refuses author archives.
  *
  * Runs the real gate over the sign-in gate's WordPress doubles plus
  * tests/Stubs/wp-front-end-stubs.php (is_feed(), remove_action()).
@@ -38,17 +37,46 @@ final class WordPressFrontEndGateTest extends TestCase
 
     // ── Wiring ────────────────────────────────────────────────────────────
 
-    public function testItHooksTheRedirectAndTheGeneratorFilter(): void
+    public function testItHooksTheRedirectTheGeneratorAndTheSitemapFilters(): void
     {
         WordPressFrontEndGate::register();
 
         self::assertSame(
             [
                 ['template_redirect', [WordPressFrontEndGate::class, 'sendFeedsToTheApp'], 1, 1],
+                ['template_redirect', [WordPressFrontEndGate::class, 'refuseAuthorArchives'], 1, 1],
                 ['the_generator', [WordPressFrontEndGate::class, 'noGenerator'], PHP_INT_MAX, 2],
+                ['wp_sitemaps_enabled', [WordPressFrontEndGate::class, 'noSitemaps'], PHP_INT_MAX, 1],
             ],
             $GLOBALS['__bcc_sig']['hooks']
         );
+    }
+
+    /**
+     * F-509: core's sitemaps stay off, as the last word: whatever core or an
+     * earlier filter answered (true, a truthy string), the result is false.
+     */
+    public function testTheSitemapsAreOffWhateverCameBefore(): void
+    {
+        WordPressFrontEndGate::register();
+
+        $filters = [
+            [static fn($on): bool => true, 10],            // core's default
+            [static fn($on): string => 'yes', 99],         // a later plugin
+        ];
+        foreach ($GLOBALS['__bcc_sig']['hooks'] as [$hook, $callback, $priority]) {
+            if ($hook === 'wp_sitemaps_enabled') {
+                $filters[] = [$callback, $priority];
+            }
+        }
+        usort($filters, static fn(array $a, array $b): int => $a[1] <=> $b[1]);
+        $value = true;
+        foreach ($filters as [$callback]) {
+            $value = $callback($value);
+        }
+
+        self::assertFalse($value);
+        self::assertFalse(WordPressFrontEndGate::noSitemaps(true));
     }
 
     public function testItUnhooksEveryAdvertisementAtCoresPriorities(): void
@@ -129,6 +157,30 @@ final class WordPressFrontEndGateTest extends TestCase
         $boot = (string) file_get_contents(__DIR__ . '/../../bcc-trust.php');
 
         self::assertStringContainsString("\\BCC\\Trust\\Core\\Security\\WordPressFrontEndGate::register();", $boot);
+    }
+
+    // ── F-509: author archives answer a bare 404 ─────────────────────────
+
+    public function testAnAuthorArchiveIsABare404BeforeRedirectCanonical(): void
+    {
+        WordPressFrontEndGate::register();
+        $GLOBALS['__bcc_sig']['author'] = true;
+
+        $trace = self::serve(false);
+
+        self::assertSame(['redirected'], $trace, 'halted at priority 1: redirect_canonical never ran');
+        self::assertSame(404, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testAnythingButAnAuthorArchiveIsLeftToTheRest(): void
+    {
+        $GLOBALS['__bcc_sig']['author'] = false;
+
+        WordPressFrontEndGate::refuseAuthorArchives();
+
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 
     // ── Feeds go to the app ───────────────────────────────────────────────

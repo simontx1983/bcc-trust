@@ -17,6 +17,14 @@ namespace {
         }
     }
 
+    // F-509: 'author' answers is_author().
+    if (!function_exists('is_author')) {
+        function is_author(): bool
+        {
+            return (bool) ($GLOBALS['__bcc_sig']['author'] ?? false);
+        }
+    }
+
     if (!function_exists('remove_action')) {
         /** @param mixed $callback */
         function remove_action(string $hook, $callback, int $priority = 10): bool

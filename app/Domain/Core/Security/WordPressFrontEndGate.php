@@ -14,13 +14,11 @@ if (!defined('ABSPATH')) {
  * What WordPress's own front end on the cms host may still say to a
  * signed-out visitor.
  *
- * Security review, 2026-11-19: cms served the WordPress feeds to anyone.
- * `/feed/` carried the five newest `post` items in full with their
- * authors' names, and `/comments/feed/` was open too. Every page's head
- * carried a generator tag naming the exact WordPress version. BCC is
- * headless and nothing reads these feeds: the app has no RSS, and BCC's
- * own `/bcc/v1/feed/*` routes are REST, which core answers at
- * `parse_request`, before any of this runs. So:
+ * BCC is headless: the app has no RSS and reads no sitemap, and BCC's own
+ * `/bcc/v1/feed/*` routes are REST, which core answers at `parse_request`,
+ * before any of this runs. So WordPress's own feeds, sitemaps and
+ * self-description stay off on cms. Rationale: security review 2026-11-19
+ * (private tracker).
  *
  *   1. A feed request 301s to the app's front page.
  *      - `template_redirect` at priority 1: before `redirect_canonical`
@@ -46,8 +44,13 @@ if (!defined('ABSPATH')) {
  *        at `/wp-json/oembed/…`, which RestRouteAllowlist refuses to a
  *        signed-out caller anyway, and cms serves nothing to embed.
  *
- * The sitemaps need nothing here: Rank Math already 301s `/wp-sitemap.xml`
- * to the app.
+ *   4. Core's XML sitemaps are off (`wp_sitemaps_enabled` → false, last
+ *      word), so `/wp-sitemap.xml` and every `?sitemap=` answer 404. No
+ *      SEO plugin provides them on cms any more (F-509), and nothing BCC
+ *      runs needs them.
+ *   5. An author archive (`?author=N`, `/author/{slug}/`) answers a bare 404
+ *      at `template_redirect` priority 1, before `redirect_canonical` (10)
+ *      runs. BCC's member pages live in the app; nothing links to these.
  */
 final class WordPressFrontEndGate
 {
@@ -60,7 +63,9 @@ final class WordPressFrontEndGate
     public static function register(): void
     {
         add_action('template_redirect', [self::class, 'sendFeedsToTheApp'], self::REDIRECT_PRIORITY);
+        add_action('template_redirect', [self::class, 'refuseAuthorArchives'], self::REDIRECT_PRIORITY);
         add_filter('the_generator', [self::class, 'noGenerator'], PHP_INT_MAX, 2);
+        add_filter('wp_sitemaps_enabled', [self::class, 'noSitemaps'], PHP_INT_MAX);
 
         // Core hooks these in default-filters.php, which runs before any
         // plugin loads, so they are there to remove now.
@@ -107,5 +112,33 @@ final class WordPressFrontEndGate
         unset($generator, $type);
 
         return '';
+    }
+
+    /**
+     * `wp_sitemaps_enabled`, last: core's XML sitemaps stay off, whatever an
+     * earlier filter answered (F-509).
+     *
+     * @param mixed $enabled
+     */
+    public static function noSitemaps($enabled = true): bool
+    {
+        unset($enabled);
+
+        return false;
+    }
+
+    /**
+     * `template_redirect`, first (F-509): an author archive answers a bare 404
+     * and nothing else: no page is rendered.
+     */
+    public static function refuseAuthorArchives(): void
+    {
+        if (!is_author()) {
+            return;
+        }
+
+        nocache_headers();
+        status_header(404);
+        exit;
     }
 }
