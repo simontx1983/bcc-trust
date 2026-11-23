@@ -301,15 +301,53 @@ final class SecretPagesOnMemberListsIntegrationTest extends TestCase
         self::assertSame($tab === 'reviews' ? 2 : 1, $data['pagination']['total'], 'every secret page left out, every other row kept');
     }
 
-    /** Over the cap the list is not checked page by page: it answers 503 rather than show any of them. */
+    /**
+     * Over the cap the list is not checked page by page: it answers 503
+     * rather than show any of them, and says so in the log and the metric.
+     */
     #[DataProvider('secretReads')]
     public function testOverTheCapOfSecretPagesTheListFailsClosed(string $tab, string $read): void
     {
         unset($read);
         $this->seedBulkSecretPages(PageAccess::HIDDEN_LIST_CAP - 1);
         $this->viewAs(self::STRANGER);
+        \BCC\Core\Log\Logger::reset();
+        $before = \BCC\Core\Observability\DegradationMetrics::readEvent('page_privacy', 'member_list_over_cap', time());
 
         self::assertUnavailable($this->call($tab));
+
+        self::assertSame(
+            $before + 1,
+            \BCC\Core\Observability\DegradationMetrics::readEvent('page_privacy', 'member_list_over_cap', time()),
+            'counted once, so a member stuck over the cap shows on /system/health'
+        );
+        $refusals = array_values(array_filter(
+            \BCC\Core\Log\Logger::$lines,
+            static fn (array $line): bool => $line['level'] === 'error'
+                && str_contains($line['message'], 'over the secret-page cap')
+        ));
+        self::assertCount(1, $refusals);
+        self::assertSame(self::AUTHOR, $refusals[0]['context']['member_id']);
+        self::assertSame(PageAccess::HIDDEN_LIST_CAP, $refusals[0]['context']['cap']);
+    }
+
+    /**
+     * Site admins see every page, so they never pay the secret-page read:
+     * not when it would fail, and not when the member is over the cap.
+     */
+    #[DataProvider('secretReads')]
+    public function testAnAdminNeverPaysTheSecretPageReadNorItsRefusal(string $tab, string $read): void
+    {
+        $this->seedBulkSecretPages(PageAccess::HIDDEN_LIST_CAP - 1);
+        $this->viewAs(self::ADMIN);
+        $GLOBALS['__bcc_test_caps']           = ['manage_options'];
+        $GLOBALS['wpdb']->failQueriesMatching = $read;
+
+        $data = $this->ok($this->call($tab, ['per_page' => 50]));
+
+        // Every row: the fixture's own plus the bulk secret pages.
+        self::assertSame(($tab === 'reviews' ? 4 : 3) + PageAccess::HIDDEN_LIST_CAP - 1, $data['pagination']['total']);
+        self::assertSame(0, $GLOBALS['wpdb']->injectedFailures, 'the read never ran');
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

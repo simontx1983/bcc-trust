@@ -103,9 +103,11 @@ final class UserReviewsService
         // viewer may not see are left out, as PageAccess decides for each
         // page: its members, invitees and author see it, as do site admins.
         // The same ids go to the count and the page, so the total agrees.
-        // A read that cannot tell throws, and the route answers 503.
+        // A read that cannot tell throws, and the route answers 503. The
+        // member and site admins see every page, so neither pays the read
+        // (nor its 503).
         // Rationale: F-528 (private tracker).
-        $hiddenPageIds = $isSelf
+        $hiddenPageIds = $isSelf || \BCC\Trust\Core\Support\ProfileAccess::viewerIsExemptFromVisibility()
             ? []
             : \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
                 $this->voteRepository->findSecretPageIdsReviewedBy($userId),

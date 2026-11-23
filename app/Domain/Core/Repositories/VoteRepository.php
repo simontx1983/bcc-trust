@@ -1318,7 +1318,7 @@ class VoteRepository {
         ), __FUNCTION__, true);
 
         if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
-            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'more secret pages than the list can check');
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $voterId);
         }
 
         return self::positiveIds(array_map(
