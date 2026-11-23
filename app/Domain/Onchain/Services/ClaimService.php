@@ -778,13 +778,16 @@ class ClaimService {
 
     /**
      * F-521: an account deletion's claim purge. Every verified claim is
-     * revoked through {@see revokeAllForUser()} with `account_deleted` first,
-     * so each is audited and frees the page it granted; then all of the
-     * user's claim rows are deleted, as before.
+     * revoked through {@see revokeClaim()} with `account_deleted` first, so
+     * each is audited and frees the page it granted; then all of the user's
+     * claim rows are deleted, as before.
      *
-     * Like the rest of the account-deletion cleanup, a failed revoke must not
-     * block the WordPress deletion: it is logged loudly and the rows are
-     * still purged.
+     * Each claim is revoked on its own: one that fails is logged and the
+     * rest are still revoked, so a single bad claim never leaves the user's
+     * other pages unreleased. (A wallet unlink, by contrast, stops at the
+     * first failure and purges nothing: see revokeAllForUser().) Like the
+     * rest of the account-deletion cleanup, no failure blocks the WordPress
+     * deletion: the rows are still purged.
      */
     public static function purgeForDeletedUser(int $userId): void
     {
@@ -792,12 +795,24 @@ class ClaimService {
             return;
         }
         try {
-            self::revokeAllForUser($userId, 'account_deleted');
+            $claimIds = ClaimRepository::verifiedEntityClaimIdsForUser($userId);
         } catch (\Throwable $e) {
-            \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
+            $claimIds = [];
+            \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim read failed, claims purged without revoke', [
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
+        }
+        foreach ($claimIds as $claimId) {
+            try {
+                self::revokeClaim($claimId, 'account_deleted');
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
+                    'user_id'  => $userId,
+                    'claim_id' => $claimId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
         }
         ClaimRepository::deleteForUser($userId);
     }

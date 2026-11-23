@@ -146,6 +146,26 @@ final class ClaimRevokeAllTest extends TestCase
         self::assertNotSame([], \ClaimRevokeWorld::$errors, 'the failure is logged');
     }
 
+    /**
+     * Security L2: on the deletion path one failed revoke must not leave the
+     * user's other pages unreleased. Every other claim is still revoked.
+     */
+    public function testOnDeletionOneFailedRevokeDoesNotStopTheOthers(): void
+    {
+        \ClaimRevokeWorld::$userClaimIds = [41, 42, 43];
+        \ClaimRevokeWorld::$throw        = new \RuntimeException('COMMIT failed');
+        \ClaimRevokeWorld::$throwOnCall  = 2;
+
+        ClaimService::purgeForDeletedUser(5);
+
+        self::assertSame([41, 42, 43], \ClaimRevokeWorld::$revokeCalls, 'the third is still attempted');
+        self::assertSame(['account_deleted', 'account_deleted'], self::auditedReasons(), 'the first and third are revoked');
+        self::assertCount(2, \ClaimRevokeWorld::$released, 'their pages are released');
+        self::assertSame([5], \ClaimRevokeWorld::$deletedFor, 'the rows are still purged');
+        $logged = array_column(array_column(\ClaimRevokeWorld::$errors, 1), 'claim_id');
+        self::assertSame([42], $logged, 'the failed claim is logged by id');
+    }
+
     public function testNoUserIsANoOp(): void
     {
         ClaimService::purgeForDeletedUser(0);
@@ -156,14 +176,35 @@ final class ClaimRevokeAllTest extends TestCase
 
     /**
      * Wiring (source text; the behaviour is proven above): the account
-     * deletion cleanup purges claims ONLY through purgeForDeletedUser(), never
-     * with a bare row delete beside it.
+     * deletion cleanup purges claims ONLY through purgeForDeletedUser(). No
+     * bare `ClaimRepository::deleteForUser(` exists anywhere in the plugin
+     * outside ClaimService, so no hook can purge claims without revoking
+     * them first, whatever the hook order.
      */
-    public function testAccountDeletionPurgesClaimsOnlyThroughTheRevokeFirstPath(): void
+    public function testClaimsArePurgedOnlyThroughTheRevokeFirstPath(): void
     {
         $body = GateOrder::body(GateOrder::code('app/Domain/Core/Services/UserLifecycleService.php'), 'onUserDelete');
-
         self::assertSame(1, substr_count($body, 'ClaimService::purgeForDeletedUser($userId)'));
-        self::assertStringNotContainsString('ClaimRepository::deleteForUser(', $body, 'no unaudited claim delete');
+
+        $root  = dirname(__DIR__, 2);
+        $files = ['bcc-trust.php'];
+        foreach (['app', 'includes'] as $dir) {
+            $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/' . $dir, \FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $file) {
+                if ($file instanceof \SplFileInfo && $file->getExtension() === 'php') {
+                    $files[] = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+                }
+            }
+        }
+
+        $callers = [];
+        foreach ($files as $relative) {
+            if (str_contains(GateOrder::code($relative), 'ClaimRepository::deleteForUser(')) {
+                $callers[] = $relative;
+            }
+        }
+        self::assertContains('bcc-trust.php', $files, 'the scan covers the plugin bootstrap');
+        self::assertGreaterThan(100, count($files), 'the scan covers the plugin tree (it is not scanning nothing)');
+        self::assertSame(['app/Domain/Onchain/Services/ClaimService.php'], $callers, 'no bare claim purge outside ClaimService');
     }
 }

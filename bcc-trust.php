@@ -1953,17 +1953,15 @@ add_action('plugins_loaded', function (): void {
         }
     }, 10, 3);
 
-    // User deletion: clean up wallet links, signals, claims, and the
-    // per-wallet on-chain data hung off them (NFT holdings + profile
-    // selections). NftHoldings resolves ownership by joining wallet_links,
-    // so it MUST run BEFORE WalletRepository::deleteForUser deletes those
-    // rows — otherwise the join finds nothing and holdings orphan.
+    // User deletion: the on-chain signals. NFT holdings, NFT selections,
+    // claims and wallet links are cleaned up by
+    // UserLifecycleService::onUserDelete(), in the order they need: holdings
+    // before the wallet links they join through, and each verified claim
+    // revoked through the audited path (its page released) before the claim
+    // rows are purged (F-521). They are not repeated here: a second, bare
+    // claim delete would depend on hook order to keep that guarantee.
     add_action('delete_user', function (int $userId): void {
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\SignalRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
     }, 10, 1);
 
     // REST API.
