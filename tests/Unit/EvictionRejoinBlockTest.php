@@ -83,7 +83,7 @@ namespace BCC\Trust\Core\Tests\Unit {
             self::assertSame([[
                 'action'      => 'group_rejoin_block_failed',
                 'target_id'   => self::GROUP,
-                'meta'        => ['attempt' => 0, 'final' => false],
+                'meta'        => ['attempt' => 0, 'final' => false, 'member_id' => self::USER],
                 'target_type' => 'group',
                 'user_id'     => self::USER,
             ]], $GLOBALS['__bcc_optout_audit']);
@@ -101,7 +101,7 @@ namespace BCC\Trust\Core\Tests\Unit {
 
             self::assertSame([self::GROUP => 0], \OptOutStore::map(self::USER));
             self::assertSame(['group_rejoin_block_recorded'], self::auditActions());
-            self::assertSame(['attempt' => 2], $GLOBALS['__bcc_optout_audit'][0]['meta']);
+            self::assertSame(['attempt' => 2, 'member_id' => self::USER], $GLOBALS['__bcc_optout_audit'][0]['meta']);
             self::assertSame([], $GLOBALS['__bcc_optout_scheduled']);
         }
 
@@ -111,7 +111,7 @@ namespace BCC\Trust\Core\Tests\Unit {
 
             (new NftGroupGateService())->recordEvictionRejoinBlock(self::USER, self::GROUP, 2);
 
-            self::assertSame(['attempt' => 2, 'final' => false], $GLOBALS['__bcc_optout_audit'][0]['meta']);
+            self::assertSame(['attempt' => 2, 'final' => false, 'member_id' => self::USER], $GLOBALS['__bcc_optout_audit'][0]['meta']);
             self::assertSame([self::USER, self::GROUP, 3], $GLOBALS['__bcc_optout_scheduled'][0]['args'] ?? null);
         }
 
@@ -125,7 +125,7 @@ namespace BCC\Trust\Core\Tests\Unit {
                 NftGroupGateService::REJOIN_BLOCK_RETRY_ATTEMPTS
             ));
 
-            self::assertSame(['attempt' => NftGroupGateService::REJOIN_BLOCK_RETRY_ATTEMPTS, 'final' => true], $GLOBALS['__bcc_optout_audit'][0]['meta']);
+            self::assertSame(['attempt' => NftGroupGateService::REJOIN_BLOCK_RETRY_ATTEMPTS, 'final' => true, 'member_id' => self::USER], $GLOBALS['__bcc_optout_audit'][0]['meta']);
             self::assertSame([], $GLOBALS['__bcc_optout_scheduled'], 'no retry after the last attempt');
         }
 
@@ -136,6 +136,54 @@ namespace BCC\Trust\Core\Tests\Unit {
          * goes through the retrying entry point, and the retry hook is
          * registered with all three arguments.
          */
+        // ── a retry that records it: was the member back by then? ──────────
+
+        /** @return iterable<string, array{string|null|false, string}> */
+        public static function membershipAtRetry(): iterable
+        {
+            yield 'no row'                 => [null, 'group_rejoin_block_recorded'];
+            yield 'a member again'         => ['member', 'group_rejoin_block_recorded_rejoined'];
+            yield 'back as a moderator'    => ['member_moderator', 'group_rejoin_block_recorded_rejoined'];
+            yield 'only asking to join'    => ['pending_user', 'group_rejoin_block_recorded'];
+            yield 'banned since'           => ['banned', 'group_rejoin_block_recorded'];
+            yield 'the read failed'        => [false, 'group_rejoin_block_recorded_unverified'];
+        }
+
+        #[\PHPUnit\Framework\Attributes\DataProvider('membershipAtRetry')]
+        public function testARetryThatRecordsItSaysWhetherTheMemberWasBack(string|null|false $status, string $action): void
+        {
+            $GLOBALS['__bcc_optout_membership'] = $status;
+
+            self::assertTrue((new NftGroupGateService())->recordEvictionRejoinBlock(self::USER, self::GROUP, 1));
+
+            self::assertSame([$action], self::auditActions());
+            self::assertSame(['attempt' => 1, 'member_id' => self::USER], $GLOBALS['__bcc_optout_audit'][0]['meta']);
+        }
+
+        /** The eviction itself just removed them: no membership read, no row. */
+        public function testTheFirstAttemptNeverReadsMembership(): void
+        {
+            $GLOBALS['__bcc_optout_membership'] = 'member';
+
+            self::assertTrue((new NftGroupGateService())->recordEvictionRejoinBlock(self::USER, self::GROUP));
+
+            self::assertSame(0, \BCC\Core\Repositories\PeepSoGroupRepository::$statusReads);
+            self::assertSame([], $GLOBALS['__bcc_optout_audit']);
+        }
+
+        /** Every outcome the service can write has its badge and its copy on the Audit Log page. */
+        public function testEveryOutcomeHasItsAdminCopy(): void
+        {
+            $meanings = (new \ReflectionClass(\BCC\Trust\Core\Admin\SessionsPage::class))->getConstant('REJOIN_BLOCK_MEANINGS');
+            self::assertIsArray($meanings);
+            self::assertSame(\BCC\Trust\Core\Admin\SessionsPage::REJOIN_BLOCK_ACTIONS, array_keys($meanings));
+            foreach (['group_rejoin_block_failed', 'group_rejoin_block_recorded_rejoined', 'group_rejoin_block_recorded_unverified'] as $needsAction) {
+                self::assertSame('bad', $meanings[$needsAction][0], "$needsAction asks the admin to act");
+                self::assertStringContainsStringIgnoringCase('remove them again', $meanings[$needsAction][1]);
+            }
+            self::assertSame('ok', $meanings['group_rejoin_block_recorded'][0]);
+        }
+
         public function testTheEvictionListenerAndTheRetryHookAreWired(): void
         {
             $src = (string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php');
