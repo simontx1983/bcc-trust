@@ -186,9 +186,10 @@ final class NotificationsEndpoint
         // viewer's own rows. It is validated before anything is written,
         // and an EMPTY list is refused: falling through to "mark all"
         // would turn a client bug into marking every notification read.
-        $rawIds = $request->get_param('ids');
-        if ($rawIds !== null) {
-            $ids = self::parseIds($rawIds);
+        // has_param(), not get_param() !== null: an explicit `"ids": null`
+        // is a sent `ids` too, and must be refused, not read as absent.
+        if ($request->has_param('ids')) {
+            $ids = self::parseIds($request->get_param('ids'));
             if ($ids === null) {
                 return ApiResponse::error(
                     'bcc_invalid_request',

@@ -149,6 +149,7 @@ final class NotificationMarkReadManyTest extends TestCase
     /** @return iterable<string, array{mixed}> */
     public static function badIds(): iterable
     {
+        yield 'an explicit null'         => [null]; // sent, so refused: never read as "no ids" → mark all
         yield 'an empty list'            => [[]];
         yield 'one id too many'          => [range(1, NotificationRepository::MARK_READ_MANY_MAX + 1)];
         yield 'a zero'                   => [[5, 0]];

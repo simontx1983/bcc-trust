@@ -41,6 +41,12 @@ namespace {
             {
                 return $this->params[$key] ?? null;
             }
+
+            /** As WordPress answers it: the key was sent, whatever its value (null included). */
+            public function has_param(string $key): bool
+            {
+                return array_key_exists($key, $this->params);
+            }
         }
     }
 
