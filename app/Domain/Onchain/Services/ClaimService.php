@@ -79,7 +79,7 @@ class ClaimService {
      * F-14: why a claim was revoked. A closed list — it is written to the
      * audit log and handed to `bcc_onchain_claim_revoked` listeners.
      */
-    public const REVOKE_REASONS = ['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator'];
+    public const REVOKE_REASONS = ['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator', 'wallet_unlinked', 'account_deleted'];
 
     /**
      * Max wallets checked per claim match (Phase 8). Each wallet on the
@@ -738,6 +738,68 @@ class ClaimService {
         });
 
         return true;
+    }
+
+    /**
+     * F-521: revoke EVERY verified validator/collection claim the user holds,
+     * or only those on one wallet (and chain) when given, through
+     * {@see revokeClaim()}. So each one is audited (`claim_revoked` with the
+     * reason), frees the page it granted (PeepSo owner and author, F-334),
+     * recomputes the bonus and fires `bcc_onchain_claim_revoked`, exactly as
+     * the re-verify sweep's revokes do. Used by a wallet unlink
+     * (`wallet_unlinked`) and an account deletion (`account_deleted`) before
+     * they purge the rows.
+     *
+     * The id list is read FAIL-CLOSED and bounded (see
+     * ClaimRepository::verifiedEntityClaimIdsForUser()); a failed read or a
+     * failed revoke THROWS, and the claims revoked before it stay revoked.
+     *
+     * ⚠ Must not be called inside TransactionManager::run(), like revokeClaim().
+     *
+     * @return int how many claims were revoked
+     * @throws \InvalidArgumentException for a reason outside REVOKE_REASONS
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure|\RuntimeException
+     */
+    public static function revokeAllForUser(int $userId, string $reason, ?string $walletAddress = null, ?int $chainId = null): int
+    {
+        if (!in_array($reason, self::REVOKE_REASONS, true)) {
+            throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
+        }
+
+        $revoked = 0;
+        foreach (ClaimRepository::verifiedEntityClaimIdsForUser($userId, $walletAddress, $chainId) as $claimId) {
+            if (self::revokeClaim($claimId, $reason)) {
+                ++$revoked;
+            }
+        }
+
+        return $revoked;
+    }
+
+    /**
+     * F-521: an account deletion's claim purge. Every verified claim is
+     * revoked through {@see revokeAllForUser()} with `account_deleted` first,
+     * so each is audited and frees the page it granted; then all of the
+     * user's claim rows are deleted, as before.
+     *
+     * Like the rest of the account-deletion cleanup, a failed revoke must not
+     * block the WordPress deletion: it is logged loudly and the rows are
+     * still purged.
+     */
+    public static function purgeForDeletedUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            self::revokeAllForUser($userId, 'account_deleted');
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+        ClaimRepository::deleteForUser($userId);
     }
 
     /** One post-commit step of a revoke: a failure is logged, never thrown. */

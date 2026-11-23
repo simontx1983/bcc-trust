@@ -77,6 +77,13 @@ final class BonusService
         $chainId = \BCC\Trust\Onchain\Repositories\ChainRepository::resolveId($chainSlug);
 
         try {
+            // F-521: revoke-and-release FIRST. Each verified claim on this
+            // wallet is revoked through the audited path, which frees the page
+            // it granted (PeepSo owner and author) and fires
+            // bcc_onchain_claim_revoked. A failure throws before the purge, so
+            // nothing is removed unaudited.
+            ClaimService::revokeAllForUser($userId, 'wallet_unlinked', $walletAddress, $chainId);
+
             // Both deletes run atomically inside the repository's own
             // transaction. Services-layer code does not touch $wpdb
             // transaction control directly — that rule is enforced by
