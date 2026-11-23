@@ -374,6 +374,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\JwtToken' => $baseDir . '/app/Domain/Core/Support/JwtToken.php',
     'BCC\\Trust\\Core\\Support\\KeysetCursor' => $baseDir . '/app/Domain/Core/Support/KeysetCursor.php',
     'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
+    'BCC\\Trust\\Core\\Support\\MemberDirectoryTypeCounts' => $baseDir . '/app/Domain/Core/Support/MemberDirectoryTypeCounts.php',
     'BCC\\Trust\\Core\\Support\\MemberSearchCandidates' => $baseDir . '/app/Domain/Core/Support/MemberSearchCandidates.php',
     'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\NoReactionsGate' => $baseDir . '/app/Domain/Core/Support/NoReactionsGate.php',
