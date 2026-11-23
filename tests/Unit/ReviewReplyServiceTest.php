@@ -51,6 +51,15 @@ final class ReviewReplyServiceTest extends TestCase
         // The REAL guard, and the loader throws rather than skipping.
         require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
         $GLOBALS['__bcc_pin_at_write'] = [];
+        // forReviews() checks the shown reply's author with
+        // ProfileAccess::filterVisible() (PeepSoUserSearch). Everyone is
+        // visible unless a test says otherwise.
+        require_once __DIR__ . '/../Stubs/filter-visible-stubs.php';
+        $GLOBALS['__bcc_fv'] = [
+            'visible'     => array_fill_keys([self::MEMBER, self::REVIEWER, self::STRANGER, self::OPERATOR, self::OWNER, self::NEW_OPERATOR], true),
+            'admin'       => false,
+            'constructed' => [],
+        ];
         \ReplyWorld::reset();
         \ReplyWorld::$reviews[self::VOTE] = ['voter' => self::REVIEWER, 'page' => self::selfPage()];
     }
@@ -269,6 +278,41 @@ final class ReviewReplyServiceTest extends TestCase
         self::assertSame('from the new operator', self::service()->forReviews(0, self::rows(self::VOTE))[self::VOTE]['reply']['body'] ?? null);
     }
 
+
+    /**
+     * The shown reply follows its author's profile visibility for the
+     * viewer: a reply by an author the viewer may not see (profile level,
+     * suspension, a block either way) is not shown, author and text alike.
+     * The viewer's own stale reply needs no check.
+     */
+    public function testAReplyWhoseAuthorTheViewerMayNotSeeIsNotShown(): void
+    {
+        self::service()->create(self::MEMBER, self::VOTE, 'the member answers');
+        self::assertSame('the member answers', self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE]['reply']['body'] ?? null, 'control: visible');
+
+        unset($GLOBALS['__bcc_fv']['visible'][self::MEMBER]);
+        $bundle = self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE];
+
+        self::assertNull($bundle['reply'], 'not shown to a viewer the author is hidden from');
+        self::assertFalse($bundle['can_reply']['allowed'], 'and the stranger still may not reply');
+    }
+
+    /** One visibility batch per page, constrained to the shown replies' authors, not a search. */
+    public function testTheAuthorCheckIsOneBatchForThePage(): void
+    {
+        \ReplyWorld::$reviews[71] = ['voter' => self::STRANGER, 'page' => self::selfPage()];
+        self::service()->create(self::MEMBER, self::VOTE, 'first');
+        self::service()->create(self::MEMBER, 71, 'second');
+        $GLOBALS['__bcc_fv']['constructed'] = [];
+
+        self::service()->forReviews(self::REVIEWER, self::rows(self::VOTE, 71));
+
+        $calls = $GLOBALS['__bcc_fv']['constructed'];
+        self::assertCount(1, $calls);
+        self::assertSame([self::MEMBER], array_values(array_unique(array_map('intval', (array) $calls[0]['args']['include']))));
+        self::assertTrue((bool) ($calls[0]['args'][\BCC\Trust\Core\Support\PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT] ?? false), 'profile visibility, not the search opt-out');
+        self::assertSame('', $calls[0]['search']);
+    }
 
     /**
      * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing their own reply.

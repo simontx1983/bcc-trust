@@ -27,6 +27,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\PublicIdentity;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -122,6 +123,9 @@ final class UserReviewsService
         $members = $memberIds === []
             ? []
             : $this->userMiniRepository->getRowsByIds(array_keys($memberIds));
+        // Their names go through PublicIdentity::visibleName(): one batch for
+        // the "Hide my real name" flags of the page's members.
+        PrivacySettings::prime(array_keys($memberIds));
 
         // F-345: each review's reply (by the reviewed party) and the
         // viewer's can_reply, one batched read; reply authors are hydrated
@@ -146,7 +150,7 @@ final class UserReviewsService
         $now   = time();
         foreach ($rows as $row) {
             $items[] = CardReviewsService::withReply(
-                self::shapeReview($row, $now, $members),
+                self::shapeReview($row, $now, $members, $viewerId),
                 $replies[(int) $row->id] ?? null,
                 $viewerId,
                 $prefetched
@@ -178,6 +182,7 @@ final class UserReviewsService
      *   page_type: string|null
      * } $row
      * @param array<int, array{id: int, user_login: string, display_name: string, handle: string|null}> $members
+     * @param int $viewerId who reads the list (a member sees their own real name)
      * @return array{
      *   id: int,
      *   grade: string,
@@ -188,7 +193,7 @@ final class UserReviewsService
      *   posted_at_label: string
      * }
      */
-    private static function shapeReview(object $row, int $now, array $members): array
+    private static function shapeReview(object $row, int $now, array $members, int $viewerId): array
     {
         $voteType = (int) $row->vote_type;
         $grade    = self::VOTE_TYPE_TO_GRADE[$voteType] ?? 'B';
@@ -204,14 +209,25 @@ final class UserReviewsService
 
         // Member-target rows: the subject is a person, not a page. Only
         // bcc_handle is safe to project publicly — '' when unset (the
-        // panel suppresses the @-link), never user_login.
+        // panel suppresses the @-link), never user_login. The name is the
+        // one OTHER people see (PublicIdentity::visibleName(): "Hide my real
+        // name" shows them '@handle'), with this viewer as the reader.
         $pageId = (int) $row->page_id;
         if (MemberSelfPageService::isSelfPage($pageId)) {
-            $member = $members[MemberSelfPageService::ownerOfSelfPage($pageId)] ?? null;
+            $memberId = MemberSelfPageService::ownerOfSelfPage($pageId);
+            $member   = $members[$memberId] ?? null;
             return [
                 'id'              => (int) $row->id,
                 'grade'           => $grade,
-                'subject'         => $member !== null ? $member['display_name'] : '',
+                'subject'         => $member !== null
+                    ? PublicIdentity::visibleName(
+                        $memberId,
+                        $member['display_name'],
+                        $member['user_login'],
+                        PublicIdentity::handle($memberId, $member['handle']),
+                        $viewerId
+                    )
+                    : '',
                 'subject_handle'  => $member !== null && $member['handle'] !== null ? $member['handle'] : '',
                 'text'            => $body,
                 'scope_label'     => 'MEMBER',
