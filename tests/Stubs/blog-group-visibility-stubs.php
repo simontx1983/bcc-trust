@@ -147,18 +147,6 @@ namespace BCC\Core\Repositories {
             {
                 return self::$memberships;
             }
-
-            /**
-             * The LENIENT lookup. Deliberately returns a DIFFERENT value
-             * from the strict one, so a caller that reaches for this by
-             * mistake is caught rather than accidentally correct.
-             *
-             * @return list<int>
-             */
-            public static function getNonOpenGroupIds(int $limit = 500): array
-            {
-                return [999999];
-            }
         }
     }
 
