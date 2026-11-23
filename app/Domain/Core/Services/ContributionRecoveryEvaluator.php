@@ -52,6 +52,11 @@ final class ContributionRecoveryEvaluator
      */
     public function runDaily(int $maxUsers = 1000): array
     {
+        // F-454: the FAIL-SAFE reader, on purpose. This sweep uses the list
+        // as an INCLUSION set (whom to re-evaluate), so a read that did not
+        // run is "nobody this run, retry tomorrow" (logged), not an outage.
+        // ⛔ A caller that EXCLUDES these members (feeds, suggestions, any
+        // future one) uses getCautionAndRiskyUserIdsForExclusion() instead.
         $userIds  = $this->reputationRepo->getCautionAndRiskyUserIds($maxUsers);
         $evaluated = 0;
         $adjusted  = 0;

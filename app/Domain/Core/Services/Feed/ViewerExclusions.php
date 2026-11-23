@@ -7,7 +7,13 @@
  *
  * Built only by {@see FeedRankingService::viewerExclusions()}, which throws
  * ActivityReadFailedException when one of those lists could not be read
- * (F-438 / F-455), so holding one means every list was really read. A caller
+ * (F-438 / F-455 / F-454), so holding one means every list was really read:
+ *   - the block lists, read in full;
+ *   - the moderation-hidden list, read, or its last-good copy;
+ *   - the caution/risky list (F-454), read in full, or truncated most severe
+ *     first at ReputationRepository::CAUTION_LIST_CEILING (recorded and
+ *     alerted), or its last-good copy no older than 24 h.
+ * A caller
  * that has to answer "unavailable" before it looks anything up (the shortcode
  * permalink, a repost's root check) probes with that method first, then hands
  * the result to {@see FeedRankingService::getActivityById()}, so nothing is
@@ -54,7 +60,8 @@ final class ViewerExclusions
     }
 
     /**
-     * The §O4.1 shadow-limited authors, never the viewer.
+     * The §O4.1 shadow-limited authors, never the viewer. Most severe first;
+     * at the ceiling the least severe are cut (see the class docblock).
      *
      * @return list<int>
      */

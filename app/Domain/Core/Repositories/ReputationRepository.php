@@ -35,6 +35,56 @@ if (!defined('ABSPATH')) exit;
  */
 class ReputationRepository {
 
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
+    /**
+     * F-454: the most caution/risky members the excluding reader returns.
+     * Far past any realistic size (the old LIMIT was 1000).
+     *
+     * Reaching it TRUNCATES, most severe first, and alerts; it does not fail
+     * closed (security, F-454 review: the list is a shadow-limit quality
+     * filter, not a safety gate). Only a read that SUCCEEDED and returned
+     * more than this many rows is cut; a read that did not run never is
+     * (it serves the last-good copy whole, or throws).
+     *   - P2: `caution_list` / `ceiling_reached`, the cut falls among
+     *     caution-tier members;
+     *   - P1: `caution_list_risky_ceiling` / `risky_fills_ceiling`, the risky
+     *     members alone fill it (P1 through {@see withRiskyCeilingAsP1()}).
+     *
+     * ⚠ NOT A COMFORTABLE OPERATING POINT. bcc-core puts no cap on the
+     * `$excludedAuthorIds` it is handed: PeepSoActivityRepository builds
+     * `NOT IN (%d × N)` from the whole list. A list anywhere near this size
+     * makes every feed query that large. Reaching it means the shadow-limit
+     * strategy needs revisiting (a per-page exact check, F-54 style), not
+     * a bigger number here.
+     */
+    public const CAUTION_LIST_CEILING = 20000;
+
+    /** F-454: the P1 subsystem of {@see CAUTION_LIST_CEILING} (bcc-core's map). */
+    public const RISKY_CEILING_SUBSYSTEM = 'caution_list_risky_ceiling';
+
+    /**
+     * F-454: the last list the excluding reader read successfully, served
+     * when a read fails: {ids: list<int>, read_at: float (unix, when that
+     * read STARTED), hash}. Autoload no. Not a registered setting and not
+     * exposed through REST.
+     */
+    public const CAUTION_LAST_GOOD_OPTION = 'bcc_caution_list_last_good';
+
+    /**
+     * F-454: how old the last-good list may be and still be served, in
+     * seconds. 24 h; a site can set BCC_TRUST_CAUTION_LIST_MAX_AGE in
+     * wp-config (at least 60).
+     */
+    public const CAUTION_LAST_GOOD_MAX_AGE = 86400;
+
+    /**
+     * F-454: while the list is unchanged, the stored copy is rewritten at
+     * most this often, so its `read_at` stays within the max age of the
+     * last successful read and the bound measures real staleness.
+     */
+    private const CAUTION_LAST_GOOD_REFRESH = 3600;
+
     /**
      * The member self-page score table (Architecture A). All reads resolve a
      * member's tier/score from their self-page row here (page_id =
@@ -277,35 +327,213 @@ class ReputationRepository {
 
     /**
      * User IDs whose reputation tier is `caution` or `risky` — the §O4.1
-     * "shadow-limited" set. Used by the feed ranker to exclude these
-     * users' posts from feed inputs in a single query.
+     * "shadow-limited" set — for a caller that uses it as an INCLUSION set:
+     * ContributionRecoveryEvaluator's daily sweep, which re-evaluates these
+     * members.
      *
-     * Bounded by LIMIT — V1 expects this set to stay small (< few
-     * hundred). If it grows past the cap, the feed-ranker strategy
-     * needs revisiting (per-page filtering instead of preloaded list).
+     * ⚠ FAIL-SAFE: a read that did not run answers [] (logged), which for
+     * that worker is "nobody this run, retry tomorrow".
+     *
+     * ⛔ NEVER FOR EXCLUDING. A caller that HIDES these members (the feeds,
+     * the permalink, the hot feed, member suggestions, and any future one)
+     * must use {@see getCautionAndRiskyUserIdsForExclusion()}, which never
+     * answers a failed read with [] (F-454).
      *
      * @return list<int>
      */
     public function getCautionAndRiskyUserIds(int $limit = 1000): array {
+        $rows = $this->readCautionAndRisky(max(1, $limit), __FUNCTION__, false);
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $id = (int) ($row->page_owner_id ?? 0);
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+        return $ids;
+    }
+
+    /**
+     * F-454: the §O4.1 caution/risky list for a caller that EXCLUDES these
+     * members: every per-viewer feed and the permalink (through
+     * FeedRankingService::viewerExclusions()), the anonymous hot feed, and
+     * member suggestions.
+     *
+     * - Read in a fixed order, the most severe first: risky before caution,
+     *   then the lowest score, then the member id. So the list is the same
+     *   on every read, and if the ceiling is ever reached, the members past
+     *   it are the least severe.
+     * - Up to CAUTION_LIST_CEILING members. One more row is read so that
+     *   reaching the ceiling is known; it is recorded (`ceiling_reached`)
+     *   and logged at error, and the first CAUTION_LIST_CEILING are used.
+     * - A successful read is remembered as the last-good list (an option,
+     *   autoload no), rewritten only when the list changes or the stored
+     *   copy is over an hour old, so a request does not write.
+     * - A read that did not run serves that last-good list while it is no
+     *   older than CAUTION_LAST_GOOD_MAX_AGE (logged with its age). With no
+     *   list, or one past the bound, it THROWS: the caller answers
+     *   "unavailable", never a page without this list.
+     *
+     * @return list<int>
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException when the list could not be read and no usable last-good list exists
+     */
+    public function getCautionAndRiskyUserIdsForExclusion(): array {
+        $readStartedAt = microtime(true);
+        try {
+            $rows = $this->readCautionAndRisky(self::CAUTION_LIST_CEILING + 1, __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'list_read_failed');
+            return self::serveCautionLastGood();
+        }
+
+        $tierById = [];
+        foreach ($rows as $row) {
+            $id = (int) ($row->page_owner_id ?? 0);
+            if ($id > 0 && !isset($tierById[$id])) {
+                $tierById[$id] = (string) ($row->reputation_tier ?? '');
+            }
+        }
+        $ids = array_keys($tierById);
+
+        if (count($ids) > self::CAUTION_LIST_CEILING) {
+            $ids = array_slice($ids, 0, self::CAUTION_LIST_CEILING);
+            // The read is risky first, so the last member kept is risky only
+            // when the risky members alone fill the ceiling.
+            $riskyFills = ($tierById[$ids[self::CAUTION_LIST_CEILING - 1]] ?? '') === 'risky';
+            \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'ceiling_reached');
+            if ($riskyFills) {
+                \BCC\Core\Observability\DegradationMetrics::record(self::RISKY_CEILING_SUBSYSTEM, 'risky_fills_ceiling');
+            }
+            \BCC\Core\Log\Logger::error('[ReputationRepository] caution/risky list ceiling reached; the list is cut, most severe kept', [
+                'ceiling'     => self::CAUTION_LIST_CEILING,
+                'risky_fills' => $riskyFills,
+            ]);
+        }
+
+        self::rememberCautionLastGood($ids, $readStartedAt);
+        return $ids;
+    }
+
+    /**
+     * F-454: the `bcc_degradation_p1_subsystems` filter (bcc-core's
+     * DegradationAlerter): makes `caution_list_risky_ceiling` page as P1.
+     * `caution_list` stays P2. Registered in bcc-trust.php.
+     *
+     * @param mixed $p1
+     * @return list<string>
+     */
+    public static function withRiskyCeilingAsP1($p1): array {
+        $list = is_array($p1) ? array_values(array_filter($p1, 'is_string')) : [];
+        if (!in_array(self::RISKY_CEILING_SUBSYSTEM, $list, true)) {
+            $list[] = self::RISKY_CEILING_SUBSYSTEM;
+        }
+        return $list;
+    }
+
+    /**
+     * The one caution/risky read, most severe first (see
+     * getCautionAndRiskyUserIdsForExclusion()). Architecture A: member
+     * self-pages only (page_id > ID_BASE); entity pages can be caution/risky
+     * too but are not members.
+     *
+     * @return list<object>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private function readCautionAndRisky(int $limit, string $method, bool $failClosed): array {
         global $wpdb;
 
-        // Architecture A: scan member self-pages (page_id > ID_BASE) only —
-        // entity pages can also be caution/risky but are not members.
-        /** @var list<object{page_owner_id: int|numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT page_owner_id
+        $sql = $wpdb->prepare(
+            "SELECT page_owner_id, reputation_tier
                FROM {$this->scoreTable}
               WHERE category_id = 0
                 AND page_id > %d
                 AND reputation_tier IN ('caution', 'risky')
+              ORDER BY FIELD(reputation_tier, 'risky', 'caution'), total_score ASC, page_owner_id ASC
               LIMIT %d",
             \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE,
             $limit
-        ));
+        );
+        if (!is_string($sql)) {
+            if ($failClosed) {
+                throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(static::class, $method, 'prepare() returned no query');
+            }
+            return [];
+        }
+
+        return self::runRead($sql, $method, $failClosed);
+    }
+
+    /**
+     * F-454: persist a successful read as the last-good list. Written only
+     * when it differs from the stored one, or the stored one is over
+     * CAUTION_LAST_GOOD_REFRESH old (so `read_at` keeps measuring the last
+     * successful read), and never over a list read later than this one.
+     *
+     * @param list<int> $ids
+     */
+    private static function rememberCautionLastGood(array $ids, float $readStartedAt): void {
+        $hash   = md5(implode(',', $ids));
+        $stored = get_option(self::CAUTION_LAST_GOOD_OPTION, null);
+        if (is_array($stored)) {
+            $storedAt = (float) ($stored['read_at'] ?? 0);
+            if ($storedAt >= $readStartedAt) {
+                return; // a newer read already landed
+            }
+            if (($stored['hash'] ?? '') === $hash && $readStartedAt - $storedAt < self::CAUTION_LAST_GOOD_REFRESH) {
+                return; // unchanged and recent: no write
+            }
+        }
+        update_option(
+            self::CAUTION_LAST_GOOD_OPTION,
+            ['ids' => $ids, 'read_at' => $readStartedAt, 'hash' => $hash],
+            false
+        );
+    }
+
+    /**
+     * F-454: a failed read. Serve the last-good list while it is within the
+     * max age, else throw.
+     *
+     * @return list<int>
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException
+     */
+    private static function serveCautionLastGood(): array {
+        $stored = get_option(self::CAUTION_LAST_GOOD_OPTION, null);
+        if (!is_array($stored) || !isset($stored['ids']) || !is_array($stored['ids'])) {
+            \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'no_last_good');
+            \BCC\Core\Log\Logger::error('[ReputationRepository] caution/risky list unreadable and no last-good list exists', []);
+            throw new \BCC\Trust\Core\Exceptions\RepositoryException(
+                'Caution/risky list unreadable and no last-known-good list exists.'
+            );
+        }
+
+        $ageSeconds = max(0, (int) round(microtime(true) - (float) ($stored['read_at'] ?? 0)));
+        $maxAge     = defined('BCC_TRUST_CAUTION_LIST_MAX_AGE')
+            ? max(60, (int) constant('BCC_TRUST_CAUTION_LIST_MAX_AGE'))
+            : self::CAUTION_LAST_GOOD_MAX_AGE;
+        if ($ageSeconds > $maxAge) {
+            \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'last_good_expired');
+            \BCC\Core\Log\Logger::error('[ReputationRepository] caution/risky list unreadable and the last-good list is past its max age', [
+                'last_good_age_seconds' => $ageSeconds,
+                'max_age_seconds'       => $maxAge,
+            ]);
+            throw new \BCC\Trust\Core\Exceptions\RepositoryException(
+                'Caution/risky list unreadable and the last-known-good list is past its max age.'
+            );
+        }
+
+        \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'served_last_good');
+        \BCC\Core\Log\Logger::error('[ReputationRepository] caution/risky list read failed; served the last-good list', [
+            'last_good_age_seconds' => $ageSeconds,
+            'last_good_count'       => count($stored['ids']),
+        ]);
 
         $ids = [];
-        foreach ($rows ?: [] as $row) {
-            $ids[] = (int) $row->page_owner_id;
+        foreach ($stored['ids'] as $raw) {
+            if (is_numeric($raw) && (int) $raw > 0) {
+                $ids[] = (int) $raw;
+            }
         }
         return $ids;
     }

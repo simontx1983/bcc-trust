@@ -260,8 +260,12 @@ namespace BCC\Trust\Core\Repositories {
     if (!class_exists(__NAMESPACE__ . '\\ReputationRepository', false)) {
         final class ReputationRepository
         {
+            // F-454: the feeds read the EXCLUDING reader. The fail-safe
+            // getCautionAndRiskyUserIds() is gone here, so a feed calling it
+            // again is a fatal.
+
             /** @return list<int> */
-            public function getCautionAndRiskyUserIds(): array
+            public function getCautionAndRiskyUserIdsForExclusion(): array
             {
                 return [];
             }
