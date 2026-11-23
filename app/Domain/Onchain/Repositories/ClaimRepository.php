@@ -837,6 +837,58 @@ class ClaimRepository {
         }
     }
 
+    /** Most claims one revoke-all reads at once (F-521); more is refused, never truncated. */
+    public const REVOKE_ALL_MAX = 200;
+
+    /**
+     * F-521: the ids of the VERIFIED validator/collection claims a user holds,
+     * or only those on one wallet address (and chain, when given), lowest id
+     * first. The same wallet/chain match as {@see deleteByUserAndWallet()}.
+     *
+     * Read FAIL-CLOSED and bounded: a failed read, or more than
+     * REVOKE_ALL_MAX rows, THROWS rather than answering with a part, so a
+     * caller never revokes some claims and purges the rest unaudited.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $where = "user_id = %d AND status = 'verified' AND entity_type IN ('validator', 'collection')";
+        $args  = [$userId];
+        if ($walletAddress !== null) {
+            $where .= ' AND wallet_address = %s';
+            $args[] = $walletAddress;
+            if ($chainId !== null) {
+                $where .= ' AND chain_id = %d';
+                $args[] = $chainId;
+            }
+        }
+        $args[] = self::REVOKE_ALL_MAX + 1;
+
+        /** @var list<object{id: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE {$where} ORDER BY id ASC LIMIT %d",
+            ...$args
+        ), __FUNCTION__, true);
+        if (count($rows) > self::REVOKE_ALL_MAX) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'more verified claims than REVOKE_ALL_MAX');
+        }
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->id;
+        }
+
+        return $ids;
+    }
+
     /**
      * Delete all claims linked to a specific wallet address for a user on a specific chain.
      *
