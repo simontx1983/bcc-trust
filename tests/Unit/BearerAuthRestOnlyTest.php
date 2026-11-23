@@ -73,6 +73,7 @@ final class BearerAuthRestOnlyTest extends TestCase
         yield "the app's spelling of that slug" => ['/index.php', '/wp-json/bcc/v1/cards/%25f0%259f%2590%25betrace-juno-vckja0', '', 'wp-json'];
         yield 'an encoded space'                => ['/index.php', '/wp-json/bcc/v1/cards/a%2520b', '', 'wp-json'];
         yield 'four rounds of encoding'         => ['/index.php', '/wp-json/bcc/v1/cards/%25252541', '', 'wp-json'];
+        yield 'a literal % before two hex digits decodes on' => ['/index.php', '/wp-json/bcc/v1/cards/a%2541b', '', 'wp-json'];
     }
 
     #[DataProvider('restRequests')]
@@ -135,6 +136,8 @@ final class BearerAuthRestOnlyTest extends TestCase
         yield 'a malformed escape'               => ['/wp-json/bcc/v1/%zz'];
         yield 'a short escape'                   => ['/wp-json/bcc/v1/%2'];
         yield 'a trailing percent'               => ['/wp-json/bcc/v1/me%'];
+        yield 'a literal % (sent as %25), not before hex' => ['/wp-json/bcc/v1/cards/100%25-off'];
+        yield 'a literal % (sent as %25), trailing' => ['/wp-json/bcc/v1/cards/50%25'];
         yield 'an encoded NUL'                   => ['/wp-json/bcc/v1/%00'];
         yield 'an encoded newline'               => ['/wp-json/bcc/v1/%0a'];
         yield 'a raw control character'          => ["/wp-json/bcc/v1/\x01"];

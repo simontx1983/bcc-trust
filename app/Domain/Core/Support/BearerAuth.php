@@ -332,6 +332,11 @@ final class BearerAuth
      *   - nor is `/index.php/{prefix}/…`, or any request with PATH_INFO;
      *   - nor is a percent-encoded or differently-cased prefix.
      *
+     * A literal `%` in a path (sent as `%25`) is never kept as itself: the
+     * next decoding round reads it as an escape. Followed by two hex digits
+     * it decodes on (`%2541` becomes `A`). Otherwise (`100%25-off`, or a
+     * trailing `%25`) it is a malformed escape, and the bearer is ignored.
+     *
      * The app and its NextAuth server call `{BCC_API_URL}/wp-json/…` only.
      *
      * @param string $scriptName  SCRIPT_NAME (else PHP_SELF)
