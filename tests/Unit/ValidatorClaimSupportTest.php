@@ -69,18 +69,34 @@ final class ValidatorClaimSupportTest extends TestCase
         self::assertStringNotContainsString('base-mainnet', $evm);
     }
 
-    /** Where wallet claiming can't prove an operator, BCC can verify them: the hint says what to do next. */
+    /**
+     * Where wallet claiming can't prove an operator, BCC can verify them: the
+     * hint says what to do next, and names the address to write to (F-551).
+     * The copy is pinned word for word.
+     */
     public function testTheUnprovableHintsSayWhatToDoNext(): void
     {
         foreach ([
             ['solana', 'solana', 'Solana', 'Vote111'],
             ['cosmos', 'thorchain', 'THORChain', 'thor1node'],
             ['near', 'near', 'NEAR Protocol', 'pool.near'],
+            ['near', 'near', '', 'pool.near'],
         ] as [$type, $slug, $name, $operator]) {
-            $hint = (string) ValidatorClaimSupport::assess($type, $slug, $name, $operator)['hint'];
-            self::assertStringContainsString("Wallet claiming isn't available on {$name} yet.", $hint);
-            self::assertStringContainsString("Contact BCC and we'll verify you", $hint);
+            $chain = $name !== '' ? $name : 'this chain';
+            self::assertSame(
+                "Wallet claiming isn't available on {$chain} yet. Email phillip@bluecollarcrypto.io and we'll verify you as this validator's operator.",
+                ValidatorClaimSupport::assess($type, $slug, $name, $operator)['hint']
+            );
         }
+    }
+
+    /** The address lives in ONE constant: the hint reads it, and the source spells it once. */
+    public function testTheContactAddressIsOneConstant(): void
+    {
+        self::assertSame('phillip@bluecollarcrypto.io', ValidatorClaimSupport::VERIFICATION_CONTACT_EMAIL);
+
+        $source = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Onchain/Services/ValidatorClaimSupport.php');
+        self::assertSame(1, substr_count($source, '@bluecollarcrypto.io'), 'the address is spelled once, in the constant');
     }
 
     public function testAMissingChainNameFallsBackToGenericWords(): void
