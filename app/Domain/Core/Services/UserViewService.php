@@ -69,6 +69,15 @@ if (!defined('ABSPATH')) {
 
 final class UserViewService
 {
+    /**
+     * The usermeta keys behind three of resolveFlags()' slugs. Public so
+     * the public index (F-518, PublicProfileIndex) reads the very same keys:
+     * a flagged member must be out of the sitemap AND noindex on the page.
+     */
+    public const META_SHADOW_LIMITED = 'bcc_shadow_limited';
+    public const META_HIDDEN         = 'bcc_hidden';
+    public const META_UNDER_REVIEW   = 'bcc_under_review';
+
     private VoteRepository $voteRepo;
     private ReputationRepository $reputationRepo;
     private RankStateService $rankStateService;
@@ -755,9 +764,9 @@ final class UserViewService
         // moderation UI is consistent with the actual account state.
         $suspended = !Permissions::is_not_suspended($userId, false);
 
-        $shadowLimited = self::metaFlag($userId, 'bcc_shadow_limited');
-        $hidden        = self::metaFlag($userId, 'bcc_hidden');
-        $underReview   = self::metaFlag($userId, 'bcc_under_review');
+        $shadowLimited = self::metaFlag($userId, self::META_SHADOW_LIMITED);
+        $hidden        = self::metaFlag($userId, self::META_HIDDEN);
+        $underReview   = self::metaFlag($userId, self::META_UNDER_REVIEW);
 
         return $memo[$userId] = self::composeFlagSlugs(
             $suspended,
