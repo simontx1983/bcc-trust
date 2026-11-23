@@ -59,44 +59,56 @@ final class SitemapEndpoint
 
     public static function register(): void
     {
-        // Three literal registrations (not a loop) so contract-parity's
-        // scan sees every path.
-        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/members', self::route('members'));
-        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/pages', self::route('pages'));
-        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/groups', self::route('groups'));
+        // Three literal registrations, each with its own literal `methods`,
+        // so contract-parity's scan resolves every path AND method (a route
+        // array built by a helper call is UNRESOLVED there, which fails CI).
+        // Anonymous by design: this is the public index.
+        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/members', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => static fn (WP_REST_Request $request): WP_REST_Response => self::respond($request, 'members'),
+            'permission_callback' => '__return_true',
+            'args'                => self::args(),
+        ]);
+        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/pages', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => static fn (WP_REST_Request $request): WP_REST_Response => self::respond($request, 'pages'),
+            'permission_callback' => '__return_true',
+            'args'                => self::args(),
+        ]);
+        register_rest_route(self::ROUTE_NAMESPACE, '/sitemap/groups', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => static fn (WP_REST_Request $request): WP_REST_Response => self::respond($request, 'groups'),
+            'permission_callback' => '__return_true',
+            'args'                => self::args(),
+        ]);
     }
 
     /**
-     * @param 'members'|'pages'|'groups' $kind
-     * @return array<string, mixed>
+     * The two query arguments every route takes.
+     *
+     * @return array<string, array<string, mixed>>
      */
-    private static function route(string $kind): array
+    private static function args(): array
     {
         return [
-            'methods'             => WP_REST_Server::READABLE,
-            'callback'            => static fn (WP_REST_Request $request): WP_REST_Response => self::respond($request, $kind),
-            // Anonymous by design: this is the public index.
-            'permission_callback' => '__return_true',
-            'args'                => [
-                // ⚠ keepScalar, not absint: absint('-5') is 5, and the
-                // handler must see the caller's text to refuse it (see
-                // BoundedIntParam). minimum/maximum document the bound;
-                // the handler is where it binds.
-                'after' => [
-                    'required'          => false,
-                    'type'              => 'integer',
-                    'default'           => 0,
-                    'minimum'           => 0,
-                    'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
-                ],
-                'limit' => [
-                    'required'          => false,
-                    'type'              => 'integer',
-                    'default'           => self::DEFAULT_LIMIT,
-                    'minimum'           => 1,
-                    'maximum'           => self::MAX_LIMIT,
-                    'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
-                ],
+            // ⚠ keepScalar, not absint: absint('-5') is 5, and the handler
+            // must see the caller's text to refuse it (see BoundedIntParam).
+            // minimum/maximum document the bound; the handler is where it
+            // binds.
+            'after' => [
+                'required'          => false,
+                'type'              => 'integer',
+                'default'           => 0,
+                'minimum'           => 0,
+                'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
+            ],
+            'limit' => [
+                'required'          => false,
+                'type'              => 'integer',
+                'default'           => self::DEFAULT_LIMIT,
+                'minimum'           => 1,
+                'maximum'           => self::MAX_LIMIT,
+                'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
             ],
         ];
     }
