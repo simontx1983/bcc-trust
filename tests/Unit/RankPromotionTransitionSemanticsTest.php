@@ -158,6 +158,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
                     ],
                     'target'             => $this->fakeTarget,
                     'suspension_unknown' => $this->fakeSuspensionUnknown,
+                    'findings_unknown'   => false,
                 ];
             }
         };

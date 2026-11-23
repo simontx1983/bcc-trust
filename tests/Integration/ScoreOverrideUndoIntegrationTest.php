@@ -49,6 +49,17 @@ final class ScoreOverrideUndoIntegrationTest extends TestCase
     {
         require_once dirname(__DIR__) . '/Stubs/score-override-stubs.php';
         global $wpdb;
+        // The elite recompute reads the disputes table, as production does
+        // (F-466: a missing table is a failed read, not "no upheld disputes").
+        // Created by the real installer when absent, as the disputes suites
+        // do; other suites drop it in their tearDown, so not in the bootstrap.
+        if (!defined('DB_NAME')) {
+            define('DB_NAME', (string) $wpdb->get_var('SELECT DATABASE()'));
+        }
+        $disputes = \BCC\Trust\Disputes\Repositories\DisputeRepository::disputes_table();
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $disputes)) !== $disputes) {
+            \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
+        }
         $this->deleteRow();
         self::assertNotFalse($wpdb->insert($wpdb->prefix . 'bcc_trust_page_scores', [
             'page_id' => self::PAGE, 'page_owner_id' => self::OWNER,

@@ -827,7 +827,12 @@ class DisputeRepository
      * Uncached: a moving `since` boundary makes caching counterproductive,
      * same rationale as countByReporterSince.
      *
+     * FAIL-CLOSED (F-466): a failed read THROWS, never a count of 0. Its
+     * only caller, EliteEligibilityService::recomputeFor(), PERSISTS the
+     * elite flag and tier from this answer.
+     *
      * @param string $sinceMysqlUtc UTC 'Y-m-d H:i:s' window start.
+     * @throws RepositoryReadFailure
      */
     public static function countUpheldSince(int $pageId, string $sinceMysqlUtc): int
     {
@@ -838,8 +843,8 @@ class DisputeRepository
         global $wpdb;
         $table = self::disputes_table();
 
-        $raw = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT COUNT(*) AS upheld FROM {$table}
               WHERE page_id = %d
                 AND status = %s
                 AND resolved_at IS NOT NULL
@@ -848,9 +853,16 @@ class DisputeRepository
             $pageId,
             DisputeStatus::REJECTED,
             $sinceMysqlUtc
-        ));
+        ), __FUNCTION__, true);
 
-        return is_numeric($raw) ? (int) $raw : 0;
+        $raw = $rows[0]->upheld ?? null;
+        if (!is_numeric($raw)) {
+            // COUNT(*) always answers one numeric row; anything else is not
+            // a count this gate can trust.
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'COUNT(*) returned no number');
+        }
+
+        return (int) $raw;
     }
 
     /**

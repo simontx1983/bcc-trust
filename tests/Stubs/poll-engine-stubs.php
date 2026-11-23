@@ -249,6 +249,17 @@ class InMemoryBallotRepository extends BallotRepository
         return array_slice($out, 0, $limit);
     }
 
+    /** F-464: set to make the close-time ballot read fail, as a failed SELECT does. */
+    public bool $failCloseRead = false;
+
+    public function listActiveForPollOrFail(int $pollId): array
+    {
+        if ($this->failCloseRead) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+        }
+        return $this->listActiveForPoll($pollId);
+    }
+
     public function recordClosureAudit(
         int $pollId,
         int $ballotId,
@@ -282,17 +293,28 @@ class StubClusterFindingsRepository extends ClusterFindingsRepository
     /** @var list<object> ClusterFindingRow-shaped stdClass rows */
     public array $suspected = [];
 
+    /** F-464 / F-466: set to make that list read fail, as a failed SELECT does. */
+    public bool $failConfirmed = false;
+
+    public bool $failSuspected = false;
+
     public function __construct()
     {
     }
 
     public function listActiveConfirmed(): array
     {
+        if ($this->failConfirmed) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+        }
         return $this->confirmed;
     }
 
     public function listActiveSuspected(): array
     {
+        if ($this->failSuspected) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+        }
         return $this->suspected;
     }
 
