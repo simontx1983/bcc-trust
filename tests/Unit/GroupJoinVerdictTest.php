@@ -142,9 +142,9 @@ final class GroupJoinVerdictTest extends TestCase
     }
 
     /**
-     * F-469: a score that could not be read is `unavailable`, never the
-     * neutral 50 (allowed at a 50 minimum) or trust_threshold. It is not
-     * memoised: the next group in the list reads again.
+     * F-469: a score that could not be read is `unavailable`, never a
+     * verdict computed from a default score. It is not memoised: the next
+     * group in the list reads again.
      */
     public function testAnUnreadableScoreIsUnavailableAndReadAgain(): void
     {

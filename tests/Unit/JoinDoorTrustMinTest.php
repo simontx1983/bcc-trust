@@ -157,8 +157,8 @@ final class JoinDoorTrustMinTest extends TestCase
 
     /**
      * F-469: the viewer's score that could not be read refuses the join,
-     * retryably, before any write. Never the neutral 50, which would let a
-     * low-trust member through a 50 minimum.
+     * retryably, before any write. The gate compares only a score it
+     * actually read against the minimum.
      */
     public function testAScoreThatCannotBeReadRefusesBeforeAnyWrite(): void
     {
