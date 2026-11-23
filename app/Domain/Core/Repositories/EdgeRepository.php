@@ -349,22 +349,47 @@ class EdgeRepository {
         $count = 0;
 
         // Aggregate all vote weights: voter → page_owner
+        //
+        // ⚠⚠ runRead, NOT get_results() — and here the stakes are higher
+        // than on a read path. Every row this returns is UPSERTED into the
+        // edge table below, so rows that are not this query's own become
+        // trust-graph EDGES: wrong source, target and weight, written and
+        // durable. A read gate recovers when the database does; this does
+        // not.
+        //
+        // `get_results()` could not see that. It discards query()'s return
+        // value, and wpdb::query() bails before flush() on a failed
+        // reconnect or an emptied `query` filter — leaving the PREVIOUS
+        // query's rows in last_result with last_error EMPTY. The old
+        // `?: []` then collapsed a failed read and "no votes yet" into the
+        // same answer, so a bail could not even be distinguished from an
+        // empty source table.
+        //
+        // runRead() clears last_error, calls query() explicitly, checks its
+        // return AND last_error, and throws with failClosed — so a backfill
+        // that cannot trust its source writes NOTHING rather than writing
+        // something it made up. Same guard recalculateVoteEdge() already
+        // uses, for the same reason.
         /** @var list<EdgeBackfillRow> $voteEdges */
-        $voteEdges = $wpdb->get_results( $wpdb->prepare(
-            "SELECT v.voter_user_id   AS source_user_id,
-                    s.page_owner_id   AS target_user_id,
-                    SUM( v.weight )   AS total_weight,
-                    COUNT(*)          AS vote_count
-               FROM {$this->votesTable} v
-               JOIN {$this->scoresTable} s
-                    ON s.page_id = v.page_id
-                   AND s.category_id = 0
-              WHERE v.status = %d
-                AND s.page_owner_id > 0
-                AND " . $this->votes()->hiddenReviewExclusion('v') . "
-           GROUP BY v.voter_user_id, s.page_owner_id",
-            1
-        ) ) ?: [];
+        $voteEdges = self::runRead(
+            (string) $wpdb->prepare(
+                "SELECT v.voter_user_id   AS source_user_id,
+                        s.page_owner_id   AS target_user_id,
+                        SUM( v.weight )   AS total_weight,
+                        COUNT(*)          AS vote_count
+                   FROM {$this->votesTable} v
+                   JOIN {$this->scoresTable} s
+                        ON s.page_id = v.page_id
+                       AND s.category_id = 0
+                  WHERE v.status = %d
+                    AND s.page_owner_id > 0
+                    AND " . $this->votes()->hiddenReviewExclusion('v') . "
+               GROUP BY v.voter_user_id, s.page_owner_id",
+                1
+            ),
+            __FUNCTION__,
+            true
+        );
 
         foreach ( $voteEdges as $edge ) {
             $this->upsertOrDelete(
