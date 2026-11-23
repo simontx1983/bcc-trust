@@ -165,3 +165,45 @@ namespace BCC\Trust\Tests\Stubs {
         }
     }
 }
+
+// ── WP_REST_Response, for DisputeController's error mapping (F-469) ───
+//
+// ⚠ `class_exists(..., false)`: a plain class_exists() runs the autoloader.
+// Guarded, so a suite that loaded another WP_REST_Response stub first keeps
+// it; this file no longer depends on that happening.
+namespace {
+    if (!class_exists('WP_REST_Response', false)) {
+        class WP_REST_Response
+        {
+            /** @var mixed */
+            private $data;
+            private int $status;
+            /** @var array<string, string> */
+            private array $headers = [];
+
+            /** @param mixed $data */
+            public function __construct($data = null, int $status = 200)
+            {
+                $this->data   = $data;
+                $this->status = $status;
+            }
+
+            /** @return mixed */
+            public function get_data()
+            {
+                return $this->data;
+            }
+
+            public function get_status(): int
+            {
+                return $this->status;
+            }
+
+            public function header(string $key, string $value, bool $replace = true): void
+            {
+                unset($replace);
+                $this->headers[$key] = $value;
+            }
+        }
+    }
+}
