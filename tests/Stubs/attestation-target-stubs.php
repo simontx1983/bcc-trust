@@ -38,6 +38,8 @@ namespace {
         public static array $newMembers = [];
         /** The attestor's reputation tier; null = the test helper's default. */
         public static ?string $tier = null;
+        /** F-469: the attestor's reputation row could not be read. */
+        public static bool $tierUnreadable = false;
         /** The attestor's fraud_score (UserInfoRepository::getByUserId). */
         public static int $fraudScore = 0;
         /** @var array<int, list<int>> SECRET page id => the viewers bcc-core's rule lets in */
@@ -56,6 +58,7 @@ namespace {
             self::$suspended    = [];
             self::$newMembers   = [];
             self::$tier         = null;
+            self::$tierUnreadable = false;
             self::$fraudScore   = 0;
             self::$secretPages  = [];
             self::$admin        = false;

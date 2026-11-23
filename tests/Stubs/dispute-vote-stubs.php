@@ -74,8 +74,11 @@ namespace BCC\Trust\Tests\Stubs {
         /** @var array<int, object> user_id => rank_state-shaped row */
         public array $rankRows = [];
 
-        /** @var array<int, string> user_id => reputation tier */
+        /** @var array<int, string|null> user_id => reputation tier; null = unreadable (F-469) */
         public array $tiers = [];
+
+        /** @var list<int> F-469: voters whose weight snapshot cannot be read */
+        public array $snapshotFails = [];
 
         /** @var list<int> */
         public array $suspended = [];
@@ -106,9 +109,9 @@ namespace BCC\Trust\Tests\Stubs {
             return $this->rankRows[$userId] ?? null;
         }
 
-        protected function tierOf(int $userId): string
+        protected function tierOf(int $userId): ?string
         {
-            return $this->tiers[$userId] ?? 'neutral';
+            return array_key_exists($userId, $this->tiers) ? $this->tiers[$userId] : 'neutral';
         }
 
         protected function notSuspended(int $userId): bool
@@ -126,6 +129,13 @@ namespace BCC\Trust\Tests\Stubs {
          */
         protected function weightSnapshot(int $userId): array
         {
+            if (in_array($userId, $this->snapshotFails, true)) {
+                throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                    \BCC\Trust\Core\Repositories\ReputationRepository::class,
+                    'getByUserIdOrFail',
+                    'test: the reputation row could not be read'
+                );
+            }
             /** @var array{rank_slug: string|null, maturity: float, rank_multiplier: float, trust_multiplier: float, trust_score: float, fraud_discount: float, effective_weight: float} */
             return $this->snapshots[$userId] ?? [
                 'rank_slug'        => 'apprentice',

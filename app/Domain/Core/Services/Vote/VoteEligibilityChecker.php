@@ -383,7 +383,17 @@ class VoteEligibilityChecker {
      * runs on an eligibility-cache miss. See enforceDownvoteCap().
      */
     private function assertDownvoteEligibility(int $voterId): void {
-        $reputation = $this->reputationRepo->getByUserId($voterId);
+        // F-469: a tier that could not be read is neither eligible nor
+        // ineligible. It throws past the eligibility cache (which caches only
+        // VoteEligibilityException), so the next attempt reads again.
+        $reputation = $this->reputationRepo->getByUserIdOrFail($voterId);
+        if ($reputation === false) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                ReputationRepository::class,
+                'getByUserIdOrFail',
+                "the voter's reputation row could not be read"
+            );
+        }
         $tier       = $reputation->reputation_tier ?? 'neutral';
 
         if (!in_array($tier, self::DOWNVOTE_TIERS, true)) {

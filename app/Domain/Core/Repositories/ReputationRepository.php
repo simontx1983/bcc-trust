@@ -36,6 +36,7 @@ if (!defined('ABSPATH')) exit;
 class ReputationRepository {
 
     use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+    use \BCC\Core\Repositories\ProbesReads;
 
     /**
      * F-454: the most caution/risky members the excluding reader returns.
@@ -134,6 +135,10 @@ class ReputationRepository {
      * getByUserId, and list surfaces (member cards) read several of them
      * per row — without a memo a 24-row page re-reads the same rows up to
      * 4× each. Stores misses (null) too. Primed in bulk by primeByUserIds().
+     *
+     * ⚠ F-469: ONLY READS THAT RAN ARE STORED. A read that did not run is
+     * never memoised (as "no row" or anything else), so the next call in the
+     * request reads again. Its answer is "unknown" (see getByUserIdOrFail()).
      * This facade is read-only (Architecture A — all writes go through
      * ScoreRepository against the self-page row), so there is no in-class
      * write path to invalidate the memo within a request.
@@ -147,6 +152,9 @@ class ReputationRepository {
      * Bulk-warm the row memo for a bounded id list (one IN query).
      * Ids absent from the table are memoized as null so the per-user
      * fallback query is skipped for them as well.
+     *
+     * F-469: when the read did not run, NOTHING is memoised (logged), so
+     * each id is read again on its own when it is asked for.
      *
      * @param list<int> $userIds
      */
@@ -172,18 +180,25 @@ class ReputationRepository {
         );
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
-        /** @var list<object{page_owner_id: int|numeric-string, total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql  = $wpdb->prepare(
             "SELECT page_owner_id, total_score, reputation_tier, contribution_bonus, vote_count, last_calculated_at
                FROM {$this->scoreTable}
               WHERE page_id IN ({$placeholders}) AND category_id = 0",
             ...$pageIds
-        ));
+        );
+        /** @var list<object{page_owner_id: int|numeric-string, total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}>|null $rows */
+        $rows = is_string($sql) ? self::trustedRows($sql) : null;
+        if ($rows === null) {
+            \BCC\Core\Log\Logger::error('[ReputationRepository] reputation rows read failed; nothing memoised', [
+                'user_count' => count($idList),
+            ]);
+            return;
+        }
 
         foreach ($idList as $id) {
             self::$rowMemo[$id] = null;
         }
-        foreach ($rows ?: [] as $raw) {
+        foreach ($rows as $raw) {
             $uid = (int) $raw->page_owner_id;
             if ($uid > 0) {
                 /** @phpstan-var ReputationRow $mapped */
@@ -194,11 +209,37 @@ class ReputationRepository {
     }
 
     /**
-     * Get reputation record by user ID
+     * Get reputation record by user ID — LENIENT, for display: a read that
+     * did not run answers null, the same as "no row" (so the neutral
+     * defaults), and is logged (F-469).
+     *
+     * ⛔ A GATE (anything that allows or refuses by tier or score) uses
+     * {@see getByUserIdOrFail()} / {@see getTierOrUnknown()} /
+     * {@see getScoreOrUnknown()} and refuses on unknown.
      *
      * @phpstan-return ReputationRow|null
      */
     public function getByUserId(int $userId): ?object {
+        $row = $this->getByUserIdOrFail($userId);
+
+        return $row === false ? null : $row;
+    }
+
+    /**
+     * F-469: the reputation row, tri-state, as bcc-core's
+     * getMembershipStatusOrFail() answers:
+     *   - the row (object);
+     *   - null: the read ran and there is no row (a new member: neutral);
+     *   - false: the read did NOT run. Never memoised, logged.
+     *
+     * Read through bcc-core's ProbesReads::trustedRows(), so wpdb's silent
+     * pre-flush failure (stale rows, no error) is a failure too. Callers
+     * compare with `=== false`: a loose falsy check would turn "no row"
+     * into "unknown".
+     *
+     * @phpstan-return ReputationRow|null|false
+     */
+    public function getByUserIdOrFail(int $userId): object|null|false {
         if (array_key_exists($userId, self::$rowMemo)) {
             return self::$rowMemo[$userId];
         }
@@ -210,20 +251,55 @@ class ReputationRepository {
         // deterministic self-page id and map to the legacy ReputationRow shape.
         $pageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId);
 
-        /** @var object{total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}|null $raw */
-        $raw = $wpdb->get_row($wpdb->prepare(
+        $sql  = $wpdb->prepare(
             "SELECT page_owner_id, total_score, reputation_tier, contribution_bonus, vote_count, last_calculated_at
                FROM {$this->scoreTable}
               WHERE page_id = %d AND category_id = 0",
             $pageId
-        ));
+        );
+        $rows = is_string($sql) ? self::trustedRows($sql) : null;
+        if ($rows === null) {
+            \BCC\Core\Log\Logger::error('[ReputationRepository] reputation row read failed; answered as unknown, not memoised', [
+                'user_id' => $userId,
+            ]);
+            return false;
+        }
 
+        /** @var object{total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}|null $raw */
+        $raw = isset($rows[0]) && is_object($rows[0]) ? $rows[0] : null;
         $row = $raw !== null ? $this->mapSelfPageRow($userId, $raw) : null;
 
         /** @phpstan-var ReputationRow|null $row */
         self::$rowMemo[$userId] = $row;
 
         return $row;
+    }
+
+    /**
+     * F-469: the tier for a GATE. A member with no row is 'neutral', as
+     * getTier() answers; NULL means the read did not run, and the gate
+     * refuses (or answers unavailable).
+     */
+    public function getTierOrUnknown(int $userId): ?string {
+        $record = $this->getByUserIdOrFail($userId);
+        if ($record === false) {
+            return null;
+        }
+
+        return $record !== null ? $record->reputation_tier : 'neutral';
+    }
+
+    /**
+     * F-469: the score for a GATE. A member with no row has the neutral
+     * score, as getScore() answers; NULL means the read did not run.
+     */
+    public function getScoreOrUnknown(int $userId): ?float {
+        $record = $this->getByUserIdOrFail($userId);
+        if ($record === false) {
+            return null;
+        }
+
+        return $record !== null ? (float) $record->reputation_score : self::DEFAULT_REPUTATION_SCORE;
     }
 
     /**
@@ -396,11 +472,14 @@ class ReputationRepository {
         }
         $ids = array_keys($tierById);
 
-        if (count($ids) > self::CAUTION_LIST_CEILING) {
+        // F-546: the ceiling counts ROWS, before the dedupe, so duplicate
+        // owner rows cannot hide that more rows were left unread.
+        if (count($rows) > self::CAUTION_LIST_CEILING) {
             $ids = array_slice($ids, 0, self::CAUTION_LIST_CEILING);
             // The read is risky first, so the last member kept is risky only
             // when the risky members alone fill the ceiling.
-            $riskyFills = ($tierById[$ids[self::CAUTION_LIST_CEILING - 1]] ?? '') === 'risky';
+            $lastKept   = $ids === [] ? 0 : $ids[count($ids) - 1];
+            $riskyFills = ($tierById[$lastKept] ?? '') === 'risky';
             \BCC\Core\Observability\DegradationMetrics::record('caution_list', 'ceiling_reached');
             if ($riskyFills) {
                 \BCC\Core\Observability\DegradationMetrics::record(self::RISKY_CEILING_SUBSYSTEM, 'risky_fills_ceiling');

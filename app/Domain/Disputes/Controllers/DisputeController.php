@@ -429,6 +429,7 @@ class DisputeController
             DisputeVoteException::KIND_COOLDOWN         => ApiResponse::error('bcc_dispute_vote_cooldown', $e->getMessage(), 429),
             DisputeVoteException::KIND_NOT_FOUND        => ApiResponse::error('bcc_dispute_vote_not_found', $e->getMessage(), 404),
             DisputeVoteException::KIND_NO_BALLOT        => ApiResponse::error('bcc_dispute_vote_not_found', $e->getMessage(), 404),
+            DisputeVoteException::KIND_UNAVAILABLE      => ApiResponse::error('bcc_unavailable', $e->getMessage(), 503),
             default                                     => ApiResponse::error('bcc_dispute_vote_closed', $e->getMessage(), 410),
         };
         return $this->noStore($resp);

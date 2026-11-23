@@ -225,6 +225,52 @@ final class DisputePanelRetirementTest extends TestCase
         }
     }
 
+    /**
+     * F-469: a tier that could not be read is unavailable (503), never the
+     * neutral default and never the tier_required refusal.
+     */
+    public function testAnUnreadableTierIsUnavailableNotAdmittedOrRefused(): void
+    {
+        $this->openDisputePoll();
+        $this->service->tiers[self::RANKED_ID] = null;
+
+        try {
+            $this->service->castOrChange(self::DISPUTE_ID, self::RANKED_ID, 'uphold');
+            self::fail('an unreadable tier must not admit the vote');
+        } catch (DisputeVoteException $e) {
+            self::assertSame(DisputeVoteException::KIND_UNAVAILABLE, $e->kind);
+        }
+    }
+
+    /** F-469: the controller answers the unavailable kind as a retryable 503 (no-store comes from its shared noStore()). */
+    public function testTheControllerAnswersUnavailableAs503(): void
+    {
+        $controller = (new \ReflectionClass(DisputeController::class))->newInstanceWithoutConstructor();
+        $map        = new \ReflectionMethod(DisputeController::class, 'disputeVoteError');
+        $response   = $map->invoke($controller, new DisputeVoteException(
+            DisputeVoteException::KIND_UNAVAILABLE,
+            'standing_unavailable',
+            'We could not check your standing right now. Please try again.'
+        ));
+
+        self::assertSame(503, $response->get_status());
+        self::assertSame('bcc_unavailable', $response->get_data()['error']['code'] ?? null);
+    }
+
+    /** F-469: the ballot weight reads the voter's reputation row too. */
+    public function testAnUnreadableWeightSnapshotIsUnavailable(): void
+    {
+        $this->openDisputePoll();
+        $this->service->snapshotFails = [self::RANKED_ID];
+
+        try {
+            $this->service->castOrChange(self::DISPUTE_ID, self::RANKED_ID, 'uphold');
+            self::fail('an unreadable snapshot must not admit the vote');
+        } catch (DisputeVoteException $e) {
+            self::assertSame(DisputeVoteException::KIND_UNAVAILABLE, $e->kind);
+        }
+    }
+
     public function testFraudHardBlockCannotVote(): void
     {
         $this->openDisputePoll();

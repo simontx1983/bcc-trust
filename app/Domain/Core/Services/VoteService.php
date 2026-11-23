@@ -1109,14 +1109,29 @@ class VoteService {
         return $value;
     }
 
-    /** reputationRepo->getByUserId() with request-scoped cache. */
+    /**
+     * reputationRepo->getByUserIdOrFail() with request-scoped cache.
+     *
+     * F-469: the vote's weight and the dispute ballot snapshot depend on it,
+     * so a read that did not run THROWS and is never cached. A member with
+     * no row is still null (the neutral defaults).
+     *
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
     private function getVoterReputation(int $userId): ?object {
         $cache = self::getCachedValue("reputation:{$userId}");
         if ($cache['hit']) {
             /** @var object|null */
             return $cache['value'];
         }
-        $value = $this->reputationRepo->getByUserId($userId);
+        $value = $this->reputationRepo->getByUserIdOrFail($userId);
+        if ($value === false) {
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                ReputationRepository::class,
+                'getByUserIdOrFail',
+                "the voter's reputation row could not be read"
+            );
+        }
         self::setCachedValue("reputation:{$userId}", $value);
         return $value;
     }

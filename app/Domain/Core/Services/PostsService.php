@@ -633,6 +633,13 @@ final class PostsService
             $voteId = (int) ($result['vote_id'] ?? 0);
         } catch (\BCC\Trust\Core\Exceptions\VoteEligibilityException $e) {
             return self::reviewVoteRefusal($e);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            // F-469: a check the review depends on (the voter's standing)
+            // could not run. Retryable, and never a refusal.
+            return [
+                'error'   => 'bcc_unavailable',
+                'message' => 'Review could not be saved. Try again.',
+            ];
         } catch (Exception $e) {
             // Unexpected runtime failure — never forward the internal
             // message to the client (γ-leak). Log it, return a generic.

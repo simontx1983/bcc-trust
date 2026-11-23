@@ -283,6 +283,21 @@ final class CautionListFailClosedTest extends TestCase
         self::assertSame(['caution_list_risky_ceiling'], ReputationRepository::withRiskyCeilingAsP1(null));
     }
 
+    /**
+     * F-546: the ceiling counts ROWS, before the dedupe. Duplicate owner rows
+     * that bring the read past the ceiling record it, though the unique ids
+     * do not exceed it, because more rows were left unread.
+     */
+    public function testDuplicateOwnerRowsCannotHideTheCeiling(): void
+    {
+        $this->db()->owners = [...range(1, ReputationRepository::CAUTION_LIST_CEILING), 1];
+
+        $ids = (new ReputationRepository())->getCautionAndRiskyUserIdsForExclusion();
+
+        self::assertCount(ReputationRepository::CAUTION_LIST_CEILING, $ids);
+        self::assertSame(['caution_list:ceiling_reached'], DegradationMetrics::$recorded);
+    }
+
     /** Exactly at the ceiling is not past it. */
     public function testExactlyTheCeilingIsNotRecorded(): void
     {
