@@ -112,8 +112,8 @@ final class NotificationDispatcher
      * @param \Closure(int, int): bool $canViewActivity may this member
      *        (2nd argument) open this activity's permalink (1st)? The
      *        permalink's own gate, FeedRankingService::canView(); a mention
-     *        bell is owed only on a yes (dispatchMentionsFor()). May throw
-     *        when the read did not run.
+     *        or primary-Hall bell is owed only on a yes
+     *        (recipientCanOpen()). May throw when the read did not run.
      */
     public function __construct(
         private readonly PageOwnerResolver $pageOwnerResolver,
@@ -713,15 +713,12 @@ final class NotificationDispatcher
      * caught inside onMentioned.
      *
      * ⚠ AUDIENCE (bug finder, 2026-11-18). MentionPolicy checks only WHO
-     * may be mentioned, never whether they can see the post. A post in a
-     * secret or closed group, or one its author restricted, could ping ANY
-     * mentionable member with a bell, a push and a link to the post. The
-     * permalink itself stayed gated, but the bell told them the hidden post
-     * exists, who wrote it, when, and its act id. So a mentionee is now
-     * notified only when the permalink the bell links to ($actId: the post,
-     * or for a comment its parent post) would show it to them
-     * (mentioneeCanSee()). Anyone else is dropped SILENTLY: the author is
+     * may be mentioned, never whether they can see the post. A mentionee is
+     * therefore notified only when the permalink the bell links to ($actId:
+     * the post, or for a comment its parent post) would show it to them
+     * (recipientCanOpen()). Anyone else is dropped SILENTLY: the author is
      * never told why, as in the DM recipient picker.
+     * Rationale: F-413 (private tracker).
      *
      * @param int    $authorId   user_id of the post/comment author
      * @param int    $postId     wp_post.ID of the post containing the body
@@ -765,7 +762,7 @@ final class NotificationDispatcher
             foreach ($allowed as $mentioneeId) {
                 // Self-mentions are skipped in onMentioned(); skipping them
                 // here as well saves a permalink check per post.
-                if ($mentioneeId === $authorId || !$this->mentioneeCanSee($actId, $mentioneeId)) {
+                if ($mentioneeId === $authorId || !$this->recipientCanOpen($actId, $mentioneeId, 'mention')) {
                     continue;
                 }
                 $this->onMentioned($authorId, $mentioneeId, $postId, $actId, $isComment);
@@ -781,25 +778,29 @@ final class NotificationDispatcher
     }
 
     /**
-     * May $mentioneeId open the permalink a mention bell would link to?
-     * The permalink's own gate (GET /feed/{id}), so the bell can never
-     * reach anyone the link would answer 404.
+     * May $recipientId open the permalink a bell would link to? The
+     * permalink's own gate (GET /feed/{id}), so a bell about a post (a
+     * mention, a post in the member's primary Hall) only goes to someone
+     * the link would show it to. Asked per recipient with an explicit
+     * viewer id, so it holds in the async fan-out (no current user there).
      *
      * Fails CLOSED: with no act id there is no permalink to show, and a
      * read that did not run is not a yes. A dropped bell is the cheap
-     * mistake; a bell about a hidden post is the leak this prevents.
+     * mistake. Rationale: F-413, F-414 (private tracker).
+     *
+     * @param string $bell the bell kind, for the log line only
      */
-    private function mentioneeCanSee(int $actId, int $mentioneeId): bool
+    private function recipientCanOpen(int $actId, int $recipientId, string $bell): bool
     {
         if ($actId <= 0) {
             return false;
         }
         try {
-            return ($this->canViewActivity)($actId, $mentioneeId) === true;
+            return ($this->canViewActivity)($actId, $recipientId) === true;
         } catch (\Throwable $e) {
-            Logger::warning('[NotificationDispatcher] mention audience check failed; no bell', [
+            Logger::warning('[NotificationDispatcher] ' . $bell . ' audience check failed; no bell', [
                 'act_id'       => $actId,
-                'mentionee_id' => $mentioneeId,
+                'recipient_id' => $recipientId,
                 'error'        => $e->getMessage(),
             ]);
             return false;
@@ -1005,6 +1006,11 @@ final class NotificationDispatcher
      * Push: always enqueued (PushDispatcher self-debounces on its own
      * 5-min (recipient, eventType) window and self-gates on push prefs).
      *
+     * Audience: neither the bell nor the push goes to a recipient who
+     * could not open the post they link to (recipientCanOpen(), the
+     * permalink's own gate; fails closed). Checked before the bell window
+     * is claimed. Rationale: F-414 (private tracker).
+     *
      * Marked public so it can be exercised by unit tests; the
      * orchestrator above is the canonical entry point in production.
      */
@@ -1024,6 +1030,12 @@ final class NotificationDispatcher
         if ($recipientId === $authorId) {
             // Self-skip: the author posted, they know. Defensively
             // duplicated by dispatch()'s $toUserId !== $fromUserId check.
+            return;
+        }
+        // Only someone who could open the post gets its bell and push.
+        // Asked BEFORE the bell window is claimed, so a post they may not
+        // open never uses up their window for the Hall.
+        if (!$this->recipientCanOpen($actId, $recipientId, 'hall-post')) {
             return;
         }
         try {
