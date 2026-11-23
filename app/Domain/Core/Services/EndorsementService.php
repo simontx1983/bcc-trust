@@ -42,6 +42,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 
@@ -224,18 +225,38 @@ class EndorsementService {
      * `page_id` mapping per the class docblock: card target_id passes
      * through; user_profile maps to the member self-page id.
      *
+     * `$viewerId` is who reads the list; null means the endorser themselves.
+     * For anyone else, a vouch on a SECRET page that viewer may not see is
+     * left out (F-528), as PageAccess decides for each page: one batched
+     * read for the list. A member self-page is never secret. ⚠ PageAccess
+     * reads the admin exemption of the request's user, so `$viewerId` must
+     * be that user.
+     *
      * @return list<array<string, mixed>>
      * @throws RepositoryReadFailure when the vouch read did not run (F-421)
      */
-    public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20): array {
+    public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20, ?int $viewerId = null): array {
         $endorserUserId = $endorserUserId ?? get_current_user_id();
 
         if (!$endorserUserId) {
             return [];
         }
 
-        $rows = $this->attestationRepo->listActiveVouchesByAttestor($endorserUserId, $limit);
-        return $this->shapeGivenRows($rows, $endorserUserId);
+        $rows   = $this->attestationRepo->listActiveVouchesByAttestor($endorserUserId, $limit);
+        $shaped = $this->shapeGivenRows($rows, $endorserUserId);
+        if ($viewerId === null || $viewerId === $endorserUserId || $shaped === []) {
+            return $shaped;
+        }
+
+        // Rationale: F-528 (private tracker).
+        $visible = array_flip(PageAccess::visibleAmong(
+            array_map(static fn (array $e): int => (int) $e['page_id'], $shaped),
+            $viewerId
+        ));
+        return array_values(array_filter(
+            $shaped,
+            static fn (array $e): bool => isset($visible[(int) $e['page_id']])
+        ));
     }
 
     /**

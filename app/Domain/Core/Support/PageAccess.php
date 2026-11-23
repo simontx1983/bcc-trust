@@ -43,6 +43,13 @@ if (!defined('ABSPATH')) {
 
 final class PageAccess
 {
+    /**
+     * The most secret pages one member list checks for a viewer (F-528).
+     * Each one may cost a member check, so a list with more fails closed
+     * rather than run them all: its read throws and the route answers 503.
+     */
+    public const HIDDEN_LIST_CAP = 100;
+
     /** For a caller that already holds the page's post. */
     public static function viewerMaySee(\WP_Post $page, int $viewerId): bool
     {
@@ -100,6 +107,31 @@ final class PageAccess
         return array_values(array_filter(
             $pageIds,
             static fn (int $id): bool => !isset($secret[$id]) || self::viewerMaySeeId($id, $viewerId, $viewerIsExempt)
+        ));
+    }
+
+    /**
+     * Of $pageIds, the ones $viewerId may NOT see: exactly the ids
+     * visibleAmong() leaves out, in input order, each id once.
+     *
+     * For a list read in SQL, which leaves these pages out of both its rows
+     * and its total (`page_id NOT IN (…)`), so the pages and the count agree.
+     *
+     * @param list<int> $pageIds
+     * @param bool|null $viewerIsExempt as {@see viewerMaySeeId()}
+     * @return list<int>
+     */
+    public static function hiddenAmong(array $pageIds, int $viewerId, ?bool $viewerIsExempt = null): array
+    {
+        $pageIds = array_values(array_unique(array_filter(
+            $pageIds,
+            static fn (int $id): bool => $id > 0
+        )));
+        $visible = array_flip(self::visibleAmong($pageIds, $viewerId, $viewerIsExempt));
+
+        return array_values(array_filter(
+            $pageIds,
+            static fn (int $id): bool => !isset($visible[$id])
         ));
     }
 
