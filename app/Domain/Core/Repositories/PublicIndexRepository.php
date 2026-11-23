@@ -25,7 +25,7 @@
 
 namespace BCC\Trust\Core\Repositories;
 
-use BCC\Core\Repositories\PeepSoPagePrivacy;
+use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Core\Repositories\ProbesReads;
 
 if (!defined('ABSPATH')) {
@@ -143,6 +143,12 @@ final class PublicIndexRepository
      * ascending. `page_type` is the FIRST `_bcc_page_type` value (what
      * get_post_meta(…, true) answers), '' when the page has none.
      *
+     * "Listable" is bcc-core's PeepSoPageRepository::listablePageSql(), the
+     * rule every page count and owner list uses, so the sitemap lists
+     * exactly the pages those surfaces count. The outer type / status
+     * conditions repeat part of it so the id-ordered scan stays on the
+     * type_status index rather than walking every post.
+     *
      * @return list<PublicPageRow>|null null = the read failed, or the arguments are out of range
      */
     public function pagesAfter(int $afterId, int $limit): ?array
@@ -153,7 +159,7 @@ final class PublicIndexRepository
 
         global $wpdb;
 
-        $notSecret = PeepSoPagePrivacy::notSecretSql('p.ID');
+        $listable = PeepSoPageRepository::listablePageSql('p.ID');
 
         $rows = self::trustedRowsAssoc((string) $wpdb->prepare(
             "SELECT p.ID AS id,
@@ -169,7 +175,7 @@ final class PublicIndexRepository
                 AND p.post_status = %s
                 AND p.post_name  <> ''
                 AND p.ID > %d
-                AND {$notSecret}
+                AND {$listable}
               ORDER BY p.ID ASC
               LIMIT %d",
             self::META_PAGE_TYPE,

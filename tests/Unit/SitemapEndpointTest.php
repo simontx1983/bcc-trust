@@ -102,6 +102,7 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
             // core's REAL privacy rules and open-groups read, before first use
             // (the suite would otherwise autoload the group-privacy double).
             require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoPagePrivacy.php');
+            require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoPageRepository.php');
             require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoGroupPrivacy.php');
             require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoGroupRepository.php');
             $GLOBALS['__bcc_cst'] = ['user_id' => 0, 'throttle_allow' => true, 'throttle_calls' => [], 'routes' => []];
