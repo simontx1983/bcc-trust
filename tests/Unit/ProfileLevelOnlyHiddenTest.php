@@ -156,6 +156,8 @@ final class ProfileLevelOnlyHiddenTest extends TestCase
 
     public function testAdminsAndTheViewerThemselvesAreNeverHidden(): void
     {
+        // Even with an "only me" profile: the viewer always sees their own.
+        $GLOBALS['__bcc_profile_access']['levels'][self::VIEWER] = 40;
         self::assertSame([], ProfileAccess::hiddenOnlyByProfileLevel([self::VIEWER]));
 
         $GLOBALS['__bcc_profile_access']['is_admin'] = true;
