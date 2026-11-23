@@ -252,9 +252,17 @@ final class MyGroupsEndpoint
             );
         }
         if ($trustMin > 0) {
-            $viewerScore = (int) round(
-                Plugin::instance()->reputationRepository()->getScore($userId)
-            );
+            // F-469: a score that could not be read refuses the join
+            // (retryable) before any write, never the neutral 50.
+            $score = Plugin::instance()->reputationRepository()->getScoreOrUnknown($userId);
+            if ($score === null) {
+                return ApiResponse::error(
+                    'bcc_unavailable',
+                    'We couldn\'t check your reputation just now. Please try again.',
+                    503
+                );
+            }
+            $viewerScore = (int) round($score);
             if ($viewerScore < $trustMin) {
                 return ApiResponse::error(
                     'bcc_permission_denied',

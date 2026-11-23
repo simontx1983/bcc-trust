@@ -63,16 +63,22 @@ final class JoinDoorTrustMinTest extends TestCase
         self::viewerScore(40);
     }
 
-    private static function viewerScore(int $score): void
+    private static function viewerScore(?int $score): void
     {
         $rep = new class ($score) extends ReputationRepository {
-            public function __construct(private int $score)
+            public function __construct(private ?int $score)
             {
             }
 
             public function getScore(int $userId): float
             {
-                return (float) $this->score;
+                return (float) ($this->score ?? 50);
+            }
+
+            // F-469: the join gate reads the tri-state; null = unreadable.
+            public function getScoreOrUnknown(int $userId): ?float
+            {
+                return $this->score === null ? null : (float) $this->score;
             }
         };
         (new ReflectionClass(Plugin::class))->getProperty('reputationRepository')->setValue(Plugin::instance(), $rep);
@@ -141,6 +147,23 @@ final class JoinDoorTrustMinTest extends TestCase
     {
         self::core($rows);
         self::viewerScore(100);
+
+        [$status, $data] = self::join();
+
+        self::assertSame(503, $status);
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_mg']['writes'], 'nothing was joined');
+    }
+
+    /**
+     * F-469: the viewer's score that could not be read refuses the join,
+     * retryably, before any write. Never the neutral 50, which would let a
+     * low-trust member through a 50 minimum.
+     */
+    public function testAScoreThatCannotBeReadRefusesBeforeAnyWrite(): void
+    {
+        self::core(['50']);
+        self::viewerScore(null);
 
         [$status, $data] = self::join();
 
