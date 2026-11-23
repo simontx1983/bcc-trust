@@ -15,6 +15,13 @@
  *     what WordPress gives for a failed meta read.
  * wp_cache_delete() records its calls in $GLOBALS['__bcc_optout_cache_deletes'].
  *
+ * H7 follow-up:
+ *   - AdvisoryLock records acquire/release in AdvisoryLock::$calls; a key in
+ *     AdvisoryLock::$heldElsewhere cannot be acquired;
+ *   - AuditLogger::log() records rows in $GLOBALS['__bcc_optout_audit'];
+ *   - wp_schedule_single_event() records retries in
+ *     $GLOBALS['__bcc_optout_scheduled'].
+ *
  * Required from setUp() of a #[RunTestsInSeparateProcesses] class, never at
  * file scope: PHPUnit loads test files in the parent process too.
  */
@@ -33,6 +40,19 @@ namespace {
         function wp_cache_delete($key, string $group = ''): bool
         {
             $GLOBALS['__bcc_optout_cache_deletes'][] = [$key, $group];
+            return true;
+        }
+    }
+
+    if (!function_exists('wp_schedule_single_event')) {
+        /**
+         * Records every scheduled retry in $GLOBALS['__bcc_optout_scheduled'].
+         *
+         * @param list<mixed> $args
+         */
+        function wp_schedule_single_event(int $timestamp, string $hook, array $args = []): bool
+        {
+            $GLOBALS['__bcc_optout_scheduled'][] = ['at' => $timestamp, 'hook' => $hook, 'args' => $args];
             return true;
         }
     }
@@ -136,6 +156,51 @@ namespace BCC\Core\Log {
             /** @param array<string, mixed> $context */
             public static function info(string $message, array $context = []): void
             {
+            }
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+    // The per-user lock around an opt-out map change (H7 follow-up).
+    if (!class_exists(__NAMESPACE__ . '\AdvisoryLock', false)) {
+        final class AdvisoryLock
+        {
+            /** @var list<string> "acquire:<key>" / "release:<key>", in order */
+            public static array $calls = [];
+
+            /** @var list<string> keys another process holds */
+            public static array $heldElsewhere = [];
+
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                self::$calls[] = 'acquire:' . $key;
+                return !in_array($key, self::$heldElsewhere, true);
+            }
+
+            public static function release(string $key): void
+            {
+                self::$calls[] = 'release:' . $key;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Security {
+    // The rejoin block's audit trail (H7 follow-up).
+    if (!class_exists(__NAMESPACE__ . '\AuditLogger', false)) {
+        final class AuditLogger
+        {
+            /** @param array<string, mixed> $meta */
+            public static function log(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): void
+            {
+                $GLOBALS['__bcc_optout_audit'][] = [
+                    'action'      => $action,
+                    'target_id'   => $targetId,
+                    'meta'        => $meta,
+                    'target_type' => $targetType,
+                    'user_id'     => $userId,
+                ];
             }
         }
     }

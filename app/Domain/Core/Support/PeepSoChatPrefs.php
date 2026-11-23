@@ -10,9 +10,14 @@
  * classes/chatmodel.php). A failed meta read also answers '', so BCC
  * neither reads through it nor lets it write. Here:
  *   - both values come from ONE trusted read (bcc-core
- *     UserMetaRepository::firstValuesOrUnknown());
+ *     UserMetaRepository::valuesOrUnknown());
  *   - a read that failed is null, and the caller refuses;
  *   - nothing is ever written.
+ *
+ * A key WordPress has stored twice is read whole, and the STRICTEST row
+ * wins, as for the profile privacy flags: any row that turns DMs off turns
+ * them off, and any row that turns friends-only on turns it on. Reading
+ * only the first row would let the other one be ignored.
  *
  * PeepSo's meaning, mirrored exactly (chatmodel.php):
  *   - chat_enabled: false when the site option `messages_chat_enable` is
@@ -79,7 +84,7 @@ final class PeepSoChatPrefs
             return [];
         }
 
-        $stored = UserMetaRepository::firstValuesOrUnknown(
+        $stored = UserMetaRepository::valuesOrUnknown(
             array_values($ids),
             [self::ENABLED_KEY, self::FRIENDS_ONLY_KEY],
             $fresh
@@ -91,12 +96,50 @@ final class PeepSoChatPrefs
         $out = [];
         foreach ($ids as $id) {
             $out[$id] = [
-                'chat_enabled'      => self::enabledFrom($stored[$id][self::ENABLED_KEY] ?? null),
-                'chat_friends_only' => self::friendsOnlyFrom($stored[$id][self::FRIENDS_ONLY_KEY] ?? null),
+                'chat_enabled'      => self::enabledFromAll($stored[$id][self::ENABLED_KEY] ?? []),
+                'chat_friends_only' => self::friendsOnlyFromAll($stored[$id][self::FRIENDS_ONLY_KEY] ?? []),
             ];
         }
 
         return $out;
+    }
+
+    /**
+     * chat_enabled over every stored row: ON only if no row turns it off.
+     * No row at all is PeepSo's "no row" answer.
+     *
+     * @param list<string> $stored
+     */
+    public static function enabledFromAll(array $stored): bool
+    {
+        if ($stored === []) {
+            return self::enabledFrom(null);
+        }
+        foreach ($stored as $value) {
+            if (!self::enabledFrom($value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * chat_friends_only over every stored row: ON if any row turns it on.
+     * No row at all is PeepSo's "no row" answer.
+     *
+     * @param list<string> $stored
+     */
+    public static function friendsOnlyFromAll(array $stored): bool
+    {
+        if ($stored === []) {
+            return self::friendsOnlyFrom(null);
+        }
+        foreach ($stored as $value) {
+            if (self::friendsOnlyFrom($value)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
