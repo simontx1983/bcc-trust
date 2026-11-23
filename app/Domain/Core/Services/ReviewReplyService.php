@@ -8,6 +8,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\ReviewReplyRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Feed\ActivityStreamWriter;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Core\PeepSo\PeepSoAddPostGuard;
@@ -84,6 +85,15 @@ final class ReviewReplyService
      * (logged): a review list must still render, and a can_reply that
      * guessed "no reply yet" could offer a duplicate.
      *
+     * The shown reply follows its AUTHOR's profile visibility for this
+     * viewer: one {@see ProfileAccess::filterVisible()} batch for the page
+     * (profile level, suspension, blocks either way; not the search opt-out,
+     * since this is not a search), and a reply whose author the viewer may
+     * not see is not shown, author and text alike. A check that cannot
+     * answer shows none. `viewer_stale_reply` is the viewer's own and needs
+     * no check. ⚠ filterVisible() reads the CURRENT user, so $viewerId must
+     * be the request's viewer, as it is on both Reviews tabs.
+     *
      * @param list<array{id: int, page_id: int, voter_user_id: int}> $reviews
      * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
      */
@@ -126,6 +136,24 @@ final class ReviewReplyService
                     : self::deny('unavailable'),
             ];
         }
+
+        // Each shown reply's author must be visible to this viewer: one
+        // ProfileAccess::filterVisible() batch for the page (see above).
+        $authorIds = [];
+        foreach ($out as $bundle) {
+            if ($bundle['reply'] !== null) {
+                $authorIds[] = $bundle['reply']['author_id'];
+            }
+        }
+        if ($authorIds !== []) {
+            $visible = array_flip(ProfileAccess::filterVisible($authorIds, false));
+            foreach ($out as $voteId => $bundle) {
+                if ($bundle['reply'] !== null && !isset($visible[$bundle['reply']['author_id']])) {
+                    $out[$voteId]['reply'] = null;
+                }
+            }
+        }
+
         return $out;
     }
 

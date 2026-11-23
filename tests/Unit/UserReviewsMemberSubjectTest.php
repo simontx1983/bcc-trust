@@ -24,12 +24,12 @@ final class UserReviewsMemberSubjectTest extends TestCase
      * @param array<int, array{id: int, user_login: string, display_name: string, handle: string|null}> $members
      * @return array<string, mixed>
      */
-    private function shape(object $row, array $members): array
+    private function shape(object $row, array $members, int $viewerId = 0): array
     {
         $m = new ReflectionMethod(UserReviewsService::class, 'shapeReview');
         $m->setAccessible(true);
         /** @var array<string, mixed> $out */
-        $out = $m->invoke(null, $row, self::NOW, $members);
+        $out = $m->invoke(null, $row, self::NOW, $members, $viewerId);
         return $out;
     }
 
@@ -91,6 +91,40 @@ final class UserReviewsMemberSubjectTest extends TestCase
         self::assertSame('', $out['subject']);
         self::assertSame('', $out['subject_handle']);
         self::assertSame('MEMBER', $out['scope_label']);
+    }
+
+    protected function tearDown(): void
+    {
+        // The bootstrap's UserMetaRepository double is shared by this process.
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
+        parent::tearDown();
+    }
+
+    /**
+     * A member subject is the name OTHER people see
+     * (PublicIdentity::visibleName()). With the member's "Hide my real
+     * name" in effect (here the flag can't be read, which reads as on),
+     * another viewer sees '@handle'; the member sees their own name.
+     */
+    public function testAMemberSubjectHonoursHideMyRealName(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [77 => true];
+        $members = [77 => ['id' => 77, 'user_login' => 'simon_login', 'display_name' => 'Simon TX', 'handle' => 'simontx']];
+
+        self::assertSame('@simontx', $this->shape(self::memberRow(77), $members, 5)['subject'], 'another viewer');
+        self::assertSame('@simontx', $this->shape(self::memberRow(77), $members, 0)['subject'], 'anonymous');
+        self::assertSame('Simon TX', $this->shape(self::memberRow(77), $members, 77)['subject'], 'the member themselves');
+    }
+
+    public function testAHandlelessMaskedMemberShowsTheMemberFallback(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [77 => true];
+        $out = $this->shape(self::memberRow(77), [
+            77 => ['id' => 77, 'user_login' => 'simon_login', 'display_name' => 'Simon TX', 'handle' => null],
+        ], 5);
+
+        self::assertSame('@member-77', $out['subject']);
+        self::assertSame('', $out['subject_handle'], 'still no @-link without a bcc_handle');
     }
 
     public function testEntityRowShapeIsUnchanged(): void
