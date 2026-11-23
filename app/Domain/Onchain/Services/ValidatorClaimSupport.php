@@ -64,6 +64,12 @@ final class ValidatorClaimSupport
     public const REASON_OPERATOR_UNPROVABLE = 'operator_unprovable';
 
     /**
+     * Where an operator who can't claim by wallet writes to be verified by
+     * hand (F-551). The one place the address lives: change it here.
+     */
+    public const VERIFICATION_CONTACT_EMAIL = 'phillip@bluecollarcrypto.io';
+
+    /**
      * @phpstan-return ClaimSupport
      */
     public static function assess(string $chainType, string $chainSlug, string $chainName, string $operatorAddress): array
@@ -105,12 +111,13 @@ final class ValidatorClaimSupport
     /**
      * Where wallet claiming cannot prove an operator, BCC staff can verify
      * them by hand (the admin validator-linking screen), so the hint says
-     * what to do next rather than ending at "not available". No timing is
-     * promised.
+     * what to do next, and where to write (VERIFICATION_CONTACT_EMAIL),
+     * rather than ending at "not available". No timing is promised.
      */
     private static function contactBcc(string $chain): string
     {
-        return "Wallet claiming isn't available on {$chain} yet. Contact BCC and we'll verify you as this validator's operator.";
+        return "Wallet claiming isn't available on {$chain} yet. Email " . self::VERIFICATION_CONTACT_EMAIL
+            . " and we'll verify you as this validator's operator.";
     }
 
     /**
