@@ -13,8 +13,9 @@ use PHPUnit\Framework\TestCase;
 /**
  * Security review, 2026-11-19 (private tracker): WordPressFrontEndGate
  * sends every feed to the app with a 301, empties the generator, unlinks
- * the feeds from the head, and (F-509) keeps core's XML sitemaps off and
- * refuses author archives.
+ * the feeds from the head, and (F-509) keeps core's XML sitemaps off, gives
+ * every author request the same bare 404, and gives a signed-out visitor a
+ * bare 404 instead of a themed one.
  *
  * Runs the real gate over the sign-in gate's WordPress doubles plus
  * tests/Stubs/wp-front-end-stubs.php (is_feed(), remove_action()).
@@ -45,6 +46,7 @@ final class WordPressFrontEndGateTest extends TestCase
             [
                 ['template_redirect', [WordPressFrontEndGate::class, 'sendFeedsToTheApp'], 1, 1],
                 ['template_redirect', [WordPressFrontEndGate::class, 'refuseAuthorArchives'], 1, 1],
+                ['template_redirect', [WordPressFrontEndGate::class, 'bareNotFoundWhenSignedOut'], 1, 1],
                 ['the_generator', [WordPressFrontEndGate::class, 'noGenerator'], PHP_INT_MAX, 2],
                 ['wp_sitemaps_enabled', [WordPressFrontEndGate::class, 'noSitemaps'], PHP_INT_MAX, 1],
             ],
@@ -161,25 +163,101 @@ final class WordPressFrontEndGateTest extends TestCase
 
     // ── F-509: author archives answer a bare 404 ─────────────────────────
 
-    public function testAnAuthorArchiveIsABare404BeforeRedirectCanonical(): void
+    /**
+     * One author request, as the gate's hooks answer it: what ran, the
+     * status, the no-cache headers, and every byte printed.
+     *
+     * @param array<string, string> $queryVars
+     * @return array{trace: list<string>, status: mixed, nocache: mixed, body: string}
+     */
+    private static function answer(array $queryVars, bool $exists, bool $loggedIn): array
     {
+        $GLOBALS['__bcc_sig'] = ['admins' => [1], 'current' => 0, 'ajax' => false, 'hooks' => [], 'removed' => [], 'feed' => false];
         WordPressFrontEndGate::register();
-        $GLOBALS['__bcc_sig']['author'] = true;
+        $GLOBALS['__bcc_sig']['query_vars'] = $queryVars;
+        // WP::handle_404() flips a MISSING author to is_404 and clears is_author.
+        $GLOBALS['__bcc_sig']['author']    = $exists;
+        $GLOBALS['__bcc_sig']['404']       = !$exists;
+        $GLOBALS['__bcc_sig']['logged_in'] = $loggedIn;
 
+        ob_start();
         $trace = self::serve(false);
+        $body  = (string) ob_get_clean();
 
-        self::assertSame(['redirected'], $trace, 'halted at priority 1: redirect_canonical never ran');
-        self::assertSame(404, $GLOBALS['__bcc_sig']['status'] ?? null);
-        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        return [
+            'trace'   => $trace,
+            'status'  => $GLOBALS['__bcc_sig']['status'] ?? null,
+            'nocache' => $GLOBALS['__bcc_sig']['nocache'] ?? null,
+            'body'    => $body,
+        ];
     }
 
-    public function testAnythingButAnAuthorArchiveIsLeftToTheRest(): void
+    /** @return iterable<string, array{0: array<string, string>, 1: bool}> */
+    public static function authorRequests(): iterable
     {
-        $GLOBALS['__bcc_sig']['author'] = false;
+        yield 'by id, signed out'       => [['author' => '7'], false];
+        yield 'by nicename, signed out' => [['author_name' => 'alice'], false];
+        yield 'by id, signed in'        => [['author' => '7'], true];
+        yield 'by nicename, signed in'  => [['author_name' => 'alice'], true];
+    }
+
+    /**
+     * An author that exists and one that does not get byte-identical answers:
+     * the same bare 404, halted at priority 1 before redirect_canonical.
+     *
+     * @param array<string, string> $queryVars
+     */
+    #[DataProvider('authorRequests')]
+    public function testEveryAuthorRequestGetsTheSameBare404(array $queryVars, bool $loggedIn): void
+    {
+        $existing = self::answer($queryVars, true, $loggedIn);
+        $missing  = self::answer($queryVars, false, $loggedIn);
+
+        self::assertSame(['trace' => ['redirected'], 'status' => 404, 'nocache' => true, 'body' => ''], $existing);
+        self::assertSame($existing, $missing, 'an existing and a missing author answer alike');
+    }
+
+    public function testAnythingButAnAuthorRequestIsLeftToTheRest(): void
+    {
+        $GLOBALS['__bcc_sig']['author'] = true; // is_author() alone decides nothing
 
         WordPressFrontEndGate::refuseAuthorArchives();
 
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    // ── F-509: a signed-out 404 is bare ───────────────────────────────────
+
+    public function testASignedOutVisitorsNotFoundIsABare404(): void
+    {
+        WordPressFrontEndGate::register();
+        $GLOBALS['__bcc_sig']['404'] = true;
+
+        ob_start();
+        $trace = self::serve(false);
+        $body  = (string) ob_get_clean();
+
+        self::assertSame(['redirected'], $trace, 'no themed page is rendered');
+        self::assertSame(404, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
+        self::assertSame('', $body);
+    }
+
+    public function testASignedInVisitorStillGetsTheThemedNotFound(): void
+    {
+        WordPressFrontEndGate::register();
+        $GLOBALS['__bcc_sig']['404']       = true;
+        $GLOBALS['__bcc_sig']['logged_in'] = true;
+
+        self::assertSame(['redirect_canonical', 'page served'], self::serve(false));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testASignedOutPageThatExistsIsLeftAlone(): void
+    {
+        WordPressFrontEndGate::register();
+
+        self::assertSame(['redirect_canonical', 'page served'], self::serve(false));
         self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 

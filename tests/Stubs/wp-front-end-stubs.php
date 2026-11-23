@@ -17,11 +17,38 @@ namespace {
         }
     }
 
-    // F-509: 'author' answers is_author().
+    // F-509: 'author' answers is_author() (kept so a test can show the gate
+    // does NOT rely on it); 'query_vars' answers get_query_var() (default
+    // ''); '404' answers is_404(); 'logged_in' answers is_user_logged_in().
     if (!function_exists('is_author')) {
         function is_author(): bool
         {
             return (bool) ($GLOBALS['__bcc_sig']['author'] ?? false);
+        }
+    }
+
+    if (!function_exists('get_query_var')) {
+        /**
+         * @param mixed $default
+         * @return mixed
+         */
+        function get_query_var(string $var, $default = '')
+        {
+            return $GLOBALS['__bcc_sig']['query_vars'][$var] ?? $default;
+        }
+    }
+
+    if (!function_exists('is_404')) {
+        function is_404(): bool
+        {
+            return (bool) ($GLOBALS['__bcc_sig']['404'] ?? false);
+        }
+    }
+
+    if (!function_exists('is_user_logged_in')) {
+        function is_user_logged_in(): bool
+        {
+            return (bool) ($GLOBALS['__bcc_sig']['logged_in'] ?? false);
         }
     }
 

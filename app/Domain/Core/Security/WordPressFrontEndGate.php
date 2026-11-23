@@ -50,7 +50,13 @@ if (!defined('ABSPATH')) {
  *      runs needs them.
  *   5. An author archive (`?author=N`, `/author/{slug}/`) answers a bare 404
  *      at `template_redirect` priority 1, before `redirect_canonical` (10)
- *      runs. BCC's member pages live in the app; nothing links to these.
+ *      runs, for every caller. It is decided on the REQUEST (its query
+ *      vars), never on whether that author exists, so every author request
+ *      gets the same answer. BCC's member pages live in the app; nothing
+ *      links to these.
+ *   6. Every other 404 a signed-out visitor would get is the same bare 404:
+ *      no themed page is rendered for them. A signed-in admin still gets
+ *      the themed page.
  */
 final class WordPressFrontEndGate
 {
@@ -64,6 +70,7 @@ final class WordPressFrontEndGate
     {
         add_action('template_redirect', [self::class, 'sendFeedsToTheApp'], self::REDIRECT_PRIORITY);
         add_action('template_redirect', [self::class, 'refuseAuthorArchives'], self::REDIRECT_PRIORITY);
+        add_action('template_redirect', [self::class, 'bareNotFoundWhenSignedOut'], self::REDIRECT_PRIORITY);
         add_filter('the_generator', [self::class, 'noGenerator'], PHP_INT_MAX, 2);
         add_filter('wp_sitemaps_enabled', [self::class, 'noSitemaps'], PHP_INT_MAX);
 
@@ -128,15 +135,36 @@ final class WordPressFrontEndGate
     }
 
     /**
-     * `template_redirect`, first (F-509): an author archive answers a bare 404
-     * and nothing else: no page is rendered.
+     * `template_redirect`, first (F-509): an author request answers a bare 404
+     * and nothing else: no page is rendered. Decided on the request's query
+     * vars, which keep their values whether or not the author exists, so
+     * every author request gets this same answer.
      */
     public static function refuseAuthorArchives(): void
     {
-        if (!is_author()) {
+        if ((string) get_query_var('author') === '' && (string) get_query_var('author_name') === '') {
             return;
         }
 
+        self::bareNotFound();
+    }
+
+    /**
+     * `template_redirect`, first (F-509): a signed-out visitor's 404 is a bare
+     * 404, never a themed page.
+     */
+    public static function bareNotFoundWhenSignedOut(): void
+    {
+        if (!is_404() || is_user_logged_in()) {
+            return;
+        }
+
+        self::bareNotFound();
+    }
+
+    /** A bare 404: no-cache headers, no body, no handler after it. */
+    private static function bareNotFound(): never
+    {
         nocache_headers();
         status_header(404);
         exit;
