@@ -154,6 +154,13 @@ final class UserSyncRepository
      * Users with no owned pages are absent from the map; callers
      * default to 0.
      *
+     * Only published, non-secret pages count: bcc-core's
+     * `PeepSoPageRepository::listablePageSql()`, the condition the typed
+     * counts beside it use, so the total and the per-type badges agree.
+     * Rationale: F-427 (private tracker). `batchFetchCounts()` and
+     * `fetchCountsForUser()` keep counting every owned page: they feed the
+     * internal user_info sync, not a member-facing count.
+     *
      * Empty `$userIds` short-circuits — no SQL.
      *
      * @param int[] $userIds Bounded by caller (directory `per_page`
@@ -183,6 +190,7 @@ final class UserSyncRepository
 
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $listable     = \BCC\Core\Repositories\PeepSoPageRepository::listablePageSql('pm.pm_page_id');
 
         // Prepared-statement style (vs the intval-coerce style in
         // batchFetchCounts above). New code defaults to prepare so the
@@ -190,11 +198,12 @@ final class UserSyncRepository
         /** @var list<array{user_id: string, c: string}> $rows */
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT pm_user_id AS user_id, COUNT(*) AS c
-                   FROM {$wpdb->prefix}peepso_page_members
-                  WHERE pm_user_id IN ({$placeholders})
-                    AND pm_user_status = 'member_owner'
-                  GROUP BY pm_user_id",
+                "SELECT pm.pm_user_id AS user_id, COUNT(*) AS c
+                   FROM {$wpdb->prefix}peepso_page_members pm
+                  WHERE pm.pm_user_id IN ({$placeholders})
+                    AND pm.pm_user_status = 'member_owner'
+                    AND {$listable}
+                  GROUP BY pm.pm_user_id",
                 ...$idList
             ),
             ARRAY_A

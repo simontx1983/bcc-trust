@@ -59,6 +59,7 @@ use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
 use BCC\Trust\Core\Repositories\WatchBatchRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -444,7 +445,7 @@ final class ActivityStreamWriter
             return;
         }
 
-        $claim = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $claim = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($claim === null) {
             // Defensive — bcc_page_claimed only fires after a
             // successful claim, but the row could have been deleted

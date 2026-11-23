@@ -696,13 +696,15 @@ final class UsersEndpoint
 
         $viewerId = get_current_user_id();
 
-        // Global type-counts (independent of `q` / `type` filters) ride
-        // on every /members response so the frontend's chip strip can
-        // render `VALIDATORS · 5` without a second roundtrip. The
-        // counts also survive the empty-result short-circuit below —
-        // a filter-specific empty state still needs them to suggest
+        // Type-counts (independent of `q` / `type` filters) ride on every
+        // /members response so the frontend's chip strip can render
+        // `VALIDATORS · 5` without a second roundtrip. Counted for THIS
+        // viewer through the list's own privacy filter, so a chip equals
+        // the list's total for that type (MemberDirectoryTypeCounts). The
+        // counts also survive the empty-result short-circuit below — a
+        // filter-specific empty state still needs them to suggest
         // alternative chips with non-zero results.
-        $typeCounts = PeepSoPageRepository::getGlobalOwnedPageUserCountsByType();
+        $typeCounts = \BCC\Trust\Core\Support\MemberDirectoryTypeCounts::live()->forViewer($viewerId);
 
         // Each filter axis pre-resolves to a list<int> of user_ids that
         // satisfy that axis. We collect every axis's list, then INTERSECT

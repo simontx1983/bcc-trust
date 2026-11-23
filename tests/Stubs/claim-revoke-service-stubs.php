@@ -48,6 +48,15 @@ namespace {
         public static array $cleared = [];
         /** @var list<string> post-commit work in the order it ran */
         public static array $order = [];
+        /** @var list<int> F-521: what verifiedEntityClaimIdsForUser() answers */
+        public static array $userClaimIds = [];
+        /** @var list<array{int, ?string, ?int}> F-521: [userId, wallet, chainId] per id read */
+        public static array $idReads = [];
+        public static ?\Throwable $idsThrow = null;
+        /** F-521: the revoke() call number (1-based) that throws $throw; null = every call */
+        public static ?int $throwOnCall = null;
+        /** @var list<int> F-521: users deleteForUser() purged */
+        public static array $deletedFor = [];
 
         public static function reset(): void
         {
@@ -67,6 +76,11 @@ namespace {
             self::$dirty = [];
             self::$errors = [];
             self::$fail = [];
+            self::$userClaimIds = [];
+            self::$idReads = [];
+            self::$idsThrow = null;
+            self::$throwOnCall = null;
+            self::$deletedFor = [];
         }
 
         public static function maybeFail(string $step): void
@@ -102,11 +116,29 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function revoke(int $claimId): array
             {
                 \ClaimRevokeWorld::$revokeCalls[] = $claimId;
-                if (\ClaimRevokeWorld::$throw !== null) {
+                if (\ClaimRevokeWorld::$throw !== null
+                    && (\ClaimRevokeWorld::$throwOnCall === null || count(\ClaimRevokeWorld::$revokeCalls) === \ClaimRevokeWorld::$throwOnCall)
+                ) {
                     throw \ClaimRevokeWorld::$throw;
                 }
                 return \ClaimRevokeWorld::$result
                     ?? ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
+            }
+
+            /** @return list<int> */
+            public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
+            {
+                \ClaimRevokeWorld::$idReads[] = [$userId, $walletAddress, $chainId];
+                if (\ClaimRevokeWorld::$idsThrow !== null) {
+                    throw \ClaimRevokeWorld::$idsThrow;
+                }
+                return \ClaimRevokeWorld::$userClaimIds;
+            }
+
+            public static function deleteForUser(int $userId): void
+            {
+                \ClaimRevokeWorld::$order[]      = 'delete_for_user';
+                \ClaimRevokeWorld::$deletedFor[] = $userId;
             }
         }
     }

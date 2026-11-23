@@ -111,6 +111,64 @@ final class SessionsPage
 
         self::renderJwtConfig();
         self::renderRecentAuthEvents();
+        self::renderRejoinBlocks();
+    }
+
+    /**
+     * H7: a moderator removal from a gated group records a rejoin block.
+     * When it can't be recorded, NftGroupGateService::recordEvictionRejoinBlock
+     * audits it and retries; these are its two outcomes.
+     */
+    public const REJOIN_BLOCK_ACTIONS = [
+        'group_rejoin_block_failed',
+        'group_rejoin_block_recorded',
+    ];
+
+    private static function renderRejoinBlocks(): void
+    {
+        $rows = Plugin::instance()->adminDashboardRepository()->getRecentActivityByActions(self::REJOIN_BLOCK_ACTIONS, 30);
+
+        echo '<h2 style="margin-top:24px;">Group rejoin blocks (last 30)</h2>';
+        printf(
+            '<p style="color:var(--bcc-text-secondary);">Removing a member from a holder group or delegator community records a block so they cannot rejoin. '
+            . 'When it cannot be recorded, BCC retries automatically (%d times, %d minutes apart).</p>',
+            \BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_ATTEMPTS,
+            intdiv(\BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_DELAY, 60)
+        );
+
+        if ($rows === []) {
+            echo '<p>(none)</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped" style="max-width:1100px;">';
+        echo '<thead><tr><th>When</th><th>Action</th><th>Member</th><th>Group</th><th>What it means</th></tr></thead><tbody>';
+
+        foreach ($rows as $row) {
+            $action   = (string) ($row->action    ?? '');
+            $userId   = (int)    ($row->user_id   ?? 0);
+            $userName = (string) ($row->user_name ?? '');
+            $groupId  = (int)    ($row->target_id ?? 0);
+            $failed   = $action === 'group_rejoin_block_failed';
+
+            echo '<tr>';
+            echo '<td><code style="font-size:12px;">' . esc_html((string) ($row->created_at ?? '')) . '</code></td>';
+            echo '<td>' . AdminUi::badge($action, $failed ? AdminUi::BAD : AdminUi::OK) . '</td>';
+            printf(
+                '<td>%s <span style="color:var(--bcc-text-muted);">#%d</span></td>',
+                esc_html($userName !== '' ? $userName : '(user removed)'),
+                $userId
+            );
+            printf('<td>#%d</td>', $groupId);
+            echo '<td>' . esc_html(
+                $failed
+                    ? 'Removed from the group, but the rejoin block was not recorded. BCC retries automatically; if this stays red, remove them again after they rejoin.'
+                    : 'The rejoin block was recorded on a retry.'
+            ) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table>';
     }
 
     // ────────────────────────────────────────────────────────────

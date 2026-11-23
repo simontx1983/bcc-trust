@@ -353,7 +353,9 @@ class UserLifecycleService
         // directly. Claims and onchain signals also key on user_id.
         \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
+        // F-521: revoke-and-release each verified claim (audited, frees the
+        // page it granted), then purge the rows. See purgeForDeletedUser().
+        \BCC\Trust\Onchain\Services\ClaimService::purgeForDeletedUser($userId);
         \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
 
         // Wallet signals: delegate to onchain-signals via contract.

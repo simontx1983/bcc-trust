@@ -120,7 +120,7 @@ final class CollectionService
 
         $ownerClaims = [];
         if (!empty($entityIds)) {
-            $claimsByEntity = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $entityIds);
+            $claimsByEntity = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $entityIds, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
             foreach ($claimsByEntity as $entityId => $claims) {
                 foreach ($claims as $c) {
                     if ((int) $c->user_id === $ownerId && $c->claim_role === 'creator') {

@@ -18,9 +18,11 @@
  *   deleted        list<string>  keys passed to delete_transient()
  *   transient_read_fails  bool  every get_transient() answers false
  *   bell_write_fails      bool  PeepSoNotificationWriter refuses the write
+ *   next_bell_id   int         when set, each written bell answers this row id, then it counts up
  *   logs           list<string>  Logger messages
  *
- * Tests: MentionAudienceTest, BellWindowGateTest, MentionBellWindowTest.
+ * Tests: MentionAudienceTest, BellWindowGateTest, MentionBellWindowTest,
+ * PushCarriesBellIdTest.
  */
 
 declare(strict_types=1);
@@ -87,6 +89,30 @@ namespace {
         }
     }
 
+    // A bell written with a row id bumps the recipient's badge generation
+    // (BadgesService → CacheGeneration). Without these, that bump throws and
+    // the dispatcher's catch swallows it, push included.
+    if (!function_exists('wp_cache_incr')) {
+        /**
+         * @param int|string $key
+         * @return int|false
+         */
+        function wp_cache_incr($key, int $offset = 1, string $group = '')
+        {
+            return false;
+        }
+    }
+    if (!function_exists('wp_cache_set')) {
+        /**
+         * @param int|string $key
+         * @param mixed      $data
+         */
+        function wp_cache_set($key, $data, string $group = '', int $expire = 0): bool
+        {
+            return true;
+        }
+    }
+
     if (!class_exists('PeepSoUserSearch', false)) {
         /** MentionPolicy's privacy filter: the candidates minus `unmentionable`. */
         final class PeepSoUserSearch
@@ -119,6 +145,10 @@ namespace BCC\Core\PeepSo {
                     return ['ok' => false, 'reason' => 'simulated write failure'];
                 }
                 $GLOBALS['__bcc_mna']['bells'][] = ['to' => $to, 'from' => $from, 'type' => $type, 'external_id' => $externalId, 'act_id' => $actId];
+                if (isset($GLOBALS['__bcc_mna']['next_bell_id'])) {
+                    // F-516: the row id PeepSo's writer answers, when a test asks for one.
+                    return ['ok' => true, 'notification_id' => $GLOBALS['__bcc_mna']['next_bell_id']++];
+                }
                 return ['ok' => true];
             }
         }

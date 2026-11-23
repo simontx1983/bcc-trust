@@ -1372,10 +1372,25 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if (!$isGatedGroup) {
         return; // Neither a holder group nor a delegator community.
     }
+    // A rejoin block that cannot be recorded now is audited and retried
+    // (NftGroupGateService::recordEvictionRejoinBlock).
     \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
-        ->recordPermanentOptOut($userId, $groupId);
+        ->recordEvictionRejoinBlock($userId, $groupId);
 }, 10, 2);
+
+// The rejoin block's retry: one single event per attempt, scheduled by
+// recordEvictionRejoinBlock() itself, which also decides when to stop.
+add_action(
+    \BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_HOOK,
+    static function ($userId, $groupId, $attempt): void {
+        \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->nftGroupGateService()
+            ->recordEvictionRejoinBlock((int) $userId, (int) $groupId, (int) $attempt);
+    },
+    10,
+    3
+);
 
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();
@@ -1953,17 +1968,15 @@ add_action('plugins_loaded', function (): void {
         }
     }, 10, 3);
 
-    // User deletion: clean up wallet links, signals, claims, and the
-    // per-wallet on-chain data hung off them (NFT holdings + profile
-    // selections). NftHoldings resolves ownership by joining wallet_links,
-    // so it MUST run BEFORE WalletRepository::deleteForUser deletes those
-    // rows — otherwise the join finds nothing and holdings orphan.
+    // User deletion: the on-chain signals. NFT holdings, NFT selections,
+    // claims and wallet links are cleaned up by
+    // UserLifecycleService::onUserDelete(), in the order they need: holdings
+    // before the wallet links they join through, and each verified claim
+    // revoked through the audited path (its page released) before the claim
+    // rows are purged (F-521). They are not repeated here: a second, bare
+    // claim delete would depend on hook order to keep that guarantee.
     add_action('delete_user', function (int $userId): void {
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\SignalRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
     }, 10, 1);
 
     // REST API.
