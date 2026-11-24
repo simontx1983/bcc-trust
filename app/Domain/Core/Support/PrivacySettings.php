@@ -42,6 +42,7 @@
 namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Repositories\UserMetaRepository;
+use BCC\Trust\Core\Repositories\DbWriteCheck;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -264,15 +265,24 @@ final class PrivacySettings
      * listed whatever the fold's state. Switching it ON leaves the legacy
      * key alone: the flag alone hides.
      *
-     * If either write fails the member stays hidden (one on row is
-     * enough), and the caller's checked write reports the failure.
+     * Each write is checked on its own ({@see DbWriteCheck}), because wpdb
+     * clears last_error on every statement: one check around both would read
+     * a failed first write as saved once the second succeeded. It stops at
+     * the first failure and answers whether every write landed. If one
+     * fails the member stays hidden (one on row is enough).
      */
-    public static function writeSearchOptOut(int $userId, bool $hidden): void
+    public static function writeSearchOptOut(int $userId, bool $hidden): bool
     {
-        update_user_meta($userId, self::HIDE_FROM_LISTING_META, $hidden ? '1' : '0');
-        if (!$hidden) {
-            update_user_meta($userId, self::LEGACY_DISCOVERY_OPTOUT_META, '0');
+        $flagWritten = DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::HIDE_FROM_LISTING_META, $hidden ? '1' : '0')
+        );
+        if (!$flagWritten || $hidden) {
+            return $flagWritten;
         }
+
+        return DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::LEGACY_DISCOVERY_OPTOUT_META, '0')
+        );
     }
 
     /** Flag reads this request that could not be trusted and read as hidden. */

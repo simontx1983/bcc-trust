@@ -274,6 +274,29 @@ final class HideFromSearchReadsAsSearchTest extends TestCase
     }
 
     /**
+     * The FLAG write fails at the database. The legacy write must not run,
+     * and the field is reported as not saved: a later successful statement
+     * clears wpdb's last_error, so one check around both writes would have
+     * answered "saved" (review L3).
+     */
+    public function testAFailedFlagWriteFailsTheFieldAndStops(): void
+    {
+        $GLOBALS['__bcc_prefs_meta'][self::USER_ID][PrivacySettings::LEGACY_DISCOVERY_OPTOUT_META] = '1';
+        $GLOBALS['__bcc_prefs_fail_on'] = 1; // 1 = the flag '0'
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_from_search' => false]));
+
+        self::assertSame(500, $response->get_status());
+        $error = $response->get_data()['error'];
+        self::assertSame('hide_from_search', $error['data']['failed']);
+        self::assertSame([], $error['data']['saved']);
+        self::assertSame(1, $GLOBALS['__bcc_prefs_write_count'], 'the legacy write was not attempted');
+        self::assertSame('1', $GLOBALS['__bcc_prefs_meta'][self::USER_ID][PrivacySettings::LEGACY_DISCOVERY_OPTOUT_META]);
+        $GLOBALS['wpdb']->last_error = '';
+        self::assertTrue($this->hideFromSearch(), 'still hidden');
+    }
+
+    /**
      * The legacy write fails at the database: the field is reported as not
      * saved, and the member is still hidden, never listed by half a write.
      */
