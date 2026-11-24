@@ -621,6 +621,71 @@ class ClaimRepository {
     }
 
     /**
+     * The user's ACTIVE team role (administrator / representative) on each
+     * of $pageIds, for the card's viewer_page_role: the team's own read, so a
+     * team row is never read through the owner readers. An invite or any
+     * other status holds no role. Bounded by the page list; read fail-soft
+     * (a card flag, never an authorization: a failed read answers no role).
+     *
+     * @param list<int> $pageIds
+     * @return array<int, string> page id => role
+     */
+    public static function activeTeamRolesOnPages(int $userId, array $pageIds): array {
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $pageIds), static fn (int $id): bool => $id > 0))), 0, 100);
+        if ($userId <= 0 || $ids === []) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', \BCC\Trust\Onchain\Services\PageClaimRolePolicy::TEAM_ROLES);
+        $ph = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<object{entity_id: numeric-string, claim_role: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT entity_id, claim_role FROM {$table}
+              WHERE user_id = %d AND entity_type = 'page' AND entity_id IN ({$ph})
+                AND status = 'active' AND {$roleSql}
+              LIMIT 100",
+            $userId,
+            ...[...$ids, ...$roleArgs]
+        ), __FUNCTION__, false);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(int) $row->entity_id] = (string) $row->claim_role;
+        }
+
+        return $out;
+    }
+
+    /**
+     * The card-flag resolution of resolveVerifiedOperatorForPages() plus, for
+     * each RESOLVED page, the verification methods of that owner's claims on
+     * it (both binding legs). The same query; read fail-soft like the card
+     * resolver, so a failed read answers no owner and no badge.
+     *
+     * @param array<int|string> $pageIds
+     * @return array{operators: array<int, array{state: string, user_id: int|null}>, methods: array<int, list<string>>}
+     */
+    public static function resolveVerifiedOperatorsWithMethodsForPages(array $pageIds): array {
+        $claims    = [];
+        $operators = self::resolveOperators($pageIds, false, $claims);
+        $methods   = [];
+        foreach ($operators as $pageId => $resolution) {
+            if ($resolution['state'] !== self::OPERATOR_RESOLVED) {
+                continue;
+            }
+            foreach ($claims[$pageId] ?? [] as $claim) {
+                if ($claim['user_id'] === $resolution['user_id']) {
+                    $methods[$pageId][] = $claim['verification_method'];
+                }
+            }
+        }
+
+        return ['operators' => $operators, 'methods' => $methods];
+    }
+
+    /**
      * FAIL-CLOSED point variant: the same two-leg resolution, but a read
      * that fails THROWS instead of reading as UNCLAIMED. For authority
      * decisions that must not mistake "could not read" for "no owner" (the

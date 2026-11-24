@@ -577,6 +577,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\ValueObjects\\GroupContext' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/GroupContext.php',
         'BCC\\Trust\\Core\\ValueObjects\\GroupType' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/GroupType.php',
         'BCC\\Trust\\Core\\ValueObjects\\GroupVerification' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/GroupVerification.php',
+        'BCC\\Trust\\Core\\ValueObjects\\OwnerVerification' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/OwnerVerification.php',
         'BCC\\Trust\\Core\\ValueObjects\\PageScore' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/PageScore.php',
         'BCC\\Trust\\Core\\ValueObjects\\PeepSoPrivacy' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/PeepSoPrivacy.php',
         'BCC\\Trust\\Core\\ValueObjects\\VoteWeight' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/VoteWeight.php',

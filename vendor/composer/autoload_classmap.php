@@ -421,6 +421,7 @@ return array(
     'BCC\\Trust\\Core\\ValueObjects\\GroupContext' => $baseDir . '/app/Domain/Core/ValueObjects/GroupContext.php',
     'BCC\\Trust\\Core\\ValueObjects\\GroupType' => $baseDir . '/app/Domain/Core/ValueObjects/GroupType.php',
     'BCC\\Trust\\Core\\ValueObjects\\GroupVerification' => $baseDir . '/app/Domain/Core/ValueObjects/GroupVerification.php',
+    'BCC\\Trust\\Core\\ValueObjects\\OwnerVerification' => $baseDir . '/app/Domain/Core/ValueObjects/OwnerVerification.php',
     'BCC\\Trust\\Core\\ValueObjects\\PageScore' => $baseDir . '/app/Domain/Core/ValueObjects/PageScore.php',
     'BCC\\Trust\\Core\\ValueObjects\\PeepSoPrivacy' => $baseDir . '/app/Domain/Core/ValueObjects/PeepSoPrivacy.php',
     'BCC\\Trust\\Core\\ValueObjects\\VoteWeight' => $baseDir . '/app/Domain/Core/ValueObjects/VoteWeight.php',
