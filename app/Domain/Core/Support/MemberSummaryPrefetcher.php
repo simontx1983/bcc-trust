@@ -98,6 +98,11 @@ final class MemberSummaryPrefetcher
             // The §K2 privacy flags are read from their own guarded copy,
             // not the meta cache; one batch for the page.
             PrivacySettings::prime($userIds);
+            // Each member's user_info row, which the suspension check
+            // behind `flags` reads (UserInfoRepository::getByUserIdOrThrow):
+            // one read for the members not already cached, rather than one
+            // per member on a cold cache. A failed read caches nothing.
+            Plugin::instance()->userInfoRepository()->primeByUserIds($userIds);
         }
 
         $solidId = ReactionTypeRegistry::solidId();

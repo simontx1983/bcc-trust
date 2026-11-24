@@ -144,6 +144,73 @@ class UserInfoRepository {
         return $result;
     }
 
+    /** Members per prime read; a longer list is read in chunks of this size. */
+    private const PRIME_CHUNK = 200;
+
+    /**
+     * Fill the user_info cache for a list of members in one read, so a list
+     * that then asks getByUserIdOrThrow() for each member (the suspension
+     * check behind every member's `flags`) is answered from the cache, not
+     * with one query per member.
+     *
+     * Only members with NO cache entry are read. An entry already there (a
+     * row, or '' for "no row") is left exactly as it is.
+     *
+     * ⚠ Caches exactly what getByUserIdOrThrow() caches, and only after a
+     * read it can trust (the same check: query() false, or last_error set):
+     * the row, or '' for a member with no row, under the same key and TTL,
+     * so every existing invalidation of that key applies. A read that fails
+     * caches NOTHING and is logged; each member then falls back to its own
+     * read, which fails closed as before. wp_cache_set, never wp_cache_add.
+     *
+     * @param list<int> $userIds
+     */
+    public function primeByUserIds(array $userIds): void {
+        $misses = [];
+        foreach ($userIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0 && !isset($misses[$id]) && wp_cache_get('user_info_' . $id, 'bcc_trust') === false) {
+                $misses[$id] = $id;
+            }
+        }
+        if ($misses === []) {
+            return;
+        }
+
+        global $wpdb;
+        foreach (array_chunk(array_values($misses), self::PRIME_CHUNK) as $chunk) {
+            $sql = $wpdb->prepare(
+                'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE user_id IN ("
+                    . implode(',', array_fill(0, count($chunk), '%d')) . ')',
+                ...$chunk
+            );
+            if (!is_string($sql) || $sql === '') {
+                continue;
+            }
+
+            $this->clearLastError();
+            $ok = $wpdb->query($sql);
+            if ($ok === false || $this->lastReadFailed()) {
+                \BCC\Core\Log\Logger::error('[UserInfoRepository] user_info prime read failed; nothing cached', [
+                    'user_count' => count($chunk),
+                    'error'      => (string) $wpdb->last_error,
+                ]);
+                continue;
+            }
+
+            // The first row per member, as getByUserIdOrThrow() takes it.
+            $found = [];
+            foreach ((array) $wpdb->last_result as $row) {
+                if (is_object($row) && isset($row->user_id)) {
+                    $found[(int) $row->user_id] ??= $row;
+                }
+            }
+            foreach ($chunk as $id) {
+                wp_cache_set('user_info_' . $id, $found[$id] ?? '', 'bcc_trust', BCC_TRUST_CACHE_USER);
+            }
+        }
+    }
+
     // Separate helpers so static analysis does not narrow last_error to ''
     // across the query() call that mutates it (bcc-core runProbe()'s shape).
     private function clearLastError(): void
