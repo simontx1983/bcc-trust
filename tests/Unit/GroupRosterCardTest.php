@@ -68,6 +68,22 @@ final class GroupRosterCardTest extends TestCase
         self::assertSame(4300, \BCC\Core\Log\Logger::$lines[0][1]['group_id'] ?? null);
     }
 
+    /**
+     * The page's write_review decision (each card's can_review) is handed
+     * only to the viewer it was read for. Any other viewer, or a bundle
+     * without it, gets null, and the card reads its own.
+     */
+    public function testThePagesWriteReviewDecisionIsOnlyForItsOwnViewer(): void
+    {
+        $decision = \BCC\Trust\Core\ValueObjects\CapabilityDecision::allowed('test');
+        $bundle   = ['viewer_write_review' => ['viewer_id' => 7, 'decision' => $decision]];
+
+        self::assertSame($decision, \BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview($bundle, 7));
+        self::assertNull(\BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview($bundle, 8), 'another viewer');
+        self::assertNull(\BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview(null, 7), 'no bundle');
+        self::assertNull(\BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview(['viewer_write_review' => null], 7), 'an anonymous bundle');
+    }
+
     public function testABugInTheCardBuilderIsNotSwallowed(): void
     {
         $this->expectException(\TypeError::class);

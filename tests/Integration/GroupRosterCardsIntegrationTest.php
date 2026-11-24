@@ -118,9 +118,15 @@ final class GroupRosterCardsIntegrationTest extends TestCase
      * viewer (the same builder over the same prefetch); the member the viewer
      * may not see keeps the tile and gets `card: null`. A closed roster shows
      * its members every tile, so this is the card gate alone.
+     *
+     * A listed mentor's card carries the directory's `is_mentor: true`
+     * (§21.4: opted in, Veteran, Trusted+); no other card carries the key.
      */
     public function testEachCardIsTheDirectorysCardAndAHiddenMemberHasNone(): void
     {
+        $mentor = self::MEMBER_BASE + 1;
+        $this->makeListedMentor($mentor);
+
         $items = $this->roster(self::VIEWER, self::G_CLOSED);
         $ids   = array_map(static fn (array $item): int => (int) $item['id'], $items);
         sort($ids);
@@ -137,7 +143,13 @@ final class GroupRosterCardsIntegrationTest extends TestCase
                 self::assertSame('roster' . self::HIDDEN, $item['handle'] ?? null, 'the tile stays');
                 continue;
             }
-            self::assertSame($cards->getMemberCardForList($id, self::VIEWER, $prefetched), $item['card'], "member {$id}: the directory's card");
+            $directoryCard = $cards->getMemberCardForList($id, self::VIEWER, $prefetched);
+            self::assertIsArray($directoryCard);
+            if ($id === $mentor) {
+                // UsersEndpoint::members adds the badge the same way.
+                $directoryCard['is_mentor'] = true;
+            }
+            self::assertSame($directoryCard, $item['card'], "member {$id}: the directory's card");
             self::assertSame('member', $item['card']['card_kind'] ?? null);
         }
     }
@@ -163,11 +175,15 @@ final class GroupRosterCardsIntegrationTest extends TestCase
     }
 
     /**
-     * Bounded: the cards add no per-member query. A page of eight members
-     * costs exactly what a page of four does (after one warm-up page, so a
-     * first-call read is not counted against either).
+     * Bounded: the cards add no per-member query; the viewer's own
+     * write_review decision is read once for the page, not once per card.
+     * The only per-member read left is each member's `user_info` row on a
+     * cold object cache (the tile's suspension check, which predates the
+     * card and which /members pays too; a follow-up primes it in bulk).
+     * So four more members cost exactly four more queries. Measured after
+     * one warm-up page, so a first-call read counts against neither.
      */
-    public function testAPageOfEightCostsWhatAPageOfFourDoes(): void
+    public function testAPageOfEightCostsOneUserInfoReadPerMemberMoreThanFour(): void
     {
         global $wpdb;
         $this->roster(self::VIEWER, self::G_WARM);
@@ -185,8 +201,7 @@ final class GroupRosterCardsIntegrationTest extends TestCase
         foreach ([...$four, ...$eight] as $item) {
             self::assertSame('member', $item['card']['card_kind'] ?? null, 'every visible member has a card');
         }
-        self::assertSame($fourQueries, $eightQueries, "queries per page: {$fourQueries} for 4 members, {$eightQueries} for 8");
-        fwrite(STDERR, "\n[roster cards] queries per page: {$fourQueries} (4 members), {$eightQueries} (8 members)\n");
+        self::assertSame($fourQueries + 4, $eightQueries, "queries per page: {$fourQueries} for 4 members, {$eightQueries} for 8");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
@@ -200,6 +215,28 @@ final class GroupRosterCardsIntegrationTest extends TestCase
         self::assertArrayHasKey('items', $out, (string) json_encode($out));
 
         return $out['items'];
+    }
+
+    /** §21.4: opted in, Veteran, Trusted tier, not suspended, not in recovery. */
+    private function makeListedMentor(int $userId): void
+    {
+        global $wpdb;
+        $now = gmdate('Y-m-d H:i:s');
+        self::assertNotFalse($wpdb->insert($wpdb->usermeta, ['user_id' => $userId, 'meta_key' => 'bcc_mentor_opt_in', 'meta_value' => '1']), $wpdb->last_error);
+        self::assertNotFalse($wpdb->insert(\BCC\Trust\Core\Database\TableRegistry::rankState(), [
+            'user_id'               => $userId,
+            'rank_slug'             => 'veteran',
+            'apprentice_awarded_at' => $now,
+            'journeyman_awarded_at' => $now,
+            'veteran_awarded_at'    => $now,
+            'updated_at'            => $now,
+        ]), $wpdb->last_error);
+        self::assertNotFalse($wpdb->insert($wpdb->prefix . 'bcc_trust_page_scores', [
+            'page_id'         => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId),
+            'category_id'     => 0,
+            'page_owner_id'   => $userId,
+            'reputation_tier' => 'trusted',
+        ]), $wpdb->last_error);
     }
 
     private function group(int $id, int $privacy): void
@@ -247,5 +284,10 @@ final class GroupRosterCardsIntegrationTest extends TestCase
         $wpdb->query("DELETE FROM `{$wpdb->prefix}peepso_group_members` WHERE gm_group_id IN ({$in})");
         $wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE post_id IN ({$in})");
         $wpdb->query("DELETE FROM {$wpdb->posts} WHERE ID IN ({$in})");
+
+        $mentor = self::MEMBER_BASE + 1;
+        $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = 'bcc_mentor_opt_in'", $mentor));
+        $wpdb->query($wpdb->prepare('DELETE FROM ' . \BCC\Trust\Core\Database\TableRegistry::rankState() . ' WHERE user_id = %d', $mentor));
+        $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->prefix}bcc_trust_page_scores WHERE page_id = %d", \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($mentor)));
     }
 }
