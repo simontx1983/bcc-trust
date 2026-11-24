@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\REST\ReadModelHealthEndpoint;
+use BCC\Trust\Core\Security\RestRouteAllowlist;
+use BCC\Trust\Core\Security\WordPressSignInGate;
 use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Disputes\Controllers\DisputeController;
 use BCC\Trust\Onchain\Controllers\SignalController;
@@ -29,6 +31,9 @@ use PHPUnit\Framework\TestCase;
  *   - No file under a REST/ or Controllers/ directory spells the capability
  *     anywhere outside a comment: the admin re-checks inside handlers and
  *     the owner-or-admin bypasses call BearerAuth::requireAdmin() too.
+ *   - The two security gates that decide REST and sign-in access for
+ *     admins, RestRouteAllowlist and WordPressSignInGate, take their
+ *     CAPABILITY from BearerAuth::ADMIN_CAPABILITY and are scanned too.
  *
  * Out of scope here: wp-admin pages, CLI guards and services, which decide
  * other things than a route's access.
@@ -38,6 +43,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(SignalController::class)]
 #[CoversClass(DisputeController::class)]
 #[CoversClass(ReadModelHealthEndpoint::class)]
+#[CoversClass(RestRouteAllowlist::class)]
+#[CoversClass(WordPressSignInGate::class)]
 final class AdminCapabilitySingleSourceTest extends TestCase
 {
     private const PLUGIN = __DIR__ . '/../..';
@@ -78,9 +85,15 @@ final class AdminCapabilitySingleSourceTest extends TestCase
         }
     }
 
+    public function testTheSecurityGatesReadTheSharedCapability(): void
+    {
+        self::assertSame(BearerAuth::ADMIN_CAPABILITY, RestRouteAllowlist::CAPABILITY);
+        self::assertSame(BearerAuth::ADMIN_CAPABILITY, WordPressSignInGate::CAPABILITY);
+    }
+
     public function testNoRestOrControllerFileSpellsTheCapability(): void
     {
-        $files = self::restAndControllerFiles();
+        $files = self::scannedFiles();
 
         // ANTI-VACUITY: the scan must see the tree, and the files this
         // change touched.
@@ -94,6 +107,8 @@ final class AdminCapabilitySingleSourceTest extends TestCase
             'app/Domain/Core/REST/AdminReportsEndpoint.php',
             'app/Domain/Core/REST/AnnouncementCommentsEndpoint.php',
             'app/Domain/Core/REST/AnnouncementWriteEndpoint.php',
+            'app/Domain/Core/Security/RestRouteAllowlist.php',
+            'app/Domain/Core/Security/WordPressSignInGate.php',
         ] as $must) {
             self::assertContains($must, $relative, "{$must} was not scanned");
         }
@@ -113,10 +128,18 @@ final class AdminCapabilitySingleSourceTest extends TestCase
         self::assertSame([], $found, 'call BearerAuth::requireAdmin() (or userIsAdmin()) instead');
     }
 
-    /** @return list<string> every PHP file under an app/Domain/<X>/REST or /Controllers directory */
-    private static function restAndControllerFiles(): array
+    /**
+     * Every PHP file under an app/Domain/<X>/REST or /Controllers directory,
+     * plus the two security gates.
+     *
+     * @return list<string>
+     */
+    private static function scannedFiles(): array
     {
-        $out = [];
+        $out = [
+            str_replace('\\', '/', self::PLUGIN . '/app/Domain/Core/Security/RestRouteAllowlist.php'),
+            str_replace('\\', '/', self::PLUGIN . '/app/Domain/Core/Security/WordPressSignInGate.php'),
+        ];
         foreach (glob(self::PLUGIN . '/app/Domain/*', GLOB_ONLYDIR) ?: [] as $domain) {
             foreach (['REST', 'Controllers'] as $dir) {
                 if (!is_dir($domain . '/' . $dir)) {
