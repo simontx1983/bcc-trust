@@ -2114,28 +2114,19 @@ add_action('init', function () {
 | still gets PeepSo's emails, and a user who enables our digest may
 | get duplicates.
 |
-| Fix: unschedule PeepSo's mail queue cron. Idempotent — running it
-| every request is a no-op when the cron isn't scheduled. We do NOT
-| touch PeepSo's other crons (maintenance, GDPR, inactive-user
-| cleanup, super-queue) — those are non-email infrastructure we want
-| to keep. Only the email send loop is silenced.
+| Fix (PeepSoMailSilence): unschedule PeepSo's mail queue cron, AND veto
+| PeepSo's queue at the source (`peepso_mailqueue_allowed` → false), so
+| nothing is queued: the queue no longer grows with mail that is never
+| sent, and PeepSo's send-immediately path sends nothing either. Only
+| PeepSo's queue is touched; BCC's own mail goes through wp_mail() and
+| is unaffected. Other PeepSo crons are not touched here.
 |
 | If a future requirement reinstates PeepSo emails (e.g., a feature
-| we don't want to reimplement), remove this block AND wire our
+| we don't want to reimplement), remove this registration AND wire our
 | /settings/notifications page to also write `peepso_email_intensity`
 | / `peepso_notifications` so the two surfaces stay in sync.
 */
-add_action('init', function () {
-    if (defined('PeepSo::CRON_MAILQUEUE')) {
-        wp_clear_scheduled_hook(\PeepSo::CRON_MAILQUEUE);
-    } else {
-        // Hardcoded fallback — the constant value is stable and named
-        // the same across PeepSo versions we've seen, but if PeepSo
-        // hasn't loaded yet (race during early init) we still want
-        // the cron unscheduled.
-        wp_clear_scheduled_hook('peepso_mailqueue_send_event');
-    }
-}, 20);
+\BCC\Trust\Core\Integration\PeepSoMailSilence::register();
 
 
 /*
