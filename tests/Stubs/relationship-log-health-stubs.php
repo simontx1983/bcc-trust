@@ -25,8 +25,10 @@ namespace {
         public static array $mails = [];
         /** @var list<string> */
         public static array $metrics = [];
-        /** @var list<array{int, string}> */
+        /** @var list<array{int, string}> advance() calls: the health check must make none */
         public static array $anchored = [];
+        /** @var array{seq: int, row_hash: string}|null what RelationshipLogAnchor::get() answers */
+        public static ?array $anchor = ['seq' => 3, 'row_hash' => 'aaaa'];
     }
 
     if (!class_exists('WP_User', false)) {
@@ -90,6 +92,12 @@ namespace BCC\Trust\Onchain\Repositories {
 namespace BCC\Trust\Onchain\Support {
     final class RelationshipLogAnchor
     {
+        /** @return array{seq: int, row_hash: string}|null */
+        public static function get(): ?array
+        {
+            return \HealthWorld::$anchor;
+        }
+
         public static function advance(int $seq, string $rowHash): void
         {
             \HealthWorld::$anchored[] = [$seq, $rowHash];
