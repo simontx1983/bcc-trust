@@ -18,7 +18,11 @@
  * Cache shape (§5 generation-counter pattern):
  *   - Group: `bcc_badges`
  *   - Generation key:   `me_badges_gen:{userId}`
- *   - Payload key:      `me_badges:{userId}:gen{N}:{openThreadsKey}`
+ *   - Payload key:      `me_badges:{userId}:gen{N}:d{D}:{openThreadsKey}`
+ *                       (D = the dispute repository's `reporter_gen:{userId}`,
+ *                       bumped when the viewer files a dispute and on every
+ *                       status change of one, so `disputes_open` is fresh
+ *                       without the dispute write path knowing about badges)
  *   - TTL:              BADGE_CACHE_TTL_SECONDS (30s — safety net so
  *                       a missed bump cannot leave a viewer permanently
  *                       stale; sized at/above the F1 client poll cadence
@@ -43,6 +47,8 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoMessageRepository;
 use BCC\Trust\Core\Repositories\NotificationRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepositorySupport;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -84,10 +90,17 @@ final class BadgesService
      * (threads the viewer isn't a participant of are silently absent
      * from the map).
      *
+     * `disputes_open` (structure A, route-map row 18: the "My cases · N open"
+     * dot) is how many disputes the viewer filed that are still open, the
+     * open subset of `GET /disputes/mine`. TRI-STATE: NULL when that count
+     * could not be read, never 0, and a payload carrying NULL is not cached,
+     * so the next poll reads again.
+     *
      * @param list<int> $openThreadIds
      * @return array{
      *   messages_unread: int,
      *   notifications_unread: int,
+     *   disputes_open: int|null,
      *   open_thread_hints: array<int, array{latest_message_id: int, posted_at: string}>,
      *   polled_at: string
      * }
@@ -102,7 +115,8 @@ final class BadgesService
         $threadKey = $threadIds === [] ? 'none' : implode('_', $threadIds);
 
         $gen      = $this->getGeneration($viewerId);
-        $cacheKey = "me_badges:{$viewerId}:gen{$gen}:{$threadKey}";
+        $disputeGen = DisputeRepositorySupport::getGeneration("reporter_gen:{$viewerId}");
+        $cacheKey = "me_badges:{$viewerId}:gen{$gen}:d{$disputeGen}:{$threadKey}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
         $cachedPayload = self::reshapeCached($cached);
         if ($cachedPayload !== null) {
@@ -116,13 +130,18 @@ final class BadgesService
         $payload = [
             'messages_unread'      => $this->messagesService->getUnreadCount($viewerId),
             'notifications_unread' => $this->notificationRepo->countUnreadForUser($viewerId),
+            'disputes_open'        => DisputeRepository::countOpenByReporter($viewerId),
             'open_thread_hints'    => $threadIds === []
                 ? []
                 : PeepSoMessageRepository::getLatestPerThreadForViewer($viewerId, $threadIds),
             'polled_at'            => self::nowIso(),
         ];
 
-        wp_cache_set($cacheKey, $payload, self::CACHE_GROUP, self::BADGE_CACHE_TTL_SECONDS);
+        // An unreadable count is not memoised: the next poll reads again
+        // instead of serving "unknown" for the whole TTL.
+        if ($payload['disputes_open'] !== null) {
+            wp_cache_set($cacheKey, $payload, self::CACHE_GROUP, self::BADGE_CACHE_TTL_SECONDS);
+        }
 
         return $payload;
     }
@@ -172,10 +191,15 @@ final class BadgesService
      * to a fresh build. Keeps the public return type tight at PHPStan
      * level 8 without `@var` overrides.
      *
+     * A cached payload always carries an int `disputes_open` (a NULL one is
+     * never cached); one without it, e.g. cached before the field existed,
+     * is rebuilt.
+     *
      * @param mixed $cached
      * @return array{
      *   messages_unread: int,
      *   notifications_unread: int,
+     *   disputes_open: int,
      *   open_thread_hints: array<int, array{latest_message_id: int, posted_at: string}>,
      *   polled_at: string
      * }|null
@@ -186,9 +210,10 @@ final class BadgesService
             return null;
         }
         if (
-            !isset($cached['messages_unread'], $cached['notifications_unread'], $cached['open_thread_hints'])
+            !isset($cached['messages_unread'], $cached['notifications_unread'], $cached['disputes_open'], $cached['open_thread_hints'])
             || !is_int($cached['messages_unread'])
             || !is_int($cached['notifications_unread'])
+            || !is_int($cached['disputes_open'])
             || !is_array($cached['open_thread_hints'])
         ) {
             return null;
@@ -215,6 +240,7 @@ final class BadgesService
         return [
             'messages_unread'      => $cached['messages_unread'],
             'notifications_unread' => $cached['notifications_unread'],
+            'disputes_open'        => $cached['disputes_open'],
             'open_thread_hints'    => $hints,
             'polled_at'            => isset($cached['polled_at']) && is_string($cached['polled_at'])
                 ? $cached['polled_at']
@@ -256,6 +282,7 @@ final class BadgesService
      * @return array{
      *   messages_unread: int,
      *   notifications_unread: int,
+     *   disputes_open: int,
      *   open_thread_hints: array<int, array{latest_message_id: int, posted_at: string}>,
      *   polled_at: string
      * }
@@ -265,6 +292,7 @@ final class BadgesService
         return [
             'messages_unread'      => 0,
             'notifications_unread' => 0,
+            'disputes_open'        => 0,
             'open_thread_hints'    => [],
             'polled_at'            => self::nowIso(),
         ];
