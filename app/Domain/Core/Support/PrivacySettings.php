@@ -378,8 +378,8 @@ final class PrivacySettings
      *
      * Called once at plugin boot. PeepSo's UserSearch class fires
      * `peepso_user_search_args` to let consumers narrow the WP_User_Query
-     * args; we splice in a `meta_query` clause that excludes any user
-     * whose hide_from_search (= discovery_optout, F-257) is on.
+     * args; we flag the query there, and `pre_user_query` excludes in SQL
+     * any user whose hide_from_search (= discovery_optout, F-257) is on.
      *
      * Stays inside bcc-trust per §A4 — privacy decisions live in one
      * place, even when they affect a sibling plugin's surface.
@@ -391,19 +391,32 @@ final class PrivacySettings
      */
     public const ARG_IGNORE_SEARCH_OPTOUT = '_bcc_ignore_search_optout';
 
+    /**
+     * F-519: the query var {@see filterPeepSoSearchArgs()} sets on a search
+     * or directory query that must leave out members who opted out of
+     * search; {@see filterPeepSoUserQuery()} then excludes them in SQL.
+     * PeepSoUserSearch hands its filtered args to `new WP_User_Query($args)`,
+     * which keeps an unknown var in `query_vars`, as it does PeepSo's own
+     * `_peepso_user_id`.
+     */
+    public const QV_EXCLUDE_SEARCH_OPTOUT = '_bcc_exclude_search_optout';
+
     public static function registerSearchFilter(): void
     {
         add_filter('peepso_user_search_args', [self::class, 'filterPeepSoSearchArgs'], 20, 1);
 
-        // ⚠ TWO MECHANISMS, DELIBERATELY, because the settings live in
-        // different tables and only one is reachable by `meta_query`.
+        // ⚠ TWO HOOKS, ONE PLACE FOR THE SQL:
         //
-        //   hide_from_search  → `wp_usermeta`, so the args filter above
-        //                       can carry it as a `meta_query` clause.
-        //   profile level     → `peepso_users.usr_profile_acc`, which is
-        //                       NOT usermeta, so no `meta_query` can
-        //                       express it. It needs SQL — hence
-        //                       `pre_user_query`.
+        //   the args filter     → decides WHETHER the search opt-out
+        //                         applies (not for admins, not for rosters
+        //                         that pass ARG_IGNORE_SEARCH_OPTOUT) and
+        //                         flags the query.
+        //   `pre_user_query`    → applies it, and the profile level, in SQL.
+        //                         Neither fits a `meta_query`: the profile
+        //                         level is `peepso_users.usr_profile_acc`,
+        //                         not usermeta, and "no row of this key is
+        //                         on" (F-519, duplicate rows) is a NOT
+        //                         EXISTS a `meta_query` cannot express.
         //
         // Priority 20 so it runs AFTER PeepSo's own `pre_user_query`
         // (registered at the default 10 inside `PeepSoUserSearch`). The
@@ -483,6 +496,11 @@ final class PrivacySettings
         if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
             return;
         }
+        // F-519: the search opt-out, whatever happens to level 30 below
+        // (it does not depend on peepso-friends). Admins and rosters never
+        // carry the flag: filterPeepSoSearchArgs() decides that.
+        self::excludeSearchOptOuts($query);
+
         // peepso-friends present ⇒ its own clause owns level 30.
         if (class_exists('\\PeepSoFriendsPlugin')) {
             return;
@@ -519,13 +537,45 @@ final class PrivacySettings
     }
 
     /**
-     * Splice a NOT-EXISTS-OR-FALSY meta_query clause into PeepSo's
-     * WP_User_Query args so opted-out users are excluded.
+     * F-519: leave out every member who opted out of search, in SQL.
      *
-     * NOT EXISTS is required because users who have NEVER touched the
-     * setting have no meta row at all — a plain `value != '1'` clause
-     * would skip them entirely. Combined with relation=AND so an
-     * existing meta_query (e.g. PeepSo's VIP filter) is preserved.
+     * One shared predicate, {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}
+     * (the sitemap uses it too). It excludes a member when ANY row of
+     * `hide_from_search` reads as on, so duplicate '0' + '1' rows exclude:
+     * the strictest row wins, failing closed. The old `meta_query`
+     * (NOT EXISTS OR != '1') let a '0' row satisfy the OR and kept that
+     * member listed.
+     *
+     * ⚠ The legacy opt-out counts only while fold_discovery_optout_v1 has
+     * not completed ({@see legacyOptOutStillRead()}). The fold copied every
+     * ON legacy opt-out into the one flag but LEFT THE LEGACY ROWS IN
+     * PLACE, so reading them after it would hide again a member who has
+     * since turned search visibility back on.
+     *
+     * Only on a query {@see filterPeepSoSearchArgs()} flagged, and once:
+     * `pre_user_query` can fire again on the same object.
+     */
+    private static function excludeSearchOptOuts(\WP_User_Query $query): void
+    {
+        if (empty($query->query_vars[self::QV_EXCLUDE_SEARCH_OPTOUT])) {
+            return;
+        }
+        global $wpdb;
+        $clause = \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql(
+            $wpdb->users . '.ID',
+            self::legacyOptOutStillRead()
+        );
+        if (str_contains($query->query_where, $clause)) {
+            return;
+        }
+        $query->query_where .= ' AND ' . $clause;
+    }
+
+    /**
+     * Mark a PeepSo search or directory query so that members who opted out
+     * of search are left out; {@see filterPeepSoUserQuery()} applies it in
+     * SQL (F-519). The caller's args, `meta_query` included, are otherwise
+     * handed back untouched.
      *
      * ⚠ A caller that is NOT a search or the directory passes
      * {@see self::ARG_IGNORE_SEARCH_OPTOUT}: hide_from_search scopes to
@@ -547,98 +597,34 @@ final class PrivacySettings
         //
         // ⚠ PeepSo HAS a clause for this, but it is gated on its own
         // admin option: `1 === intval(get_option('allow_hide_user_from_user_listing', 0))`.
-        // That option is OFF on production, so the setting has never
-        // actually worked — while BCC's contract has promised since v1.64
+        // That option is OFF on production, so the setting never worked
+        // through PeepSo, while BCC's contract has promised since v1.64
         // that it "excludes the user from directory + member search".
+        // The promise is OURS (the toggle is BCC's `PATCH /me/profile-prefs`),
+        // so this does not depend on a third-party admin checkbox. If the
+        // PeepSo option is ever enabled, both apply and agree.
         //
-        // The promise is OURS: the toggle is exposed through BCC's own
-        // `PATCH /me/profile-prefs`. Leaving it contingent on a
-        // third-party admin checkbox means an admin can silently
-        // un-break or re-break our documented behaviour with no signal.
-        // So this clause is unconditional and ADDITIVE — if the PeepSo
-        // option is ever enabled, both clauses apply and agree.
+        // ⚠ F-519: the exclusion is SQL in filterPeepSoUserQuery(), not a
+        // `meta_query` here. A `meta_query` cannot say "no row of this key
+        // is on": its `NOT EXISTS OR != '1'` form is satisfied by a '0'
+        // row even when a '1' row sits beside it. The legacy opt-out is
+        // read too until the F-257 fold has completed, as before.
         //
-        // NOT-EXISTS-OR-FALSY: users who never touched the setting have
-        // no meta row at all, and a bare `value != '1'` would exclude them.
+        // ⚠ ADMINS ARE EXEMPT, per the user's "admins exempt" rule:
+        // otherwise a moderator cannot find a hidden or opted-out member
+        // in member search, the one job that rule exists for. Mirrors
+        // `PeepSo::is_admin()`, the predicate `is_accessible_static` and
+        // the level-30 clause use, so they cannot drift. (§F-190 widened
+        // it to the legacy opt-out too.)
         //
-        // F-257: this is the ONE hidden-from-search flag; /me/privacy's
-        // `discovery_optout` reads and writes this same key.
-        $hideClause = [
-            'relation' => 'OR',
-            [
-                'key'     => self::HIDE_FROM_LISTING_META,
-                'compare' => 'NOT EXISTS',
-            ],
-            [
-                'key'     => self::HIDE_FROM_LISTING_META,
-                'value'   => '1',
-                'compare' => '!=',
-            ],
-        ];
-
-        // ⚠ ADMINS ARE EXEMPT FROM BOTH BCC CLAUSES, per the user's
-        // "admins exempt" rule — otherwise a moderator cannot find a
-        // hidden or opted-out member in member search, which is the one
-        // job that rule exists for. Mirrors `PeepSo::is_admin()`, the
-        // same predicate `is_accessible_static` and the level-30 clause
-        // use, so the three cannot drift.
-        //
-        // §F-190 widened this. #475 scoped it to the hide clause and
-        // said why: `bcc_privacy_discovery_optout` is a DIFFERENT setting
-        // that had always applied to admins too, and loosening it was a
-        // product decision nobody had made. The decision has since been
-        // made, so the exemption is now blanket.
-        //
-        // ⚠ An EARLY RETURN, not an empty clause list: with no bcc
-        // clauses to add there is nothing to merge, and any `meta_query`
-        // the caller already set (PeepSo's own VIP filter, for one) must
-        // be handed back exactly as it arrived rather than rewrapped in
-        // an `AND` around nothing.
-        $isAdmin = class_exists('\\PeepSo') && \PeepSo::is_admin();
-        if ($isAdmin) {
+        // ⚠ An admin gets the caller's args back EXACTLY: no flag and no
+        // rewrapping of a `meta_query` the caller set (PeepSo's own VIP
+        // filter, for one).
+        if (class_exists('\\PeepSo') && \PeepSo::is_admin()) {
             return $args;
         }
 
-        $bccClauses = ['relation' => 'AND', $hideClause];
-
-        // F-257 rollout: until fold_discovery_optout_v1 has copied every
-        // legacy opt-out into the one flag, keep honouring the legacy key
-        // too, so nobody hidden before the deploy is listed meanwhile. A
-        // migration that never completes keeps this on: fail closed.
-        //
-        // ⚠ NOTHING WRITES the legacy key any more — this is a READ that
-        // exists only until the fold completes, not a second live setting.
-        // Worth saying, because the clause below looks like one: a reader
-        // who takes it for a setting still in use will add it to cache-bust
-        // lists and invalidation triggers, where it would be dead weight
-        // implying a dependency that no longer exists. When
-        // FOLD_DONE_OPTION is set this whole branch stops running, and the
-        // rows can then be dropped.
-        if (self::legacyOptOutStillRead()) {
-            $bccClauses[] = [
-                'relation' => 'OR',
-                [
-                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
-                    'compare' => 'NOT EXISTS',
-                ],
-                [
-                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
-                    'value'   => '1',
-                    'compare' => '!=',
-                ],
-            ];
-        }
-
-        if (isset($args['meta_query']) && is_array($args['meta_query'])) {
-            $existing = $args['meta_query'];
-            $args['meta_query'] = [
-                'relation' => 'AND',
-                $existing,
-                $bccClauses,
-            ];
-        } else {
-            $args['meta_query'] = $bccClauses;
-        }
+        $args[self::QV_EXCLUDE_SEARCH_OPTOUT] = true;
 
         return $args;
     }
