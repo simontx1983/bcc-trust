@@ -1310,6 +1310,10 @@ add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::HOOK, static functi
     \BCC\Trust\Onchain\Services\PageOwnershipAligner::align((int) $pageId);
 });
 add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK, [\BCC\Trust\Onchain\Services\PageOwnershipAligner::class, 'sweep']);
+// The bells for a committed validator relationship change.
+add_action('bcc_validator_relationship_changed', static function (string $action, int $pageId, int $subjectUserId, ?int $actorId, int $linkId, array $replaced = []): void {
+    \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onValidatorRelationshipChanged($action, $pageId, $subjectUserId, $actorId, $linkId, $replaced);
+}, 10, 6);
 
 // Validator staff step-ups: purge rows that expired more than a day ago.
 add_action('bcc_validator_step_up_purge', static function (): void {
