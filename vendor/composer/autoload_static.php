@@ -737,6 +737,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupGateService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupGateService.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupProvisioningService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupProvisioningService.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorGroupRevokeService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorGroupRevokeService.php',
+        'BCC\\Trust\\Onchain\\Services\\ValidatorLinkTargetCheck' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorLinkTargetCheck.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorLogoService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorLogoService.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorPageMinter' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorPageMinter.php',
         'BCC\\Trust\\Onchain\\Services\\ValidatorPageOperatorAuthority' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ValidatorPageOperatorAuthority.php',

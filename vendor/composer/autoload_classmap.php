@@ -581,6 +581,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupGateService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupGateService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupProvisioningService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupProvisioningService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupRevokeService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupRevokeService.php',
+    'BCC\\Trust\\Onchain\\Services\\ValidatorLinkTargetCheck' => $baseDir . '/app/Domain/Onchain/Services/ValidatorLinkTargetCheck.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorLogoService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorLogoService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorPageMinter' => $baseDir . '/app/Domain/Onchain/Services/ValidatorPageMinter.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorPageOperatorAuthority' => $baseDir . '/app/Domain/Onchain/Services/ValidatorPageOperatorAuthority.php',

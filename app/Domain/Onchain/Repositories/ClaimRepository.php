@@ -1643,6 +1643,29 @@ class ClaimRepository {
     }
 
     /**
+     * Does the account exist (wp_users)? Read FAIL-CLOSED: a failed read
+     * THROWS, so "could not read" is never mistaken for "the account is
+     * gone" (a departed owner) or "the account exists" (a link target).
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function accountExistsStrict(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        global $wpdb;
+
+        /** @var list<object{ID: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT ID FROM {$wpdb->users} WHERE ID = %d LIMIT 1",
+            $userId
+        ), __FUNCTION__, true);
+
+        return $rows !== [];
+    }
+
+    /**
      * Did the user once own the page through a claim that is now REVOKED
      * (an owner-role page row in status revoked)? Separates an owner who
      * lost their claim from an author set some other way. Read fail-closed.
