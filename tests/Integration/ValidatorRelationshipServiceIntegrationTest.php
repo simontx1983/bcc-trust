@@ -198,6 +198,122 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         }
     }
 
+    // ── a wallet proof claims the validator (the page-claim flow) ──────
+
+    /** @return array<string, mixed> */
+    private function walletClaim(int $userId): array
+    {
+        return Service::claimByWallet($userId, $this->validatorId, 'cosmos1proof' . $userId, 7, self::PAGE);
+    }
+
+    /** @return array{status: string, method: string}|null */
+    private function row(int $userId, string $type, int $entity): ?array
+    {
+        global $wpdb;
+        $r = $wpdb->get_row($wpdb->prepare(
+            'SELECT status, verification_method, claim_role FROM `' . ClaimRepository::table() . '` WHERE user_id = %d AND entity_type = %s AND entity_id = %d',
+            $userId,
+            $type,
+            $entity
+        ));
+
+        return $r === null ? null : ['status' => (string) $r->status, 'method' => (string) $r->verification_method, 'role' => (string) $r->claim_role];
+    }
+
+    /** Phillip's precedence: a wallet proof supersedes a staff approval, in one run. */
+    public function testAWalletProofSupersedesAStaffApprovedOwner(): void
+    {
+        $this->seedOwner(self::OTHER, 'staff');
+
+        $result = $this->walletClaim(self::OWNER);
+
+        self::assertTrue($result['success']);
+        self::assertSame([self::OTHER], $result['superseded_user_ids']);
+        self::assertTrue($result['mirror_written']);
+        self::assertSame('revoked', $this->row(self::OTHER, 'validator', $this->validatorId)['status'] ?? null);
+        self::assertSame('revoked', $this->row(self::OTHER, 'page', self::PAGE)['status'] ?? null, 'the staff owner\'s page mirror too');
+        self::assertSame(['status' => 'verified', 'method' => 'wallet', 'role' => 'operator'], $this->row(self::OWNER, 'validator', $this->validatorId));
+        self::assertSame(['status' => 'verified', 'method' => 'wallet', 'role' => 'operator'], $this->row(self::OWNER, 'page', self::PAGE), 'the mirror is a wallet claim like the claim');
+        self::assertSame(['state' => 'RESOLVED', 'user_id' => self::OWNER], ClaimRepository::resolveVerifiedOperatorForPageStrict(self::PAGE));
+        self::assertSame(['owner_superseded', 'owner_linked'], self::logActions());
+        $rows = Log::rowsAfter(0, 5);
+        self::assertSame([(string) self::OTHER, 'member', (string) self::OWNER], [(string) $rows[0]->subject_user_id, $rows[0]->actor_kind, (string) $rows[0]->actor_user_id]);
+        self::assertSame(['seq' => 2, 'row_hash' => $rows[1]->row_hash], RelationshipLogAnchor::get(), 'anchored after the commit');
+        self::assertContains(['hook' => PageOwnershipAligner::HOOK, 'args' => [self::PAGE]], array_map(static fn (array $s): array => ['hook' => $s['hook'], 'args' => $s['args']], $GLOBALS['bcc_scheduled']), 'the page swap is left to the aligner');
+        $changed = array_values(array_filter($GLOBALS['__actions'], static fn (array $a): bool => $a[0] === 'bcc_validator_relationship_changed'));
+        self::assertSame('owner_superseded', $changed[0][1] ?? null);
+        self::assertSame(self::OTHER, $changed[0][3] ?? null, 'the previous owner is the subject');
+    }
+
+    public function testAWalletProofNeverSupersedesAProofOwner(): void
+    {
+        $this->seedOwner(self::OTHER, 'wallet');
+
+        self::assertSame(['success' => false, 'error' => 'already_claimed', 'message' => 'This project already has a verified Operator.'], $this->walletClaim(self::OWNER));
+        self::assertSame('verified', $this->row(self::OTHER, 'validator', $this->validatorId)['status'] ?? null);
+        self::assertNull($this->row(self::OWNER, 'validator', $this->validatorId));
+        self::assertSame([], self::logActions(), 'nothing written');
+    }
+
+    public function testAnOwnerOfUnknownMethodIsNeverSupersededEither(): void
+    {
+        $this->seedOwner(self::OTHER, 'mystery');
+
+        self::assertSame('already_claimed', $this->walletClaim(self::OWNER)['error'] ?? null);
+        self::assertSame([], self::logActions());
+    }
+
+    public function testAFirstWalletClaimIsLinkedAndMirrored(): void
+    {
+        $result = $this->walletClaim(self::OWNER);
+
+        self::assertSame([true, [], true], [$result['success'], $result['superseded_user_ids'], $result['mirror_written']]);
+        self::assertSame(['owner_linked'], self::logActions());
+        self::assertSame('wallet', $this->row(self::OWNER, 'page', self::PAGE)['method'] ?? null);
+    }
+
+    public function testAReClaimBySameUserIsIdempotent(): void
+    {
+        $first  = $this->walletClaim(self::OWNER);
+        $second = $this->walletClaim(self::OWNER);
+
+        self::assertSame($first['claim_id'], $second['claim_id']);
+        self::assertSame(['owner_linked'], self::logActions(), 'one record, not two');
+    }
+
+    /** C-a+: a team member's own wallet proof ends their membership on the record. */
+    public function testATeamMembersWalletClaimEndsTheirMembershipOnTheRecord(): void
+    {
+        global $wpdb;
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OWNER, 'entity_type' => 'page', 'entity_id' => self::PAGE,
+            'wallet_address' => '', 'chain_id' => 0, 'claim_role' => 'representative',
+            'status' => 'active', 'verification_method' => 'staff', 'verified_by' => self::STAFF,
+        ]);
+
+        self::assertTrue($this->walletClaim(self::OWNER)['success']);
+
+        self::assertSame(['team_member_removed', 'owner_linked'], self::logActions());
+        self::assertSame(['status' => 'verified', 'method' => 'wallet', 'role' => 'operator'], $this->row(self::OWNER, 'page', self::PAGE));
+        self::assertEquals(['role' => 'representative', 'reason' => 'became_owner'], json_decode((string) Log::rowsAfter(0, 1)[0]->payload, true));
+    }
+
+    public function testAnotherUsersOwnerRowOnThePageSkipsOnlyTheMirror(): void
+    {
+        global $wpdb;
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OTHER, 'entity_type' => 'page', 'entity_id' => self::PAGE,
+            'wallet_address' => 'cosmos1x', 'chain_id' => 7, 'claim_role' => 'operator',
+            'status' => 'verified', 'verification_method' => 'wallet', 'verified_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+
+        $result = $this->walletClaim(self::OWNER);
+
+        self::assertSame([true, false], [$result['success'], $result['mirror_written']]);
+        self::assertSame('verified', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null, 'the claim stands');
+        self::assertNull($this->row(self::OWNER, 'page', self::PAGE));
+    }
+
     public function testAStaffApprovedOwnerMustBeRevokedFirst(): void
     {
         $this->seedOwner(self::OTHER, 'staff');

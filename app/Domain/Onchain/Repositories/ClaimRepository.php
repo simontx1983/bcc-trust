@@ -1617,6 +1617,60 @@ class ClaimRepository {
     }
 
     /**
+     * The TEAM role (administrator / representative) the user holds on a
+     * page through an invited or active row, read FOR UPDATE inside the
+     * caller's transaction; null when their row (if any) is not a team row.
+     *
+     * @throws RepositoryReadFailure
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function teamRoleOnPageForUpdate(int $userId, int $pageId): ?string
+    {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::teamRoleOnPageForUpdate() must run inside a TransactionManager transaction');
+        }
+        if ($userId <= 0 || $pageId <= 0) {
+            return null;
+        }
+        $row = self::lockedUserRow($userId, 'page', $pageId);
+        if ($row !== null && \BCC\Trust\Onchain\Services\PageClaimRolePolicy::isTeamRole((string) $row->claim_role)
+            && in_array($row->status, [ClaimStatus::INVITED, ClaimStatus::ACTIVE], true)
+        ) {
+            return (string) $row->claim_role;
+        }
+
+        return null;
+    }
+
+    /**
+     * Did the user once own the page through a claim that is now REVOKED
+     * (an owner-role page row in status revoked)? Separates an owner who
+     * lost their claim from an author set some other way. Read fail-closed.
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function userHadRevokedOwnerRowOnPage(int $userId, int $pageId): bool
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id FROM {$table}
+              WHERE user_id = %d AND entity_type = 'page' AND entity_id = %d
+                AND status = 'revoked' AND claim_role IN ('operator', 'creator')
+              LIMIT 1",
+            $userId,
+            $pageId
+        ), __FUNCTION__, true);
+
+        return $rows !== [];
+    }
+
+    /**
      * The user's row for an entity, locked FOR UPDATE, or null.
      *
      * @return object{id: numeric-string, status: string, claim_role: string}|null

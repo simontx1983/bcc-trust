@@ -118,9 +118,15 @@ class ClaimService {
      * Checks if the user has a connected wallet that matches the entity's
      * on-chain owner/operator. If matched, records a verified claim.
      *
-     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string}
+     * A VALIDATOR operator claim goes through
+     * ValidatorRelationshipService::claimByWallet(): the relationship lock
+     * order, the log rows, the supersede of a staff-approved owner, and the
+     * page mirror for $pageId in the same run (`mirror_written`). A
+     * collection claim keeps createExclusiveClaim(), and its caller mirrors it.
+     *
+     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string, mirror_written?: bool}
      */
-    public static function claim(int $userId, string $entityType, int $entityId): array {
+    public static function claim(int $userId, string $entityType, int $entityId, int $pageId = 0): array {
         // §M suspension gate at the SERVICE boundary (F-109), admin bypass
         // OFF. PagesEndpoint gates first; this holds for any future caller.
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
@@ -204,14 +210,16 @@ class ClaimService {
 
         // ── Exclusivity gate: only one operator/creator per entity ────────
         if (in_array($match['role'], self::EXCLUSIVE_ROLES, true)) {
-            $result = ClaimRepository::createExclusiveClaim(
-                $userId,
-                $entityType,
-                $entityId,
-                $match['wallet_address'],
-                $match['chain_id'],
-                $match['role']
-            );
+            $result = ($entityType === 'validator' && $match['role'] === 'operator')
+                ? ValidatorRelationshipService::claimByWallet($userId, $entityId, $match['wallet_address'], $match['chain_id'], $pageId)
+                : ClaimRepository::createExclusiveClaim(
+                    $userId,
+                    $entityType,
+                    $entityId,
+                    $match['wallet_address'],
+                    $match['chain_id'],
+                    $match['role']
+                );
 
             if (!$result['success']) {
                 return $result;
@@ -223,11 +231,12 @@ class ClaimService {
             do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
 
             return [
-                'success'    => true,
-                'message'    => self::successMessage($entityType, $match['role']),
-                'claim_id'   => $claimId,
-                'role'       => $match['role'],
-                'is_primary' => true,
+                'success'        => true,
+                'message'        => self::successMessage($entityType, $match['role']),
+                'claim_id'       => $claimId,
+                'role'           => $match['role'],
+                'is_primary'     => true,
+                'mirror_written' => (bool) ($result['mirror_written'] ?? false),
             ];
         }
 
