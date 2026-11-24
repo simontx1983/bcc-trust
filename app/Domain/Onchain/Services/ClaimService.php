@@ -865,25 +865,44 @@ class ClaimService {
         if ($userId <= 0) {
             return;
         }
+        $readFailed = false;
         try {
             $claimIds = ClaimRepository::verifiedEntityClaimIdsForUser($userId);
         } catch (\Throwable $e) {
-            $claimIds = [];
+            $claimIds   = [];
+            $readFailed = true;
             \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim read failed, claims purged without revoke', [
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
         }
+        $notRevoked = 0;
         foreach ($claimIds as $claimId) {
             try {
                 self::revokeClaim($claimId, 'account_deleted');
             } catch (\Throwable $e) {
+                ++$notRevoked;
                 \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
                     'user_id'  => $userId,
                     'claim_id' => $claimId,
                     'error'    => $e->getMessage(),
                 ]);
             }
+        }
+
+        // Claims about to be purged without their audited revoke (their pages
+        // may still name the deleted user): counted and put on the record,
+        // so the admin health view can find them. Best-effort.
+        if ($readFailed || $notRevoked > 0) {
+            self::afterCommit('purge_without_revoke_audit', 0, static function () use ($userId, $notRevoked, $readFailed): void {
+                \BCC\Trust\Core\Security\AuditLogger::log('claims_purged_without_revoke', $userId, [
+                    'count'       => $readFailed ? null : $notRevoked,
+                    'read_failed' => $readFailed,
+                ], 'user', 0);
+            });
+            self::afterCommit('purge_without_revoke_metric', 0, static function (): void {
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'deletion_revoke_failed');
+            });
         }
         ClaimRepository::deleteForUser($userId);
     }
