@@ -12,19 +12,19 @@ use PHPUnit\Framework\TestCase;
  * group's canonical frontend route (feed `group.link`, and any future
  * group-link emitter).
  *
- * Routing rule (matches §4.7.x group `type`):
- *   - hall  → /halls/{slug}
- *   - else  → /communities/{slug}   (nft / validator / system / user / unknown)
+ * Routing rule: every group `type` → /communities/{slug} (hall / nft /
+ * validator / system / user / unknown). Halls moved there in structure A
+ * (F-594); they were /halls/{slug}.
  *
  * `$slug` is the group `post_name` (already WP-sanitized); the composer's
  * own trim/leading-slash strip only guards a stray value so we never emit
- * `/halls//x`. Pure (no WP) — no stubs.
+ * `/communities//x`. Pure (no WP) — no stubs.
  */
 final class CardUrlMapGroupUrlTest extends TestCase
 {
-    public function testHallTypeRoutesToHallsPrefix(): void
+    public function testHallTypeRoutesToCommunitiesPrefix(): void
     {
-        self::assertSame('/halls/ethereum-hall', CardUrlMap::groupUrl('hall', 'ethereum-hall'));
+        self::assertSame('/communities/ethereum-hall', CardUrlMap::groupUrl('hall', 'ethereum-hall'));
     }
 
     public function testNonHallTypesRouteToCommunitiesPrefix(): void
@@ -37,8 +37,7 @@ final class CardUrlMapGroupUrlTest extends TestCase
 
     public function testUnknownTypeFallsBackToCommunitiesPrefix(): void
     {
-        // Only the exact 'hall' value routes to /halls/; everything else
-        // (including an unrecognized type) is a /communities/ link.
+        // An unrecognized type is a /communities/ link like every other.
         self::assertSame('/communities/mystery', CardUrlMap::groupUrl('', 'mystery'));
         self::assertSame('/communities/mystery', CardUrlMap::groupUrl('not-a-type', 'mystery'));
     }
@@ -47,7 +46,7 @@ final class CardUrlMapGroupUrlTest extends TestCase
     {
         // Leading slash + surrounding whitespace are stripped so the
         // composed link never doubles the separator or carries padding.
-        self::assertSame('/halls/ethereum-hall', CardUrlMap::groupUrl('hall', '  /ethereum-hall  '));
+        self::assertSame('/communities/ethereum-hall', CardUrlMap::groupUrl('hall', '  /ethereum-hall  '));
         self::assertSame('/communities/bored-apes', CardUrlMap::groupUrl('nft', '/bored-apes'));
     }
 }

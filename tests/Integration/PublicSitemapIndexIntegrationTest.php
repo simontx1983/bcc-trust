@@ -117,7 +117,7 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951859 => [$page, 'publish', 'f518-two-types', [], [['_bcc_page_type', 'validator'], ['_bcc_page_type', 'nft']], '/v/f518-two-types', 'two type rows: the first counts, as get_post_meta reads it'],
             // Groups.
             951871 => [$group, 'publish', 'f518-open', ['0'], [], '/communities/f518-open', 'open community'],
-            951872 => [$group, 'publish', 'f518-hall', ['0'], [['_bcc_group_kind', 'hall']], '/halls/f518-hall', 'open Hall'],
+            951872 => [$group, 'publish', 'f518-hall', ['0'], [['_bcc_group_kind', 'hall']], '/communities/f518-hall', 'open Hall'],
             951873 => [$group, 'publish', 'f518-closed', ['1'], [], null, 'closed group'],
             951874 => [$group, 'publish', 'f518-secret', ['2'], [], null, 'secret group'],
             951875 => [$group, 'publish', 'f518-split-kind', ['0'], [['_bcc_group_kind', ''], ['_bcc_group_kind', 'hall']], null, 'disagreeing kind rows: the app cannot place it'],

@@ -28,6 +28,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoGroupWriter;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -133,7 +134,7 @@ final class HallsService
                     $myMemberships[$groupId] ?? null,
                     $primaryGroupId
                 ),
-                'links'             => ['self' => '/halls/' . $row->post_name],
+                'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
             ];
         }
 
@@ -281,7 +282,7 @@ final class HallsService
                 $myMemberships[$groupId] ?? null,
                 $primaryGroupId
             ),
-            'links'             => ['self' => '/halls/' . $row->post_name],
+            'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
         ];
     }
 
