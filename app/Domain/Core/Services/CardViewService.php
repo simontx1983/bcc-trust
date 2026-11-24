@@ -965,10 +965,43 @@ final class CardViewService
      * Server-owned kicker copy per group type. Mirrors (and supersedes,
      * per §L5) the frontend GroupCard's KICKER_BY_TYPE map — the FE
      * renders `kicker` verbatim instead of deriving from `type`.
+     *
+     * ⚠⚠ DELIBERATE LOCKSTEP DUPLICATE of bcc-search
+     * `GroupSearchService::KIND_LABEL`, which emits the same five
+     * strings as `kind_label` on group-search results. §4.9's
+     * `GET /bcc/v1/search/groups` describes that field as "exactly the
+     * §3.2.4 kicker vocabulary", and nothing enforces it — so EDIT BOTH
+     * OR NEITHER: a one-sided change ships search results and the
+     * community card beside them disagreeing about the same group.
+     *
+     * ⇒ That pointer only existed on the bcc-search side until
+     * 2026-11-24, which is why the twin is easy to miss when you start
+     * here.
+     *
+     * ⚠ MERGE ORDER IS NOT ENOUGH. Merge search before trust so CI
+     * stays green, but DEPLOY BOTH IN THE SAME RELEASE: merge order
+     * only decides what builds, while what members see is decided by
+     * the release, and a release carrying one half shows the mismatch
+     * in production.
+     *
+     * ⚠ `nft` and `validator` read "GROUP", not "COMMUNITY", and that
+     * REVERSES the v1.52 "Communities vocabulary convergence" FOR THESE
+     * TWO KINDS ONLY (owner decision, 2026-11-24). Structure A names the
+     * surfaces Halls / Holder Groups / Delegator Groups / member-made, so
+     * the two on-chain-gated kinds take "GROUP" while `hall`, `system`
+     * and the `user` fallback keep the copy they have.
+     *
+     * ⇒ The mixture is intended. Do not "finish" the revert by moving
+     * SYSTEM COMMUNITY or the COMMUNITY fallback with them.
+     *
+     * Display-only: `type` values are unchanged, so nothing routes,
+     * gates or joins on this. Pinned by CommunityKickerCopyTest — before
+     * that test nothing asserted these strings at all, which is how this
+     * map and contract §3.2.4 were free to drift apart.
      */
     private const COMMUNITY_KICKER_BY_TYPE = [
-        'nft'       => 'HOLDER COMMUNITY',
-        'validator' => 'DELEGATOR COMMUNITY',
+        'nft'       => 'HOLDER GROUP',
+        'validator' => 'DELEGATOR GROUP',
         'hall'      => 'CHAIN HALL',
         'system'    => 'SYSTEM COMMUNITY',
         'user'      => 'COMMUNITY',
