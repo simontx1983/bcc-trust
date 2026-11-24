@@ -630,6 +630,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Factories\\FetcherFactory' => __DIR__ . '/../..' . '/app/Domain/Onchain/Factories/FetcherFactory.php',
         'BCC\\Trust\\Onchain\\Fetchers\\CosmosFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/CosmosFetcher.php',
         'BCC\\Trust\\Onchain\\Fetchers\\EvmFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/EvmFetcher.php',
+        'BCC\\Trust\\Onchain\\Fetchers\\IndexTimeBudgetSpent' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/IndexTimeBudgetSpent.php',
         'BCC\\Trust\\Onchain\\Fetchers\\NearFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/NearFetcher.php',
         'BCC\\Trust\\Onchain\\Fetchers\\PolkadotFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/PolkadotFetcher.php',
         'BCC\\Trust\\Onchain\\Fetchers\\SolanaFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Fetchers/SolanaFetcher.php',
