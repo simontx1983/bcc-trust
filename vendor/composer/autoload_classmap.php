@@ -51,6 +51,7 @@ return array(
     'BCC\\Trust\\Core\\Exceptions\\RepositoryException' => $baseDir . '/app/Domain/Core/Exceptions/RepositoryException.php',
     'BCC\\Trust\\Core\\Exceptions\\VoteEligibilityException' => $baseDir . '/app/Domain/Core/Exceptions/VoteEligibilityException.php',
     'BCC\\Trust\\Core\\Integration\\PeepSoIntegration' => $baseDir . '/app/Domain/Core/Integration/PeepSoIntegration.php',
+    'BCC\\Trust\\Core\\Integration\\PeepSoMailSilence' => $baseDir . '/app/Domain/Core/Integration/PeepSoMailSilence.php',
     'BCC\\Trust\\Core\\Plugin' => $baseDir . '/app/Domain/Core/Plugin.php',
     'BCC\\Trust\\Core\\REST\\AccountCredentialCheck' => $baseDir . '/app/Domain/Core/REST/AccountCredentialCheck.php',
     'BCC\\Trust\\Core\\REST\\AdminDigestEndpoint' => $baseDir . '/app/Domain/Core/REST/AdminDigestEndpoint.php',
