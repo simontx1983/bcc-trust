@@ -148,8 +148,9 @@ final class GroupMembersService
         $prefetched = $userIds === [] ? null : MemberSummaryPrefetcher::primeFor($userIds);
 
         // ── 5. Hydrate each row. ─────────────────────────────────────
-        $userView = Plugin::instance()->userViewService();
-        $items    = [];
+        $userView      = Plugin::instance()->userViewService();
+        $withJoinTimes = self::seesJoinTimes($viewerId);
+        $items         = [];
         foreach ($rows as $row) {
             $userId = (int) $row->user_id;
             if ($userId <= 0) {
@@ -165,12 +166,7 @@ final class GroupMembersService
                 continue;
             }
 
-            $role      = \BCC\Trust\Core\Support\GroupRole::normalize((string) $row->role);
-            $items[]   = array_merge($summary, [
-                'role'       => $role,
-                'role_label' => \BCC\Trust\Core\Support\GroupRole::label($role),
-                'joined_at'  => self::joinedAtIso($row),
-            ]);
+            $items[] = array_merge($summary, self::rosterFields($row, $withJoinTimes));
         }
 
         return [
@@ -232,6 +228,38 @@ final class GroupMembersService
             $rows,
             static fn (object $row): bool => isset($visible[(int) $row->user_id])
         ));
+    }
+
+    /**
+     * Whether this viewer receives when each member joined the group: site
+     * admins only (`manage_options`). Other users, this group's own owner
+     * and managers included, never receive a join time (R4). The roster's
+     * order (role, then join time) stays server-side.
+     */
+    private static function seesJoinTimes(int $viewerId): bool
+    {
+        return $viewerId > 0 && user_can($viewerId, 'manage_options');
+    }
+
+    /**
+     * The roster's own fields for one row: `role`, `role_label`, and
+     * `joined_at` only when {@see seesJoinTimes()}. The key is absent
+     * otherwise, not null, so nothing in the payload stands for it.
+     *
+     * @return array{role: string, role_label: string, joined_at?: string|null}
+     */
+    private static function rosterFields(object $row, bool $withJoinTimes): array
+    {
+        $role   = \BCC\Trust\Core\Support\GroupRole::normalize((string) ($row->role ?? ''));
+        $fields = [
+            'role'       => $role,
+            'role_label' => \BCC\Trust\Core\Support\GroupRole::label($role),
+        ];
+        if ($withJoinTimes) {
+            $fields['joined_at'] = self::joinedAtIso($row);
+        }
+
+        return $fields;
     }
 
     /**
