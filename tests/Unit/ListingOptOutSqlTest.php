@@ -6,6 +6,8 @@ namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -18,7 +20,16 @@ use PHPUnit\Framework\TestCase;
  * `%` (it runs through prepare() beside other clauses); and only a column
  * reference may be spliced in. What it EXCLUDES on real rows is proven in
  * PublicSitemapIndexIntegrationTest.
+ *
+ * ⚠ SEPARATE PROCESSES, on purpose. Another unit file
+ * (ColdStartVisibilityTest) declares a fake UserSyncRepository at file
+ * level, and PHPUnit loads every test file into the main process while it
+ * collects them, so in the full suite that fake IS the class there. Alone
+ * this file passes either way; in the suite only a fresh process loads the
+ * real one.
  */
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 final class ListingOptOutSqlTest extends TestCase
 {
     /** @var mixed */
