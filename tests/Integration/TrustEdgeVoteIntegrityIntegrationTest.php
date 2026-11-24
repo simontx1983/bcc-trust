@@ -270,6 +270,106 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
         self::assertNull($this->edge(), 'the hidden review confers no trust');
     }
 
+    // ── F-574: the graph reads ────────────────────────────────────────
+
+    /**
+     * Runs $read with $fault armed on $pattern, after a different read has
+     * left its own rows behind (what wpdb's pre-flush bail would hand back).
+     *
+     * @return array{result: mixed, thrown: ?RepositoryReadFailure, fired: int}
+     */
+    private function readUnder(string $fault, string $pattern, \Closure $read): array
+    {
+        global $wpdb;
+        self::assertNotEmpty($wpdb->get_results('SELECT 1 AS left_behind'), 'precondition: rows are left behind');
+
+        $result = null;
+        $thrown = null;
+        $wpdb->{$fault} = $pattern;
+        try {
+            $result = $read();
+        } catch (RepositoryReadFailure $e) {
+            $thrown = $e;
+        } finally {
+            $fired = $wpdb->injectedFailures + $wpdb->silentFailures;
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(0, $fired, 'the fault must actually have fired');
+
+        return ['result' => $result, 'thrown' => $thrown, 'fired' => $fired];
+    }
+
+    /**
+     * The full walk pages until an EMPTY page, so an unreadable page is
+     * refused rather than read as the end of the table.
+     */
+    #[DataProvider('unreadableReads')]
+    public function testAnUnreadableEdgePageIsRefusedNotReadAsTheEnd(string $fault): void
+    {
+        $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        self::assertCount(1, $this->edges->getAllEdges(0, 10), 'control: the page reads on this server');
+
+        $out = $this->readUnder($fault, '/SELECT id, source_user_id, target_user_id, weight, edge_type/', fn () => $this->edges->getAllEdges(0, 10));
+
+        self::assertInstanceOf(RepositoryReadFailure::class, $out['thrown'], 'an unreadable page is refused');
+    }
+
+    /** An unreadable neighbour walk is refused: an empty one would slip a hub under the 500 cap. */
+    #[DataProvider('unreadableReads')]
+    public function testAnUnreadableNeighbourWalkIsRefused(string $fault): void
+    {
+        $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        self::assertSame([self::OWNER], $this->edges->getNeighborIds([self::VOTER]), 'control: the walk reads on this server');
+
+        $out = $this->readUnder($fault, '/SELECT DISTINCT source_user_id AS uid/', fn () => $this->edges->getNeighborIds([self::VOTER]));
+
+        self::assertInstanceOf(RepositoryReadFailure::class, $out['thrown'], 'an unreadable neighbourhood is refused');
+    }
+
+    /** Fail-safe: an unreadable subgraph is an empty one (the caller's "skip"), never the rows left behind. */
+    #[DataProvider('unreadableReads')]
+    public function testAnUnreadableSubgraphIsEmpty(string $fault): void
+    {
+        $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);
+        self::assertCount(1, $this->edges->getEdgesForUsers([self::VOTER, self::OWNER]), 'control: the subgraph reads on this server');
+
+        $out = $this->readUnder($fault, '/SELECT source_user_id, target_user_id, weight, edge_type/', fn () => $this->edges->getEdgesForUsers([self::VOTER, self::OWNER]));
+
+        self::assertNull($out['thrown'], 'fail-safe: nothing is thrown');
+        self::assertSame([], $out['result']);
+    }
+
+    /** A hub's neighbour walk stops one past the 500-user cap, so the hub is still deferred. */
+    public function testTheNeighbourWalkStopsOnePastTheHubCap(): void
+    {
+        global $wpdb;
+        $now    = gmdate('Y-m-d H:i:s');
+        $values = [];
+        for ($i = 1; $i <= 600; $i++) {
+            $values[] = $wpdb->prepare('(%d, %d, 1, 1, %s, %s, %s, %s)', self::VOTER, self::OWNER + $i, 'vote', $now, $now, $now);
+        }
+        self::assertNotFalse($wpdb->query(
+            "INSERT INTO `{$wpdb->prefix}bcc_trust_edges`
+                 (source_user_id, target_user_id, weight, vote_count, edge_type, created_at, updated_at, last_updated)
+             VALUES " . implode(', ', $values)
+        ), $wpdb->last_error);
+
+        try {
+            self::assertSame(600, (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(DISTINCT target_user_id) FROM `{$wpdb->prefix}bcc_trust_edges` WHERE source_user_id = %d",
+                self::VOTER
+            )), 'precondition: the hub has more neighbours than the bound');
+
+            $neighbours = $this->edges->getNeighborIds([self::VOTER]);
+
+            self::assertCount(EdgeRepository::MAX_NEIGHBOR_IDS, $neighbours);
+            self::assertGreaterThan(500, count(array_unique(array_merge([self::VOTER], $neighbours))), 'the hub still reads as "more than 500"');
+        } finally {
+            $wpdb->query($wpdb->prepare("DELETE FROM `{$wpdb->prefix}bcc_trust_edges` WHERE source_user_id = %d", self::VOTER));
+        }
+    }
+
     private function sync(): ReviewVisibilityScoreSync
     {
         $ref = new \ReflectionClass(VoteService::class);

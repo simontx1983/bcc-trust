@@ -162,6 +162,27 @@ final class RingReadsFailClosedIntegrationTest extends TestCase
         self::assertNotSame(self::SENTINEL, $after);
     }
 
+    /**
+     * F-574: an unreadable edge walk skips PageRank (nothing is computed on
+     * it) without skipping ring detection, and nothing escapes the cron.
+     */
+    public function testAnUnreadableEdgeWalkSkipsPageRankButNotRingDetection(): void
+    {
+        wp_cache_set('ring_results', self::SENTINEL, 'bcc_trust_admin', DAY_IN_SECONDS);
+        $this->failOnly('SELECT id, source_user_id, target_user_id, weight, edge_type');
+
+        try {
+            Plugin::instance()->cronService()->dailyGraphUpdate();
+        } catch (RepositoryReadFailure $e) {
+            self::fail('the edge-read failure must not escape the cron: ' . $e->getMessage());
+        }
+
+        self::assertGreaterThanOrEqual(1, $GLOBALS['wpdb']->injectedFailures, 'the fault must actually fire');
+        $after = wp_cache_get('ring_results', 'bcc_trust_admin');
+        self::assertIsArray($after);
+        self::assertNotSame(self::SENTINEL, $after, 'ring detection still ran and refreshed ring_results');
+    }
+
     public function testTheWeeklySlowRingScanDoesNotLetAFailureEscapeTheCron(): void
     {
         $this->failOnly(self::VOUCH_PAIRS);
