@@ -37,6 +37,7 @@ final class AuthMailer
     private const WELCOME_FAILURE_EVENT            = 'welcome_email_send_failed';
     private const PASSWORD_RESET_FAILURE_EVENT     = 'password_reset_email_send_failed';
     private const TWO_FA_FAILURE_EVENT             = '2fa_email_send_failed';
+    private const STEP_UP_FAILURE_EVENT            = 'step_up_email_send_failed';
 
     /**
      * Path of the masthead logo within the WordPress uploads tree.
@@ -852,6 +853,36 @@ HTML;
                 . '                    Don&rsquo;t enter the code &mdash; nothing changes unless you do.'
             ),
             self::VERIFY_EMAIL_FAILURE_EVENT
+        );
+    }
+
+    /**
+     * The one-time code a staff member types to confirm a validator
+     * relationship change (link, revoke or cancel an owner). The action is
+     * named so a code the recipient did not ask for is recognisable.
+     */
+    public static function sendValidatorStepUpCode(string $to, string $otpCode, string $actionLabel): void
+    {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $siteName   = get_bloginfo('name') ?: 'BCC';
+        $safeAction = htmlspecialchars($actionLabel, ENT_QUOTES, 'UTF-8');
+
+        BccMailer::send(
+            $to,
+            sprintf('[%s] Confirm a validator change', $siteName),
+            self::buildCodeOnlyOtpHtml(
+                $siteName,
+                $otpCode,
+                'Confirm a validator change',
+                "Enter this code in the admin tool to confirm: <strong>{$safeAction}</strong>.\n"
+                . '                    The code is valid for&nbsp;10&nbsp;minutes and works once.',
+                "<strong>If you didn&rsquo;t start this change, don&rsquo;t enter the code</strong> and tell\n"
+                . '                    another administrator: someone has your password.'
+            ),
+            self::STEP_UP_FAILURE_EVENT
         );
     }
 
