@@ -32,6 +32,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Unit;
 
+use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -62,46 +63,86 @@ final class ListingPrivacyClausesTest extends TestCase
         return $q;
     }
 
-    // ── hide_from_search: unconditional, and additive ──────────────
+    // ── hide_from_search (F-519): the args filter flags, pre_user_query excludes in SQL ──
 
-    public function testHideFromSearchClauseIsAlwaysSpliced(): void
+    /**
+     * The one shared predicate, as the user query must carry it. No test
+     * sets the fold-done option unless it says so, so the legacy opt-out
+     * still counts by default.
+     */
+    private static function optOutClause(bool $withLegacy = true): string
     {
-        $args = PrivacySettings::filterPeepSoSearchArgs([]);
-
-        $json = json_encode($args);
-        self::assertIsString($json);
-        self::assertStringContainsString(
-            'peepso_is_hide_profile_from_user_listing',
-            $json,
-            'the setting must be honoured without PeepSo\'s admin option'
-        );
+        return UserSyncRepository::listingOptOutSql($GLOBALS['wpdb']->users . '.ID', $withLegacy);
     }
 
     /**
-     * F-257 rollout: until fold_discovery_optout_v1 has copied every legacy
-     * opt-out into hide_from_search, the legacy key is honoured too, so
-     * nobody hidden before the deploy is listed while the copy runs.
+     * A query as PeepSoUserSearch builds it: its args (with `_peepso_user_id`
+     * merged in) go through `peepso_user_search_args` and become the
+     * WP_User_Query's query_vars; then `pre_user_query` fires.
+     *
+     * @param array<string, mixed> $args
      */
-    public function testTheLegacyOptOutClauseStaysUntilTheFoldIsDone(): void
+    private function searchQuery(array $args = [], int $viewerId = 42): \WP_User_Query
     {
-        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
-        self::assertIsString($json);
+        $q = new \WP_User_Query();
+        $q->query_vars = PrivacySettings::filterPeepSoSearchArgs($args + ['_peepso_user_id' => $viewerId]);
+        PrivacySettings::filterPeepSoUserQuery($q);
 
-        self::assertStringContainsString('bcc_privacy_discovery_optout', $json);
-        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        return $q;
     }
 
-    /** F-257: once folded, search excludes on the ONE flag. */
-    public function testOnceFoldedSearchChecksOnlyTheOneFlag(): void
+    public function testASearchExcludesOptOutsWithTheSharedPredicate(): void
+    {
+        $q = $this->searchQuery();
+
+        self::assertTrue($q->query_vars[PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT] ?? false, 'the args filter flags a search');
+        self::assertStringContainsString(' AND ' . self::optOutClause(), $q->query_where, 'the setting is honoured without PeepSo\'s admin option');
+    }
+
+    /**
+     * F-519: the search excludes on ANY stored row that reads as on, so
+     * the strictest row wins. The shared predicate's SQL is pinned on real
+     * engines with F-518's tests. Here: that this is what the search
+     * carries, and that no `meta_query` form of the opt-out is left.
+     */
+    public function testNoMetaQueryFormOfTheOptOutIsLeft(): void
+    {
+        $q    = $this->searchQuery();
+        $json = (string) json_encode($q->query_vars);
+
+        self::assertStringNotContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        self::assertStringNotContainsString('bcc_privacy_discovery_optout', $json);
+        self::assertArrayNotHasKey('meta_query', $q->query_vars, 'no meta_query is added');
+        $clause = self::optOutClause();
+        self::assertStringStartsWith('NOT EXISTS (', $clause);
+        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $clause);
+        self::assertStringContainsString('bcc_privacy_discovery_optout', $clause, 'the legacy opt-out is read too');
+    }
+
+    /** F-257 rollout: until the fold has run, the legacy opt-out still hides. */
+    public function testTheLegacyOptOutCountsUntilTheFoldIsDone(): void
+    {
+        $q = $this->searchQuery();
+
+        self::assertTrue(PrivacySettings::legacyOptOutStillRead());
+        self::assertStringContainsString(self::optOutClause(true), $q->query_where);
+        self::assertStringContainsString('bcc_privacy_discovery_optout', $q->query_where);
+    }
+
+    /**
+     * Once folded, the legacy rows no longer count. The fold copied every ON
+     * legacy opt-out into the one flag but LEFT THE LEGACY ROWS IN PLACE, so
+     * reading them would hide again a member who has since turned search
+     * visibility back on (hide '0' beside a stale legacy '1').
+     */
+    public function testOnceFoldedTheLegacyRowsNoLongerCount(): void
     {
         $GLOBALS['__bcc_lp']['options'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
 
-        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
-        self::assertIsString($json);
+        $q = $this->searchQuery();
 
-        self::assertStringNotContainsString('bcc_privacy_discovery_optout', $json);
-        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
-        self::assertSame(1, substr_count($json, 'NOT EXISTS'), 'the one flag keeps its NOT-EXISTS-OR-FALSY shape');
+        self::assertStringContainsString(self::optOutClause(false), $q->query_where);
+        self::assertStringNotContainsString('bcc_privacy_discovery_optout', $q->query_where);
     }
 
     /**
@@ -128,53 +169,65 @@ final class ListingPrivacyClausesTest extends TestCase
     }
 
     /**
-     * Admins must be able to find a hidden member in member search —
-     * the one job the "admins exempt" rule exists for.
+     * The opt-out does not depend on peepso-friends: that plugin owns only
+     * level 30, and its early return must not skip the opt-out.
      */
-    public function testAdminsAreExemptFromHideFromSearch(): void
+    public function testTheOptOutStillAppliesWhenTheFriendsPluginIsPresent(): void
     {
-        $GLOBALS['__bcc_lp']['admin'] = true;
+        eval('final class PeepSoFriendsPlugin {}');
 
-        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
-        self::assertIsString($json);
-        self::assertStringNotContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        $q = $this->searchQuery();
+
+        self::assertStringContainsString(self::optOutClause(), $q->query_where);
+        self::assertStringNotContainsString('usr_profile_acc', $q->query_where, 'level 30 is the friends plugin\'s then');
+    }
+
+    /** `pre_user_query` can fire twice on one query: the opt-out is appended once. */
+    public function testFilteringTwiceAppendsTheOptOutOnce(): void
+    {
+        $q = $this->searchQuery();
+        PrivacySettings::filterPeepSoUserQuery($q);
+
+        self::assertSame(1, substr_count($q->query_where, self::optOutClause()));
+    }
+
+    /** An unflagged PeepSo search (a roster) gets level 30, not the opt-out. */
+    public function testAnUnflaggedSearchGetsNoOptOut(): void
+    {
+        $q = $this->query(42);
+        PrivacySettings::filterPeepSoUserQuery($q);
+
+        self::assertStringNotContainsString('bcc_optout', $q->query_where);
+        self::assertStringContainsString('usr_profile_acc', $q->query_where, 'control: the hook did run');
+    }
+
+    public function testAFlagOnANonPeepSoQueryDoesNothing(): void
+    {
+        $q = new \WP_User_Query();
+        $q->query_vars = [PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT => true];
+        PrivacySettings::filterPeepSoUserQuery($q);
+
+        self::assertSame('', $q->query_where);
     }
 
     /**
-     * ⛔ But the exemption is SCOPED. `bcc_privacy_discovery_optout` is a
-     * different setting that has always applied to admins too, so an
-     * admin fix must not quietly loosen it. If someone later converts the
-     * exemption into an early return from the method, this fails.
+     * Admins must be able to find a hidden or opted-out member in member
+     * search: the one job the "admins exempt" rule exists for. §F-190
+     * widened the exemption to the legacy opt-out too.
      */
-    /**
-     * §F-190 — the exemption now covers the opt-out too (the user's
-     * decision; #475 deliberately scoped it to the hide clause and
-     * raised this separately rather than loosening it unasked).
-     *
-     * ⚠ This test asserted the OPPOSITE before F-190. The assertion
-     * flipped because the behaviour did, not to make a failure go away:
-     * the old name said "StillSubjectTo" and the old message said the
-     * exemption covers hide_from_search ONLY.
-     */
-    public function testAdminsAreAlsoExemptFromTheDiscoveryOptOut(): void
+    public function testAdminsAreExemptFromTheOptOut(): void
     {
         $GLOBALS['__bcc_lp']['admin'] = true;
 
-        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
-        self::assertIsString($json);
-        self::assertStringNotContainsString(
-            'bcc_privacy_discovery_optout',
-            $json,
-            'an admin must not be filtered by the discovery opt-out'
-        );
+        $q = $this->searchQuery();
+
+        self::assertArrayNotHasKey(PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT, $q->query_vars);
+        self::assertStringNotContainsString('bcc_optout', $q->query_where);
     }
 
     /**
-     * ⚠ The early return must hand back a caller's existing
-     * `meta_query` UNTOUCHED. Returning `$args` is the easy half; not
-     * having rewrapped it in an `AND` around nothing is the half that
-     * would break PeepSo's own VIP filter, and it is invisible unless
-     * asserted by identity.
+     * An admin gets the caller's args back EXACTLY: no flag, and no
+     * rewrapping of a `meta_query` the caller set (PeepSo's VIP filter).
      */
     public function testAnAdminGetsTheCallersArgsBackByteForByte(): void
     {
@@ -193,9 +246,8 @@ final class ListingPrivacyClausesTest extends TestCase
     /**
      * hide_from_search scopes to member search and the directory (user
      * decision 2026-11-12). A roster asks with ARG_IGNORE_SEARCH_OPTOUT:
-     * neither opt-out clause is added, the caller's args come back
-     * otherwise untouched, and the marker itself is not passed on to
-     * WP_User_Query.
+     * no flag, the caller's args come back otherwise untouched, and the
+     * marker itself is not passed on to WP_User_Query.
      */
     public function testARosterListingSkipsOnlyTheSearchOptOut(): void
     {
@@ -206,48 +258,54 @@ final class ListingPrivacyClausesTest extends TestCase
         ];
 
         $args = PrivacySettings::filterPeepSoSearchArgs($incoming);
-        $json = (string) json_encode($args);
 
-        self::assertStringNotContainsString('peepso_is_hide_profile_from_user_listing', $json);
         self::assertArrayNotHasKey(PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT, $args);
+        self::assertArrayNotHasKey(PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT, $args);
         unset($incoming[PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT]);
         self::assertSame($incoming, $args);
     }
 
     public function testAFalsyMarkerStillAppliesTheSearchOptOut(): void
     {
-        $json = (string) json_encode(PrivacySettings::filterPeepSoSearchArgs([PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT => false]));
+        $args = PrivacySettings::filterPeepSoSearchArgs([PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT => false]);
 
-        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        self::assertTrue($args[PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT] ?? false);
     }
 
-    public function testAnExistingMetaQueryIsPreservedNotOverwritten(): void
+    /** A caller's own `meta_query` (PeepSo's VIP filter) is handed back exactly. */
+    public function testAnExistingMetaQueryIsLeftExactlyAsItCame(): void
     {
-        $args = PrivacySettings::filterPeepSoSearchArgs([
-            'meta_query' => [['key' => 'someone_elses_filter', 'value' => 'x']],
-        ]);
+        $vip  = [['key' => 'someone_elses_filter', 'value' => 'x']];
+        $args = PrivacySettings::filterPeepSoSearchArgs(['meta_query' => $vip]);
 
-        $json = json_encode($args);
-        self::assertIsString($json);
-        self::assertStringContainsString('someone_elses_filter', $json, 'a sibling filter must not be dropped');
-        self::assertStringContainsString('bcc_privacy_discovery_optout', $json);
-        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        self::assertSame($vip, $args['meta_query']);
+        self::assertTrue($args[PrivacySettings::QV_EXCLUDE_SEARCH_OPTOUT]);
     }
 
     /**
-     * NOT EXISTS is load-bearing: a user who never touched the setting
-     * has no meta row, and a bare `!= '1'` would exclude them all.
+     * #826's directory chips count through the list's own search
+     * (MemberDirectoryTypeCounts → PeepSoUserSearch with the list's args,
+     * no roster marker). So the chip totals leave opted-out members out
+     * exactly as the list does: the same flag, the same SQL, inside the
+     * counted statement.
      */
-    public function testBothClausesUseNotExistsSoUntouchedUsersSurvive(): void
+    public function testTheDirectoryChipSearchCarriesTheOptOut(): void
     {
-        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
-        self::assertIsString($json);
-
-        self::assertSame(
-            2,
-            substr_count($json, 'NOT EXISTS'),
-            'one NOT EXISTS per clause — without them every user with no meta row is filtered out'
+        $seen = [];
+        $counts = new \BCC\Trust\Core\Support\MemberDirectoryTypeCounts(
+            static fn (string $type): array => [101, 102],
+            static function (array $args, ?int $viewer, string $term) use (&$seen): object {
+                $seen[] = $args;
+                return (object) ['total' => 0, 'results' => []];
+            }
         );
+        $counts->forViewer(42);
+
+        self::assertNotSame([], $seen, 'control: the chips did search');
+        foreach ($seen as $args) {
+            $q = $this->searchQuery($args);
+            self::assertStringContainsString(self::optOutClause(), $q->query_where, 'a chip counts what the list may show');
+        }
     }
 
     // ── the level-30 exclusion ─────────────────────────────────────

@@ -142,6 +142,19 @@ final class UserSyncRepository
     }
 
     /**
+     * {@see listingOptOutSql()} for a WP_User_Query, whose FROM is the users
+     * table itself, so the member column is `{users}.ID`. The table name is
+     * read here, where $wpdb belongs (§1), as listingProfileAccessClause()
+     * reads it for the same query.
+     */
+    public static function listingOptOutSqlForUserQuery(bool $withLegacy): string
+    {
+        global $wpdb;
+
+        return self::listingOptOutSql($wpdb->users . '.ID', $withLegacy);
+    }
+
+    /**
      * Batch-fetch aggregate counts for a chunk of user IDs.
      *
      * Returns pages_owned, groups_owned, posts_created, comments_made,

@@ -33,8 +33,9 @@ namespace {
         }
     }
 
-    // F-257: the search filter reads the fold migration's done-marker
-    // (PrivacySettings::FOLD_DONE_OPTION). $GLOBALS['__bcc_lp']['options'].
+    // F-257: the legacy opt-out counts until the fold migration's
+    // done-marker (PrivacySettings::FOLD_DONE_OPTION) is set.
+    // $GLOBALS['__bcc_lp']['options'].
     if (!function_exists('get_option')) {
         /**
          * @param mixed $default
@@ -71,6 +72,7 @@ namespace {
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
             public string $users  = 'wp_users';
+            public string $usermeta = 'wp_usermeta';
 
             /** @param mixed ...$args */
             public function prepare(string $query, ...$args): string
