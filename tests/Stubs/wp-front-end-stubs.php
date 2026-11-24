@@ -52,28 +52,11 @@ namespace {
         }
     }
 
-    // 'singular_page' answers is_singular('page'); 'queried' answers
-    // get_queried_object().
-    if (!function_exists('is_singular')) {
-        /** @param mixed $postTypes */
-        function is_singular($postTypes = ''): bool
+    // 'robots' answers is_robots().
+    if (!function_exists('is_robots')) {
+        function is_robots(): bool
         {
-            return $postTypes === 'page' && (bool) ($GLOBALS['__bcc_sig']['singular_page'] ?? false);
-        }
-    }
-
-    if (!function_exists('get_queried_object')) {
-        /** @return mixed */
-        function get_queried_object()
-        {
-            return $GLOBALS['__bcc_sig']['queried'] ?? null;
-        }
-    }
-
-    if (!class_exists('WP_Post', false)) {
-        final class WP_Post
-        {
-            public string $post_content = '';
+            return (bool) ($GLOBALS['__bcc_sig']['robots'] ?? false);
         }
     }
 
