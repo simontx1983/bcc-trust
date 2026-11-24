@@ -234,6 +234,33 @@ final class SecretPagesOnMemberCardsIntegrationTest extends TestCase
         }
     }
 
+    /**
+     * The member profile (GET /users/:handle) is built the same way, as a
+     * batch of one: MemberProfileComposer::compose() primes
+     * MemberCardPrefetcher for [member] and the viewer, and getUser() reads
+     * its `counts` from that prefetch.
+     */
+    public function testTheMemberProfileCountsForItsViewer(): void
+    {
+        require_once dirname(__DIR__, 2) . '/includes/database/schema-trust-attestations.php';
+        bcc_trust_create_trust_attestations_table();
+        $views = \BCC\Trust\Core\Plugin::instance()->userViewService();
+
+        foreach ([
+            'a stranger'                          => [self::STRANGER, [2, 1]],
+            'a member of one of the secret pages' => [self::PAGE_MEMBER, [3, 2]],
+            'the member themselves'               => [self::AUTHOR, [4, 3]],
+        ] as $who => [$viewer, $counts]) {
+            $this->viewAs($viewer);
+            $prefetched = \BCC\Trust\Core\Support\MemberCardPrefetcher::primeFor([self::AUTHOR], $viewer);
+
+            $user = $views->getUser(self::AUTHOR, $viewer, $prefetched);
+
+            self::assertIsArray($user);
+            self::assertSame($counts, [$user['counts']['reviews_written'], $user['counts']['disputes_signed']], $who);
+        }
+    }
+
     // ── Failing closed ───────────────────────────────────────────────────
 
     /** @return array<string, array{string, string, string}> */
