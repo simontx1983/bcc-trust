@@ -52,6 +52,12 @@ final class ReviewReplyService
 {
     public const BODY_MAX_LENGTH = 1000;
 
+    /** {@see shownAuthors()}: the reply shows its author. */
+    public const SHOWN_AS_AUTHOR = 'author';
+
+    /** {@see shownAuthors()}: the reply stands as the page's response. */
+    public const SHOWN_AS_PAGE = 'page';
+
     /** Seconds a create waits for a concurrent create on the same review. */
     private const CREATE_LOCK_WAIT = 5;
 
@@ -86,10 +92,10 @@ final class ReviewReplyService
      * guessed "no reply yet" could offer a duplicate.
      *
      * The shown reply follows its AUTHOR's profile visibility for this
-     * viewer: one {@see ProfileAccess::filterVisible()} batch for the page
-     * (profile level, suspension, blocks either way; not the search opt-out,
-     * since this is not a search), and a reply whose author the viewer may
-     * not see is not shown, author and text alike. A check that cannot
+     * viewer, by {@see shownAuthors()} (one batch for the page: profile
+     * level, suspension, blocks either way; not the search opt-out, since
+     * this is not a search), and a reply whose author the viewer may not
+     * see is not shown, author and text alike. A check that cannot
      * answer shows none. `viewer_stale_reply` is the viewer's own and needs
      * no check. ⚠ filterVisible() reads the CURRENT user, so $viewerId must
      * be the request's viewer, as it is on both Reviews tabs.
@@ -146,8 +152,8 @@ final class ReviewReplyService
             ];
         }
 
-        // Each shown reply's author must be visible to this viewer: one
-        // ProfileAccess::filterVisible() batch for the page (see above).
+        // Each shown reply's author must be shown to this viewer: one
+        // decision for the page ({@see shownAuthors()}).
         $authorIds = [];
         foreach ($out as $bundle) {
             if ($bundle['reply'] !== null) {
@@ -155,35 +161,69 @@ final class ReviewReplyService
             }
         }
         if ($authorIds !== []) {
-            $visible = array_flip(ProfileAccess::filterVisible($authorIds, false));
-
-            $hidden = [];
-            foreach ($out as $bundle) {
-                if ($bundle['reply'] !== null && !isset($visible[$bundle['reply']['author_id']])) {
-                    $hidden[$bundle['reply']['author_id']] = $bundle['reply']['author_id'];
-                }
-            }
-            // Only for the page's own tab, and only the authors the viewer
-            // may not see for their profile level alone (see above).
-            $asPage = $pageMayAnswer && $hidden !== []
-                ? array_flip(ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)))
-                : [];
+            $shown = self::shownAuthors($authorIds, $pageMayAnswer);
 
             foreach ($out as $voteId => $bundle) {
                 $reply = $bundle['reply'];
-                if ($reply === null || isset($visible[$reply['author_id']])) {
+                if ($reply === null) {
                     continue;
                 }
-                if (isset($asPage[$reply['author_id']])) {
+                $as = $shown[$reply['author_id']] ?? null;
+                if ($as === self::SHOWN_AS_PAGE) {
                     $reply['as_page']      = true;
                     $out[$voteId]['reply'] = $reply;
-                } else {
+                } elseif ($as === null) {
                     $out[$voteId]['reply'] = null;
                 }
             }
         }
 
         return $out;
+    }
+
+    /**
+     * Of $authorIds (reply authors), how a Reviews tab shows each one's
+     * reply to the CURRENT viewer, keyed by author id:
+     *   - SHOWN_AS_AUTHOR: the viewer may see the author;
+     *   - SHOWN_AS_PAGE ($pageMayAnswer, the page's own tab only): the
+     *     author is hidden from the viewer ONLY by the level they chose for
+     *     their profile, so the reply stands as the page's response.
+     * An author missing from the result is not shown at all: a block either
+     * way, a suspension, a banned author, or anything that could not be read.
+     *
+     * The ONE decision for the Reviews tabs ({@see forReviews()}) and for
+     * reporting a reply (FeedItemReportVisibility), so a reply can be
+     * reported exactly where it is shown. One ProfileAccess::filterVisible()
+     * batch (not the search opt-out: this is not a search), then one
+     * ProfileAccess::hiddenOnlyByProfileLevel() batch for the authors it
+     * left out.
+     *
+     * ⚠ CURRENT VIEWER ONLY, as both of those are: a caller asking about
+     * another viewer must refuse instead of calling this.
+     *
+     * @param list<int> $authorIds
+     * @return array<int, 'author'|'page'>
+     */
+    public static function shownAuthors(array $authorIds, bool $pageMayAnswer): array
+    {
+        if ($authorIds === []) {
+            return [];
+        }
+        $shown = array_fill_keys(ProfileAccess::filterVisible($authorIds, false), self::SHOWN_AS_AUTHOR);
+
+        $hidden = [];
+        foreach ($authorIds as $id) {
+            if (!isset($shown[$id])) {
+                $hidden[$id] = $id;
+            }
+        }
+        if ($pageMayAnswer && $hidden !== []) {
+            foreach (ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)) as $id) {
+                $shown[$id] = self::SHOWN_AS_PAGE;
+            }
+        }
+
+        return $shown;
     }
 
     /**

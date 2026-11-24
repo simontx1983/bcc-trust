@@ -64,12 +64,22 @@ if (!defined('ABSPATH')) {
  *    the app too; ops' wp-cli is the fallback.
  *
  * And for every caller, admins included:
- *   - XML-RPC is off (`xmlrpc_enabled` → false, last word). Nothing BCC
- *     runs uses it.
+ *   - XML-RPC is off: `xmlrpc_enabled` → false, the method list is
+ *     emptied (`xmlrpc_methods` → []), and no pingback header is sent
+ *     (`X-Pingback` is dropped from `wp_headers`). Nothing BCC runs uses it.
+ *   - Core comments and pings are closed on every post, whatever its type
+ *     or its own setting: `comments_open` and `pings_open` → false, as the
+ *     last word. Core's comment handlers (the comment form's endpoint, the
+ *     REST comments route) and trackbacks ask these before writing. BCC
+ *     uses no core comments; PeepSo's comments are PeepSo's own and never
+ *     ask them.
  *   - WordPress's and PeepSo's own sign-up are off: `users_can_register`
  *     reads '0' (`pre_option_`, so nothing downstream sees another value)
  *     and PeepSo's `site_registration_disabled` reads 1. Members sign up
  *     at the app.
+ *   - PeepSo's built-in data export stays off: its `gdpr_enable` reads 0,
+ *     last word, whatever the stored setting says. BCC handles data
+ *     requests. Rationale: F-581 (private tracker).
  *
  * Also: RESERVED_PATH_WORDS can't become a group's slug (`wp_unique_post_slug`)
  * and HandleService reserves them as handles, so no app URL that names a
@@ -166,8 +176,13 @@ final class WordPressSignInGate
         add_filter('lostpassword_errors', [self::class, 'sameLostPasswordAnswer'], self::RESET_PRIORITY, 2);
         add_filter('wp_unique_post_slug', [self::class, 'keepPathWordsOffGroups'], 10, 6);
         add_filter('xmlrpc_enabled', [self::class, 'noXmlRpc'], PHP_INT_MAX);
+        add_filter('xmlrpc_methods', [self::class, 'noXmlRpcMethods'], PHP_INT_MAX);
+        add_filter('wp_headers', [self::class, 'noPingbackHeader'], PHP_INT_MAX);
+        add_filter('comments_open', [self::class, 'closedToCoreComments'], PHP_INT_MAX);
+        add_filter('pings_open', [self::class, 'closedToCoreComments'], PHP_INT_MAX);
         add_filter('pre_option_users_can_register', [self::class, 'noNativeSignUp'], PHP_INT_MAX);
         add_filter('peepso_filter_get_option_site_registration_disabled', [self::class, 'peepsoSignUpDisabled'], PHP_INT_MAX);
+        add_filter('peepso_filter_get_option_gdpr_enable', [self::class, 'peepsoDataExportOff'], PHP_INT_MAX);
     }
 
     /**
@@ -178,6 +193,49 @@ final class WordPressSignInGate
     public static function noXmlRpc($enabled = true): bool
     {
         unset($enabled);
+
+        return false;
+    }
+
+    /**
+     * `xmlrpc_methods`, last: no XML-RPC method answers, whatever an earlier
+     * filter added.
+     *
+     * @param mixed $methods
+     * @return array<string, mixed>
+     */
+    public static function noXmlRpcMethods($methods = []): array
+    {
+        unset($methods);
+
+        return [];
+    }
+
+    /**
+     * `wp_headers`, last: no `X-Pingback` header. Core adds it to a single
+     * post that allows pings. Every other header passes through unchanged.
+     *
+     * @param mixed $headers
+     * @return mixed
+     */
+    public static function noPingbackHeader($headers = [])
+    {
+        if (is_array($headers)) {
+            unset($headers['X-Pingback']);
+        }
+
+        return $headers;
+    }
+
+    /**
+     * `comments_open` and `pings_open`, last: closed on every post, whatever
+     * core, the post or an earlier filter answered.
+     *
+     * @param mixed $open
+     */
+    public static function closedToCoreComments($open = true): bool
+    {
+        unset($open);
 
         return false;
     }
@@ -207,6 +265,21 @@ final class WordPressSignInGate
         unset($value);
 
         return 1;
+    }
+
+    /**
+     * PeepSo's `gdpr_enable` option, last: PeepSo's built-in data export
+     * stays off for every caller, whatever the stored setting says. BCC
+     * handles data requests. Registered at boot with the rest of this
+     * class, so it is in place before `init`.
+     *
+     * @param mixed $value
+     */
+    public static function peepsoDataExportOff($value = 1): int
+    {
+        unset($value);
+
+        return 0;
     }
 
     /**

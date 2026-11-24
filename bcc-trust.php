@@ -704,6 +704,10 @@ add_action('bcc_trust_elite_eligibility_sweep', function () {
 add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
+// F-581: the PeepSo upkeep BCC depends on (trending hashtags, expired
+// mayfly rows, registration-avatar temp files). Only those three steps;
+// see Integration\PeepSoUpkeep.
+add_action(\BCC\Trust\Core\Integration\PeepSoUpkeep::CRON_HOOK, [\BCC\Trust\Core\Integration\PeepSoUpkeep::class, 'runScheduled']);
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
         \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
@@ -1140,6 +1144,10 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
     // as the revoke sweep above: these two were scheduled only in
@@ -1290,6 +1298,15 @@ $bccClaimReverify = static function (): void {
 };
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
+
+// Validator staff step-ups: purge rows that expired more than a day ago.
+add_action('bcc_validator_step_up_purge', static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\ValidatorStepUpService::purgeExpired();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] step-up purge failed', ['error' => $e->getMessage()]);
+    }
+});
 
 // V2: when PeepSo evicts a user from a group via mod action, record a
 // permanent opt-out so our reconcile sweep won't re-add a banned user.
@@ -2114,28 +2131,19 @@ add_action('init', function () {
 | still gets PeepSo's emails, and a user who enables our digest may
 | get duplicates.
 |
-| Fix: unschedule PeepSo's mail queue cron. Idempotent — running it
-| every request is a no-op when the cron isn't scheduled. We do NOT
-| touch PeepSo's other crons (maintenance, GDPR, inactive-user
-| cleanup, super-queue) — those are non-email infrastructure we want
-| to keep. Only the email send loop is silenced.
+| Fix (PeepSoMailSilence): unschedule PeepSo's mail queue cron, AND veto
+| PeepSo's queue at the source (`peepso_mailqueue_allowed` → false), so
+| nothing is queued: the queue no longer grows with mail that is never
+| sent, and PeepSo's send-immediately path sends nothing either. Only
+| PeepSo's queue is touched; BCC's own mail goes through wp_mail() and
+| is unaffected. Other PeepSo crons are not touched here.
 |
 | If a future requirement reinstates PeepSo emails (e.g., a feature
-| we don't want to reimplement), remove this block AND wire our
+| we don't want to reimplement), remove this registration AND wire our
 | /settings/notifications page to also write `peepso_email_intensity`
 | / `peepso_notifications` so the two surfaces stay in sync.
 */
-add_action('init', function () {
-    if (defined('PeepSo::CRON_MAILQUEUE')) {
-        wp_clear_scheduled_hook(\PeepSo::CRON_MAILQUEUE);
-    } else {
-        // Hardcoded fallback — the constant value is stable and named
-        // the same across PeepSo versions we've seen, but if PeepSo
-        // hasn't loaded yet (race during early init) we still want
-        // the cron unscheduled.
-        wp_clear_scheduled_hook('peepso_mailqueue_send_event');
-    }
-}, 20);
+\BCC\Trust\Core\Integration\PeepSoMailSilence::register();
 
 
 /*
@@ -2455,6 +2463,10 @@ function bcc_trust_activate() {
     // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
+    }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

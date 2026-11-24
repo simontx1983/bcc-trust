@@ -137,10 +137,14 @@ namespace {
             /** @var array<string, mixed> */
             public static array $transients = [];
 
+            /** @var array<string, bool|null> the autoload flag each update_option() asked for */
+            public static array $autoload = [];
+
             public static function reset(): void
             {
                 self::$options    = [];
                 self::$transients = [];
+                self::$autoload   = [];
             }
         }
     }
@@ -160,7 +164,8 @@ namespace {
         /** @param mixed $value */
         function update_option(string $option, $value, ?bool $autoload = null): bool
         {
-            \BccTestOptionStore::$options[$option] = $value;
+            \BccTestOptionStore::$options[$option]  = $value;
+            \BccTestOptionStore::$autoload[$option] = $autoload;
             return true;
         }
     }

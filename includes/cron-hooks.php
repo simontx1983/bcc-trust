@@ -47,6 +47,7 @@ return [
         'bcc_attestor_reliability_sweep'        => ['interval' => 'daily',                        'description' => 'operator-reliability cache recompute (Slice 3)'],
         'bcc_trust_elite_eligibility_sweep'     => ['interval' => 'daily',                        'description' => '§J.12 elite-eligibility gate recompute (tenure crossings + dispute-window expiry)'],
         'bcc_trust_feed_hot_warm'               => ['interval' => 'bcc_one_minute',               'description' => 'anon /feed/hot first-page payload warm'],
+        'bcc_trust_peepso_upkeep'               => ['interval' => 'bcc_five_minutes',             'description' => 'PeepSo upkeep BCC depends on: hashtags, expired mayfly rows, registration-avatar temp files'],
         // Onchain domain
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],
@@ -60,6 +61,7 @@ return [
         'bcc_gated_group_reconcile_sweep'       => ['interval' => 'twicedaily',                   'description' => 'holder-group reconcile sweep'],
         'bcc_gated_group_revoke_sweep'          => ['interval' => 'twicedaily',                   'description' => 'holder-group + delegator-community revoke re-verification sweeps'],
         'bcc_onchain_claim_reverify_sweep'      => ['interval' => 'bcc_weekly',                   'description' => 'F-14 weekly re-verify of verified validator/collection claims (report mode by default)'],
+        'bcc_validator_step_up_purge'           => ['interval' => 'daily',                        'description' => 'validator staff step-ups: bounded purge of expired rows'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],

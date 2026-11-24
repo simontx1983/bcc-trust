@@ -459,6 +459,27 @@ final class ReviewReplyServiceTest extends TestCase
     }
 
     /**
+     * shownAuthors() is the tabs' decision, and the one a reply report asks
+     * (FeedItemReportVisibility), so the two cannot drift.
+     */
+    public function testShownAuthorsIsTheDecisionTheTabsAndReportsShare(): void
+    {
+        $this->pageAttributionWorld();
+
+        self::assertSame([self::MEMBER => ReviewReplyService::SHOWN_AS_AUTHOR], ReviewReplyService::shownAuthors([self::MEMBER], true), 'an author the viewer may see');
+        self::assertSame([self::OPERATOR => ReviewReplyService::SHOWN_AS_PAGE], ReviewReplyService::shownAuthors([self::OPERATOR], true), "hidden only by profile level, on a page's tab");
+        self::assertSame([], ReviewReplyService::shownAuthors([self::OPERATOR], false), "never on a member's tab");
+        self::assertSame(
+            [self::MEMBER => ReviewReplyService::SHOWN_AS_AUTHOR, self::OPERATOR => ReviewReplyService::SHOWN_AS_PAGE],
+            ReviewReplyService::shownAuthors([self::MEMBER, self::OPERATOR], true),
+            'one batch decides each author'
+        );
+
+        $GLOBALS['wpdb']->blocks = [[self::OPERATOR, self::STRANGER]];
+        self::assertSame([], ReviewReplyService::shownAuthors([self::OPERATOR], true), 'a block hides the author on every tab');
+    }
+
+    /**
      * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing their own reply.
      *
      * #772 pinned the reply PUBLISH (inside ActivityStreamWriter); this is
