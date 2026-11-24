@@ -234,6 +234,7 @@ final class SessionController
             // F-305: a suspended member signs in READ-ONLY; the client shows
             // the suspension notice from this flag. Every write gate refuses.
             'suspended'        => AuthSupport::resolveSuspended($userId),
+            'can_moderate'     => AuthSupport::resolveCanModerate($userId),
             'expires_at'       => $exp,
         ]));
     }
@@ -480,6 +481,7 @@ final class SessionController
             'expires_in' => AuthSupport::JWT_TTL_SECONDS,
             'token_type' => 'Bearer',
             'suspended'  => AuthSupport::resolveSuspended($userId),
+            'can_moderate' => AuthSupport::resolveCanModerate($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 

@@ -799,11 +799,11 @@ final class AnnouncementCapabilityResolver
         }
         if (!self::flag($viewer, 'good_standing', false)) {
             // ⚠ Reported as `suspended`, not as a new code. §4.32.11's
-            // inventory has no "below Neutral" entry; the frontend closes the
-            // composer on an unrecognised reason, so inventing one here would
-            // produce a disabled control with no copy. Standing and
-            // suspension present identically to a member: "you may not post
-            // right now".
+            // inventory has no "below Neutral" entry. The frontend closes the
+            // composer on an unrecognised reason and shows the server hint
+            // (or its generic fallback), so a new code would need copy the
+            // frontend doesn't have yet. Standing and suspension present
+            // identically to a member: "you may not post right now".
             return Permission::deny(self::REASON_SUSPENDED);
         }
         return Permission::allow();

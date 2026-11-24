@@ -658,6 +658,7 @@ final class PasswordAuthController
                 // F-305: a suspended member signs in READ-ONLY; the client shows
                 // the suspension notice from this flag. Every write gate refuses.
                 'suspended'        => AuthSupport::resolveSuspended($userId),
+                'can_moderate'     => AuthSupport::resolveCanModerate($userId),
             ]);
             $response->header('Cache-Control', 'no-store');
 

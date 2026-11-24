@@ -114,10 +114,11 @@ namespace BCC\Trust\Core {
                  *
                  * @return array<string, mixed>
                  */
-                public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain): array
+                public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain, string $query = ''): array
                 {
                     unset($page, $pageSize, $chain);
-                    $GLOBALS['__bcc_halls_cache']['calls'][] = $viewerId;
+                    $GLOBALS['__bcc_halls_cache']['calls'][]   = $viewerId;
+                    $GLOBALS['__bcc_halls_cache']['queries'][] = $query;
 
                     return [
                         'items' => [[
@@ -175,6 +176,23 @@ namespace BCC\Trust\Core\Support {
             unset($key);
 
             return $default;
+        }
+    }
+}
+
+namespace BCC\Core\Security {
+    // A search (`q`) takes a throttle bucket before the service is asked.
+    // Always allowed here; the throttle itself is GroupsHallsSearchParamsTest's.
+    if (!\class_exists(__NAMESPACE__ . '\Throttle', false)) {
+        final class Throttle
+        {
+            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null, bool $countDenied = true): bool
+            {
+                unset($limit, $window, $key, $countDenied);
+                $GLOBALS['__bcc_halls_cache']['throttle'][] = $action;
+
+                return true;
+            }
         }
     }
 }

@@ -54,6 +54,7 @@ spl_autoload_register(static function (string $class): void {
 require_once __DIR__ . '/Support/PostGroupFactsWpdb.php';
 require_once __DIR__ . '/Support/GateOrder.php';
 require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
+require_once __DIR__ . '/Support/BootFileScope.php';
 
 // F-460 / F-463: group privacy comes from bcc-core's PeepSoGroupPrivacy, and
 // a group's kind, trust weighting and trust minimum from its

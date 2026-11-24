@@ -52,7 +52,7 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
 
     /**
      * The STANDING FLAGS, sorted. Each one denies when absent. (Five since
-     * F-469 added `standing_known`; some test names still say four.)
+     * F-469 added `standing_known`.)
      */
     private const KEYS = ['authenticated', 'fraud_locked', 'good_standing', 'standing_known', 'suspended'];
 
@@ -314,7 +314,7 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         return $keys;
     }
 
-    public function testTheResolverStillFailsClosedOnAllFourKeys(): void
+    public function testTheResolverStillFailsClosedOnEveryStandingKey(): void
     {
         // The producer's completeness is only worth something while the
         // resolver's defaults still deny. If a default flips to permissive,
@@ -330,9 +330,9 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
     public function testTheCommentGateItselfConsultsEveryStandingFlag(): void
     {
         // ⚠ M5 SURVIVED the first mutation run, and the reason is worth
-        // keeping: {@see testTheResolverStillFailsClosedOnAllFourKeys} asks
+        // keeping: {@see testTheResolverStillFailsClosedOnEveryStandingKey} asks
         // whether a key is read ANYWHERE in the resolver, and `report()` reads
-        // three of the same four. So the COMMENT gate could stop checking
+        // three of the same keys. So the COMMENT gate could stop checking
         // suspension altogether while that case stayed green.
         //
         // This one is scoped to the comment producer, which is the only
@@ -383,7 +383,7 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
 
     // ── 3. the authenticated branch, structurally ───────────────────────
 
-    public function testBothReturnSitesCarryAllFourKeys(): void
+    public function testBothReturnSitesCarryEveryStandingKey(): void
     {
         $body = self::body(self::STANDING, 'forViewer');
 

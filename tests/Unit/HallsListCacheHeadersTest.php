@@ -104,4 +104,17 @@ final class HallsListCacheHeadersTest extends TestCase
 
         self::assertSame([77], $GLOBALS['__bcc_halls_cache']['calls']);
     }
+
+    /**
+     * Structure A row 13: the route hands the name search to the service,
+     * after taking its throttle bucket. No `q` means an empty one.
+     */
+    public function testTheRouteHandsTheSearchToTheService(): void
+    {
+        (new HallsEndpoint())->handle(new \WP_REST_Request(['page' => 1, 'page_size' => 10, 'q' => 'atom']));
+        (new HallsEndpoint())->handle(new \WP_REST_Request(['page' => 1, 'page_size' => 10]));
+
+        self::assertSame(['atom', ''], $GLOBALS['__bcc_halls_cache']['queries']);
+        self::assertSame(['halls_list'], $GLOBALS['__bcc_halls_cache']['throttle'], 'only the search takes the bucket');
+    }
 }
