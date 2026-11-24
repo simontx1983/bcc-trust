@@ -248,6 +248,7 @@ final class BreakerAdminObservationTest extends TestCase
             'rate limited' => [ProviderFailureKind::RATE_LIMITED, 'Provider rate limit'],
             'server error' => [ProviderFailureKind::HTTP_5XX, 'Provider server error'],
             'transport'    => [ProviderFailureKind::TRANSPORT, 'Network connection failure'],
+            'refused'      => [ProviderFailureKind::REFUSED, 'Provider rejected the request'],
         ];
     }
 
