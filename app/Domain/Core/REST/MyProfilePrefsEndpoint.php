@@ -532,7 +532,14 @@ final class MyProfilePrefsEndpoint
         }
         foreach ($meta as $metaKey => $value) {
             $field = self::META_FIELDS[$metaKey];
-            if (!self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value))) {
+            // F-519: hide_from_search goes through its one writer, which also
+            // writes the legacy opt-out '0' when it is switched off.
+            $write = $metaKey === PrivacySettings::HIDE_FROM_LISTING_META
+                ? static function () use ($userId, $value): void {
+                    PrivacySettings::writeSearchOptOut($userId, $value === '1');
+                }
+                : static fn () => update_user_meta($userId, $metaKey, $value);
+            if (!self::checkedWrite($write)) {
                 return self::writeFailed($userId, $field, $saved);
             }
             $saved[] = $field;

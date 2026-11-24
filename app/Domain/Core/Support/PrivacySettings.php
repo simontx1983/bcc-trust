@@ -232,6 +232,10 @@ final class PrivacySettings
             if (!in_array($key, self::ALL_KEYS, true)) {
                 continue;
             }
+            if ($key === 'discovery_optout') {
+                self::writeSearchOptOut($userId, $value);
+                continue;
+            }
             // Store as "1" / "0" strings (matches WP's boolean meta convention
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
@@ -246,6 +250,28 @@ final class PrivacySettings
         $written = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
         if ($written !== []) {
             do_action('bcc_privacy_settings_changed', $userId, $written);
+        }
+    }
+
+    /**
+     * Write the hide-from-search flag: `discovery_optout` here, `hide_from_search`
+     * on /me/profile-prefs. Both endpoints write it through this one method.
+     *
+     * Switching it OFF also writes the legacy opt-out '0'. While the legacy
+     * key is still read ({@see legacyOptOutStillRead()}) a legacy on row
+     * would keep the member out of search, and fold_discovery_optout_v1
+     * copies a legacy on row into the flag. With both at '0' the member is
+     * listed whatever the fold's state. Switching it ON leaves the legacy
+     * key alone: the flag alone hides.
+     *
+     * If either write fails the member stays hidden (one on row is
+     * enough), and the caller's checked write reports the failure.
+     */
+    public static function writeSearchOptOut(int $userId, bool $hidden): void
+    {
+        update_user_meta($userId, self::HIDE_FROM_LISTING_META, $hidden ? '1' : '0');
+        if (!$hidden) {
+            update_user_meta($userId, self::LEGACY_DISCOVERY_OPTOUT_META, '0');
         }
     }
 
@@ -370,18 +396,20 @@ final class PrivacySettings
      * legacy opt-out does. So the setting a member is shown is what search
      * does to them (F-519).
      *
-     * The fold-done option is read only when the one flag is off and a
-     * legacy row is on.
+     * Rows match exactly as the SQL matches them,
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn()}:
+     * the same set, nothing trimmed. The fold-done option is read only when
+     * the one flag is off and a legacy row is on.
      *
      * @param array<string, list<string>> $byKey
      */
     private static function searchOptOut(array $byKey): bool
     {
-        if (self::strictest($byKey[self::HIDE_FROM_LISTING_META] ?? [])) {
+        if (\BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::HIDE_FROM_LISTING_META] ?? [])) {
             return true;
         }
 
-        return self::strictest($byKey[self::LEGACY_DISCOVERY_OPTOUT_META] ?? [])
+        return \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::LEGACY_DISCOVERY_OPTOUT_META] ?? [])
             && self::legacyOptOutStillRead();
     }
 

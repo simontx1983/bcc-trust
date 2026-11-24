@@ -75,6 +75,31 @@ final class UserSyncRepository
     public const LISTING_OPTOUT_TRUTHY = ['1', 'true', 'on', 'yes'];
 
     /**
+     * The PHP form of listingOptOutSql()'s `meta_value IN (LISTING_OPTOUT_TRUTHY)`:
+     * true when ANY of the stored values, lowercased, is exactly one of
+     * LISTING_OPTOUT_TRUTHY. Nothing is trimmed, as the SQL trims nothing:
+     * ' 1' and "1\n" are not on. A PHP read that must answer as the SQL does
+     * (PrivacySettings::searchOptOut()) uses this, so the set and the two
+     * matchers cannot drift.
+     *
+     * ⚠ Most collations (all but MySQL 8's _0900_*) ignore TRAILING spaces in
+     * `IN`, so '1 ' may match in SQL and not here. Then this side reads off
+     * while the SQL excludes: the member is still left out.
+     *
+     * @param list<string> $rawValues
+     */
+    public static function anyRowOn(array $rawValues): bool
+    {
+        foreach ($rawValues as $raw) {
+            if (in_array(strtolower($raw), self::LISTING_OPTOUT_TRUTHY, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * F-518 / F-519 — the ONE SQL fragment that leaves listing opt-outs out
      * of a member listing. Shared on purpose: the app sitemap's public index
      * (PublicIndexRepository) and the member directory / search

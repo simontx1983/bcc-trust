@@ -232,6 +232,12 @@ final class PrivacyFlagsReadIntegrationTest extends TestCase
         yield 'legacy only, fold not done' => [[[$legacy, 'on']], false, true];
         yield 'legacy off, fold not done'  => [[[$legacy, '0']], false, false];
         yield 'flag on, fold done'         => [[[$hide, '1'], [$legacy, '0']], true, true];
+        // Padded values: the SQL's `IN` trims nothing at the front and a
+        // newline is not a pad, so these are not on in SQL or in PHP on any
+        // collation. (A TRAILING space is collation-dependent; not pinned.)
+        yield "' 1'"                       => [[[$hide, ' 1']], false, false];
+        yield "'1\\n'"                     => [[[$hide, "1\n"]], false, false];
+        yield "' yes' legacy, fold not done" => [[[$hide, '0'], [$legacy, ' yes']], false, false];
     }
 
     /**
