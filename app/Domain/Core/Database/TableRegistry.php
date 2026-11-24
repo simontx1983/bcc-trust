@@ -365,6 +365,17 @@ final class TableRegistry
     }
 
     /**
+     * Short-lived, single-use staff re-confirmations for validator
+     * relationship changes. Read and written only by
+     * ValidatorStepUpRepository.
+     */
+    public static function validatorStepUps(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_validator_step_ups';
+    }
+
+    /**
      * Rank Phase 8 — formal MISCONDUCT findings (§15). Distinct from
      * clusterFindings() (Phase 4 non-independence determinations).
      */

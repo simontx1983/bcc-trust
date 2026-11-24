@@ -99,10 +99,11 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     private static function goodMember(): array
     {
         return [
-            'authenticated' => true,
-            'suspended'     => false,
-            'fraud_locked'  => false,
-            'good_standing' => true,
+            'authenticated'  => true,
+            'suspended'      => false,
+            'fraud_locked'   => false,
+            'good_standing'  => true,
+            'standing_known' => true,
         ];
     }
 
@@ -771,18 +772,32 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => false],
             true, Caps::REASON_FRAUD_LOCKED,
         ];
+        yield 'fraud beats an unreadable standing' => [
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => false, 'standing_known' => false],
+            true, Caps::REASON_FRAUD_LOCKED,
+        ];
+        // F-469: a standing that could not be READ is its own retryable reason,
+        // never `suspended`.
+        yield 'an unreadable standing is unavailable' => [
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'standing_known' => false],
+            true, Caps::REASON_STANDING_UNREADABLE,
+        ];
         yield 'standing is reported as suspended' => [
             ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
-            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'standing_known' => true],
             true, Caps::REASON_SUSPENDED,
         ];
     }
 
     /**
-     * ⚠ The ONLY denial carrying an unlock hint. Signing in is the one
-     * thing a refused viewer can actually do about it.
+     * ⚠ The ONLY two denials carrying an unlock hint. Signing in is the one
+     * thing a signed-out viewer can do about it, and trying again is the one
+     * thing a viewer whose standing could not be read can do (F-469).
+     * Every other comment denial carries none.
      */
-    public function testOnlyTheAuthDenialTellsTheViewerWhatToDo(): void
+    public function testOnlyTheAuthAndUnreadableStandingDenialsCarryAHint(): void
     {
         $caps = Caps::forRow(
             self::denied(),
@@ -792,6 +807,24 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         );
         self::assertSame(Caps::REASON_AUTH_REQUIRED, $caps['can_comment']['reason_code']);
         self::assertNotNull($caps['can_comment']['unlock_hint']);
+
+        $unread = Caps::forRow(
+            self::denied(),
+            self::publishedRow(),
+            ['standing_known' => false] + self::goodMember(),
+            true
+        );
+        self::assertSame(Caps::REASON_STANDING_UNREADABLE, $unread['can_comment']['reason_code']);
+        self::assertSame(Caps::STANDING_UNREADABLE_HINT, $unread['can_comment']['unlock_hint']);
+
+        $below = Caps::forRow(
+            self::denied(),
+            self::publishedRow(),
+            ['good_standing' => false] + self::goodMember(),
+            true
+        );
+        self::assertSame(Caps::REASON_SUSPENDED, $below['can_comment']['reason_code']);
+        self::assertNull($below['can_comment']['unlock_hint'], 'a known refusal carries no hint');
     }
 
     /** MUST-NOT-HAPPEN #6 — an absent viewer flag takes the restrictive reading. */
@@ -812,8 +845,14 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             ['authenticated' => true, 'suspended' => false],
             Caps::REASON_FRAUD_LOCKED,
         ];
-        yield 'no standing key'      => [
+        // F-469: with neither standing key, the standing is not KNOWN, so the
+        // restrictive reading is the retryable `unavailable`.
+        yield 'no standing keys'     => [
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false],
+            Caps::REASON_STANDING_UNREADABLE,
+        ];
+        yield 'standing known, no good_standing key' => [
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'standing_known' => true],
             Caps::REASON_SUSPENDED,
         ];
     }
@@ -1225,9 +1264,10 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             self::goodMember() + ['user_id' => 99],
             self::goodMember() + ['user_id' => 42],                       // the author
             ['authenticated' => false, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 0],
-            ['authenticated' => true, 'suspended' => true, 'fraud_locked' => false, 'good_standing' => true, 'user_id' => 99],
-            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => true, 'user_id' => 99],
-            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => true, 'fraud_locked' => false, 'good_standing' => true, 'standing_known' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => true, 'standing_known' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'standing_known' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'standing_known' => false, 'user_id' => 99],
             self::goodMember() + ['user_id' => 99, 'already_reported' => true],
             [],                                                            // the fail-closed empty array
         ];
@@ -1549,7 +1589,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         $poorStanding = Caps::forRow(
             self::denied(),
             self::publishedRow(),
-            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'standing_known' => true],
             true
         );
         self::assertFalse(Permission::isAllowed($poorStanding, 'can_comment'));

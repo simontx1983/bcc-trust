@@ -7,6 +7,7 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\ValidatorRelationshipLogRepository as Log;
 use BCC\Trust\Onchain\Services\RelationshipLogVerifier;
+use BCC\Trust\Onchain\Support\RelationshipLogAnchor;
 use BCC\Trust\Onchain\Support\RelationshipLogHasher;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
@@ -53,6 +54,7 @@ final class ValidatorRelationshipLogIntegrationTest extends TestCase
     {
         global $wpdb;
         $wpdb->query('DELETE FROM `' . Log::table() . '`');
+        delete_option(RelationshipLogAnchor::OPTION);
     }
 
     /** @return array<string, mixed> */
@@ -203,6 +205,71 @@ final class ValidatorRelationshipLogIntegrationTest extends TestCase
         $result = RelationshipLogVerifier::verify();
         self::assertFalse($result['ok']);
         self::assertSame('read_failed', $result['reason']);
+    }
+
+    /**
+     * Rows deleted from the END, or a table emptied, still walk cleanly. The
+     * anchor kept outside the table catches both.
+     */
+    public function testATruncatedTailIsCaughtByTheAnchor(): void
+    {
+        global $wpdb;
+        $this->appendCommitted([self::event('owner_linked', 501), self::event('owner_revoked', 501), self::event('owner_linked', 502)]);
+        $head = Log::head();
+        RelationshipLogAnchor::advance($head['seq'], $head['row_hash']);
+        self::assertTrue(RelationshipLogVerifier::verify()['ok'], 'control: intact and anchored');
+
+        $wpdb->query('DELETE FROM `' . Log::table() . '` WHERE seq = 3');
+        $result = RelationshipLogVerifier::verify();
+        self::assertSame([false, 3, 'tail_missing'], [$result['ok'], $result['first_bad_seq'], $result['reason']]);
+
+        $wpdb->query('DELETE FROM `' . Log::table() . '`'); // the table only: the anchor stays
+        $result = RelationshipLogVerifier::verify();
+        self::assertSame([false, 1, 'tail_missing'], [$result['ok'], $result['first_bad_seq'], $result['reason']], 'an emptied table is not a healthy chain');
+    }
+
+    /** A tail re-forged with the key chains cleanly but no longer matches the anchor. */
+    public function testAReForgedTailIsCaughtByTheAnchor(): void
+    {
+        global $wpdb;
+        $this->appendCommitted([self::event('owner_linked', 501), self::event('owner_revoked', 501)]);
+        $head = Log::head();
+        RelationshipLogAnchor::advance($head['seq'], $head['row_hash']);
+
+        $wpdb->query('DELETE FROM `' . Log::table() . '` WHERE seq = 2');
+        $this->appendCommitted([self::event('owner_link_cancelled', 501)]);
+
+        $result = RelationshipLogVerifier::verify();
+        self::assertSame([2, 'anchor_mismatch'], [$result['first_bad_seq'], $result['reason']]);
+    }
+
+    public function testTheAnchorNeverMovesBack(): void
+    {
+        RelationshipLogAnchor::advance(5, str_repeat('a', 64));
+        RelationshipLogAnchor::advance(3, str_repeat('b', 64));
+        RelationshipLogAnchor::advance(0, str_repeat('c', 64));
+
+        self::assertSame(['seq' => 5, 'row_hash' => str_repeat('a', 64)], RelationshipLogAnchor::get());
+    }
+
+    public function testATamperedKeyIdIsAnUnreadableRowNotACrash(): void
+    {
+        global $wpdb;
+        $this->appendCommitted([self::event('owner_linked', 501), self::event('owner_revoked', 501)]);
+
+        $wpdb->query('UPDATE `' . Log::table() . '` SET key_id = 9 WHERE seq = 2');
+
+        $result = RelationshipLogVerifier::verify();
+        self::assertSame([2, 'unreadable_row'], [$result['first_bad_seq'], $result['reason']]);
+    }
+
+    public function testInvalidUtf8EvidenceIsRefused(): void
+    {
+        global $wpdb;
+        $wpdb->get_var("SELECT GET_LOCK('" . Log::LOCK_NAME . "', 5)");
+
+        $this->expectException(\InvalidArgumentException::class);
+        Log::append(self::event('owner_linked', 501, "bad \xC3\x28 bytes"));
     }
 
     public function testHistoryIsNewestFirstFilteredAndPaged(): void
