@@ -256,6 +256,11 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs FIRST, before anything about the review is
+        // looked up, so every attempt counts, refused ones included.
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -270,13 +275,15 @@ final class ReviewReplyService
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
+        // F-531: a review that is missing, removed or hidden, and one this
+        // viewer may not reply to, get the SAME answer.
         if ($review === null) {
-            return self::error('bcc_not_found', 'Review not found.');
+            return self::notFound();
         }
         $pageId  = (int) $review->page_id;
         $voterId = (int) $review->voter_user_id;
         if ($voterId === $viewerId || !$this->answersFor($pageId, $viewerId)) {
-            return self::error('bcc_forbidden', 'Only the reviewed member or page can reply to this review.');
+            return self::notFound();
         }
 
         // One create per review at a time, so two concurrent requests from
@@ -296,10 +303,6 @@ final class ReviewReplyService
                 }
             } catch (RepositoryReadFailure $e) {
                 return self::unavailable();
-            }
-
-            if (!self::withinRateLimit($viewerId)) {
-                return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
             }
 
             $written = $this->writer->publishReviewReply($viewerId, $voteId, $clean);
@@ -341,6 +344,10 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs first, as in create().
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -353,21 +360,16 @@ final class ReviewReplyService
         try {
             $review = $this->votes->findReviewForReply($voteId);
             if ($review === null) {
-                return self::error('bcc_not_found', 'Review not found.');
+                return self::notFound();
             }
             $reply = $this->replies->findForVoteByAuthor($voteId, $viewerId);
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
-        // Not theirs, gone, or frozen by a moderator: the same answer.
-        if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
-        }
-        if (!$this->answersFor((int) $review->page_id, $viewerId)) {
-            return self::error('bcc_forbidden', 'You no longer answer for this page, so this reply can no longer be edited.');
-        }
-        if (!self::withinRateLimit($viewerId)) {
-            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        // F-531: no review, not theirs, frozen by a moderator, or handed
+        // over (the author no longer answers for the page): the same answer.
+        if ($reply === null || $reply['hidden'] || !$this->answersFor((int) $review->page_id, $viewerId)) {
+            return self::notFound();
         }
 
         // ⚠ F-361 — pinned. #772 pinned the reply PUBLISH (in
@@ -413,7 +415,7 @@ final class ReviewReplyService
             return self::unavailable();
         }
         if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
+            return self::notFound();
         }
         if (!$this->writer->deleteReviewReply($reply['post_id'], $reply['act_id'])) {
             return self::unavailable();
@@ -548,7 +550,7 @@ final class ReviewReplyService
      * (§1.4.5). For the page's response its author answers for the page by
      * construction, so editing needs only authorship and good standing. A
      * $stale reply is the viewer's own after a hand-over: deletable, never
-     * editable (update() refuses it with 403).
+     * editable (update() refuses it with the one not-found answer, F-531).
      *
      * @param array{author_id: int} $row
      * @return array{can_edit: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_delete: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_report: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}
@@ -658,6 +660,23 @@ final class ReviewReplyService
     private static function error(string $code, string $message): array
     {
         return ['error' => $code, 'message' => $message];
+    }
+
+    /**
+     * F-531: the ONE refusal for anything about the review or the reply, so
+     * no answer tells a caller whether a review exists, is hidden, or is
+     * someone else's to answer: a missing, removed or hidden review, one the
+     * caller may not reply to, a reply that is not theirs or is frozen, and
+     * a reply whose author no longer answers for the page. Refusals about
+     * the CALLER (sign-in, suspension, the rate limit, the body) are
+     * unchanged; they say nothing about any review. Rationale: F-531
+     * (private tracker).
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function notFound(): array
+    {
+        return self::error('bcc_not_found', 'Not found.');
     }
 
     /** @return array{error: string, message: string} */

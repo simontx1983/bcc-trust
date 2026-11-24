@@ -1453,15 +1453,25 @@ class VoteRepository {
 
     /**
      * Count total active votes by voter.
+     *
+     * @param list<int> $excludePageIds pages whose votes this count leaves
+     *        out (F-571: on the member's profile, the SECRET pages the viewer
+     *        may not see, so the chip agrees with the Reviews list); none by
+     *        default, for weight, quests and stats
      */
-    public function countByVoter( int $voterId ): int {
+    public function countByVoter( int $voterId, array $excludePageIds = [] ): int {
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table}
              WHERE voter_user_id = %d
-               AND status        = 1",
-            $voterId
+               AND status        = 1" . $notIn,
+            ...[$voterId, ...$exclude]
         ) );
     }
 

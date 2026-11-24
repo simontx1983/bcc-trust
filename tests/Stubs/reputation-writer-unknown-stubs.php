@@ -30,8 +30,16 @@ namespace {
         /** @var list<string> */
         public static array $actions = [];
 
-        /** @var array<string, list<mixed>> SQL fragment => rows get_results() answers */
+        /** @var array<string, list<mixed>> SQL fragment => rows a read of it answers */
         public static array $results = [];
+
+        /**
+         * @var array<string, string> SQL fragment => how a read of it fails:
+         *   'error'  — query() returns false and sets last_error (wpdb::flush ran);
+         *   'silent' — query() returns false with NO error and last_result
+         *              untouched (wpdb's pre-flush early return).
+         */
+        public static array $failures = [];
 
         public static function reset(): void
         {
@@ -40,6 +48,7 @@ namespace {
             self::$userMeta = [];
             self::$actions  = [];
             self::$results  = [];
+            self::$failures = [];
         }
 
         public static function logged(string $needle): bool
@@ -84,26 +93,77 @@ namespace {
         }
     }
 
+    /*
+     * A $wpdb that models wpdb::query() faithfully, because repositories read
+     * two ways: get_results(), and runRead()/trustedRows(), which call query()
+     * and then read last_result / last_error themselves.
+     */
     $GLOBALS['wpdb'] = new class {
         public string $prefix = 'wp_';
 
         public string $last_error = '';
+
+        /** @var list<mixed> */
+        public array $last_result = [];
 
         public function prepare(string $query, mixed ...$args): string
         {
             return $query;
         }
 
-        /** @return list<mixed> */
+        /**
+         * wpdb::query(): a read that runs flushes, fills last_result and
+         * answers the row count; a failing one answers false (see
+         * ReputationWriterWorld::$failures for the two ways).
+         */
+        public function query(string $query): int|false
+        {
+            $failure = self::lookup(ReputationWriterWorld::$failures, $query);
+            if ($failure === 'silent') {
+                return false; // early return: no flush, no error, stale last_result
+            }
+
+            $this->last_error  = '';
+            $this->last_result = [];
+            if ($failure === 'error') {
+                $this->last_error = 'MySQL server has gone away';
+
+                return false;
+            }
+
+            /** @var list<mixed> $rows */
+            $rows = self::lookup(ReputationWriterWorld::$results, $query) ?? [];
+            $this->last_result = $rows;
+
+            return count($rows);
+        }
+
+        /**
+         * wpdb::get_results(): runs query() and answers last_result, so a
+         * failed read answers [] after a flush (and stale rows after the
+         * early return), as real wpdb does.
+         *
+         * @return list<mixed>
+         */
         public function get_results(?string $query = null, string $output = 'OBJECT'): array
         {
-            foreach (ReputationWriterWorld::$results as $fragment => $rows) {
-                if ($query !== null && str_contains($query, $fragment)) {
-                    return $rows;
+            if ($query !== null) {
+                $this->query($query);
+            }
+
+            return $this->last_result;
+        }
+
+        /** @param array<string, mixed> $map */
+        private static function lookup(array $map, string $query): mixed
+        {
+            foreach ($map as $fragment => $value) {
+                if (str_contains($query, $fragment)) {
+                    return $value;
                 }
             }
 
-            return [];
+            return null;
         }
     };
 }
