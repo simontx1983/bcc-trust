@@ -168,7 +168,12 @@ final class UserViewService
             'avatar_url'             => self::resolveAvatar($userId),
             'cover_photo_url'        => self::resolveCoverPhotoUrl($userId),
             'cover_photo_position'   => self::resolveCoverPhotoPosition($userId),
-            'joined_at'              => self::toIso8601((string) $user->user_registered),
+            // Exact for the member, the month for everyone else (R12).
+            'joined_at'              => \BCC\Trust\Core\Support\PublicIdentity::joinedAt(
+                $userId,
+                self::toIso8601((string) $user->user_registered),
+                $viewerId
+            ),
             'is_self'             => $isSelf,
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
@@ -613,7 +618,12 @@ final class UserViewService
             'display_name'        => $effectiveName,
             'avatar_url'          => self::resolveAvatar($userId),
             'cover_photo_url'     => self::resolveCoverPhotoUrl($userId),
-            'joined_at'           => self::toIso8601((string) $user->user_registered),
+            // Exact for the member, the month for everyone else (R12).
+            'joined_at'           => \BCC\Trust\Core\Support\PublicIdentity::joinedAt(
+                $userId,
+                self::toIso8601((string) $user->user_registered),
+                $viewerId
+            ),
             'reputation_tier'       => $tier,
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
             // Rank redesign Phase 5 — nullable for New Members; the
