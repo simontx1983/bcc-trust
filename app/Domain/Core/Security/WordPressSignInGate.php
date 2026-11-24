@@ -64,8 +64,12 @@ if (!defined('ABSPATH')) {
  *    the app too; ops' wp-cli is the fallback.
  *
  * And for every caller, admins included:
- *   - XML-RPC is off (`xmlrpc_enabled` → false, last word). Nothing BCC
- *     runs uses it.
+ *   - XML-RPC is off. `xmlrpc_enabled` → false only switches off the
+ *     methods that sign in, so the method list is emptied too
+ *     (`xmlrpc_methods` → []: pingback.ping, system.multicall and
+ *     system.listMethods answer nothing), and no page advertises a
+ *     pingback endpoint (`X-Pingback` is dropped from `wp_headers`). Nothing
+ *     BCC runs uses it.
  *   - WordPress's and PeepSo's own sign-up are off: `users_can_register`
  *     reads '0' (`pre_option_`, so nothing downstream sees another value)
  *     and PeepSo's `site_registration_disabled` reads 1. Members sign up
@@ -166,6 +170,8 @@ final class WordPressSignInGate
         add_filter('lostpassword_errors', [self::class, 'sameLostPasswordAnswer'], self::RESET_PRIORITY, 2);
         add_filter('wp_unique_post_slug', [self::class, 'keepPathWordsOffGroups'], 10, 6);
         add_filter('xmlrpc_enabled', [self::class, 'noXmlRpc'], PHP_INT_MAX);
+        add_filter('xmlrpc_methods', [self::class, 'noXmlRpcMethods'], PHP_INT_MAX);
+        add_filter('wp_headers', [self::class, 'noPingbackHeader'], PHP_INT_MAX);
         add_filter('pre_option_users_can_register', [self::class, 'noNativeSignUp'], PHP_INT_MAX);
         add_filter('peepso_filter_get_option_site_registration_disabled', [self::class, 'peepsoSignUpDisabled'], PHP_INT_MAX);
     }
@@ -180,6 +186,36 @@ final class WordPressSignInGate
         unset($enabled);
 
         return false;
+    }
+
+    /**
+     * `xmlrpc_methods`, last: no XML-RPC method answers, whatever an earlier
+     * filter added.
+     *
+     * @param mixed $methods
+     * @return array<string, mixed>
+     */
+    public static function noXmlRpcMethods($methods = []): array
+    {
+        unset($methods);
+
+        return [];
+    }
+
+    /**
+     * `wp_headers`, last: no `X-Pingback` header. Core adds it to a single
+     * post that allows pings. Every other header passes through unchanged.
+     *
+     * @param mixed $headers
+     * @return mixed
+     */
+    public static function noPingbackHeader($headers = [])
+    {
+        if (is_array($headers)) {
+            unset($headers['X-Pingback']);
+        }
+
+        return $headers;
     }
 
     /**

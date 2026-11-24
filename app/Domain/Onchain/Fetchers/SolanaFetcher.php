@@ -1140,14 +1140,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         // trusted (see voteAccountIndex()). An identity naming 2+ vote
         // accounts is counted, never resolved by picking one.
         $voteIndex = self::voteAccountIndex($accounts);
-        if ($voteIndex['shared'] !== []) {
-            foreach ($voteIndex['shared'] as $ignored) {
-                \BCC\Core\Observability\DegradationMetrics::record('validator_index', 'solana_shared_identity');
-            }
-            \BCC\Core\Log\Logger::warning('[Solana Fetcher] identities naming more than one vote account; their vote_account is left empty', [
-                'count' => count($voteIndex['shared']),
-            ]);
-        }
+        $this->countNewlySharedIdentities($voteIndex['shared']);
 
         $results = [];
         foreach ($accounts as $rank => $v) {
@@ -1429,6 +1422,44 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             }
         }
         return true;
+    }
+
+    /** Per chain: the identities found shared on the previous run (not autoloaded). */
+    private const SHARED_IDENTITIES_OPTION = 'bcc_solana_shared_identities_';
+
+    /**
+     * F-550 (security S3): an identity naming more than one vote account is
+     * COUNTED when it becomes shared, not on every run it stays shared, so a
+     * persistent one can't keep DegradationAlerter tripped.
+     *
+     * The previous run's set is kept per chain and replaced each run, so an
+     * identity that stops being shared and comes back is counted again. It's
+     * logged on every run while any identity is shared.
+     *
+     * @param list<string> $shared
+     */
+    private function countNewlySharedIdentities(array $shared): void
+    {
+        $option   = self::SHARED_IDENTITIES_OPTION . (int) $this->chain->id;
+        $stored   = get_option($option, []);
+        $previous = is_array($stored) ? array_values(array_map('strval', $stored)) : [];
+        $new      = array_values(array_diff($shared, $previous));
+
+        foreach ($new as $ignored) {
+            \BCC\Core\Observability\DegradationMetrics::record('validator_index', 'solana_shared_identity');
+        }
+        if ($shared !== []) {
+            \BCC\Core\Log\Logger::warning('[Solana Fetcher] identities naming more than one vote account; their vote_account is left empty', [
+                'count' => count($shared),
+                'new'   => count($new),
+            ]);
+        }
+
+        sort($shared);
+        sort($previous);
+        if ($shared !== $previous) {
+            update_option($option, $shared, false);
+        }
     }
 
     /**

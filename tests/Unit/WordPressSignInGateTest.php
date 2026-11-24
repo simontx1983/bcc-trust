@@ -91,6 +91,8 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
         self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
         self::assertSame([[WordPressSignInGate::class, 'noXmlRpc'], PHP_INT_MAX, 1], $hooks['xmlrpc_enabled']);
+        self::assertSame([[WordPressSignInGate::class, 'noXmlRpcMethods'], PHP_INT_MAX, 1], $hooks['xmlrpc_methods']);
+        self::assertSame([[WordPressSignInGate::class, 'noPingbackHeader'], PHP_INT_MAX, 1], $hooks['wp_headers']);
         self::assertSame([[WordPressSignInGate::class, 'noNativeSignUp'], PHP_INT_MAX, 1], $hooks['pre_option_users_can_register']);
         self::assertSame([[WordPressSignInGate::class, 'peepsoSignUpDisabled'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_site_registration_disabled']);
     }
@@ -124,6 +126,25 @@ final class WordPressSignInGateTest extends TestCase
         WordPressSignInGate::register();
 
         self::assertFalse(self::filtered('xmlrpc_enabled', true, [[static fn($on): bool => true, 99]]));
+    }
+
+    /** No XML-RPC method answers, even after a later filter adds one back. */
+    public function testNoXmlRpcMethodAnswersWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        $core = ['pingback.ping' => 'this:pingback_ping', 'system.multicall' => 'this:multiCall', 'system.listMethods' => 'this:listMethods'];
+        self::assertSame([], self::filtered('xmlrpc_methods', $core, [[static fn($m): array => $m + ['demo.sayHello' => 'this:sayHello'], 99]]));
+    }
+
+    /** X-Pingback is dropped; every other header passes through unchanged. */
+    public function testThePingbackHeaderIsDroppedAndNothingElse(): void
+    {
+        $headers = ['Content-Type' => 'text/html; charset=UTF-8', 'X-Pingback' => 'https://cms.example.test/xmlrpc.php', 'Link' => '<x>; rel=y'];
+
+        self::assertSame(['Content-Type' => 'text/html; charset=UTF-8', 'Link' => '<x>; rel=y'], WordPressSignInGate::noPingbackHeader($headers));
+        self::assertSame(['Content-Type' => 'text/html'], WordPressSignInGate::noPingbackHeader(['Content-Type' => 'text/html']));
+        self::assertSame('not headers', WordPressSignInGate::noPingbackHeader('not headers'), 'anything else passes through');
     }
 
     /** WordPress's own sign-up reads '0', even after a filter turned it on. */
