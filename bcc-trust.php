@@ -1140,6 +1140,10 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
     // as the revoke sweep above: these two were scheduled only in
@@ -1290,6 +1294,15 @@ $bccClaimReverify = static function (): void {
 };
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
+
+// Validator staff step-ups: purge rows that expired more than a day ago.
+add_action('bcc_validator_step_up_purge', static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\ValidatorStepUpService::purgeExpired();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] step-up purge failed', ['error' => $e->getMessage()]);
+    }
+});
 
 // V2: when PeepSo evicts a user from a group via mod action, record a
 // permanent opt-out so our reconcile sweep won't re-add a banned user.
@@ -2455,6 +2468,10 @@ function bcc_trust_activate() {
     // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
+    }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

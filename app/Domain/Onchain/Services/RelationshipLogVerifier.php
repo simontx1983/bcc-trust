@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Onchain\Repositories\ValidatorRelationshipLogRepository;
+use BCC\Trust\Onchain\Support\RelationshipLogAnchor;
 use BCC\Trust\Onchain\Support\RelationshipLogHasher;
 
 if (!defined('ABSPATH')) {
@@ -19,6 +20,11 @@ if (!defined('ABSPATH')) {
  *    seq 1);
  *  - recomputing row_hash from the stored fields gives the stored value;
  *  - any evidence text still stored matches the digest the hash covers.
+ *
+ * And the chain must reach the anchor kept outside the table
+ * ({@see RelationshipLogAnchor}): a head behind it means rows were deleted
+ * from the end (or the table emptied); a row at the anchor's seq with a
+ * different hash means it was rewritten.
  *
  * The cron health check and the admin health view call this. Raising the
  * metric and the all-admin alert on a failure is the caller's job.
@@ -45,9 +51,19 @@ final class RelationshipLogVerifier
         $prevHash = RelationshipLogHasher::GENESIS;
 
         try {
+            RelationshipLogHasher::key();
+        } catch (\RuntimeException) {
+            return self::result(false, 0, 0, null, 'key_unavailable');
+        }
+        $anchor = RelationshipLogAnchor::get();
+
+        try {
             while ($checked < $maxRows) {
                 $rows = ValidatorRelationshipLogRepository::rowsAfter($prevSeq, $batch);
                 if ($rows === []) {
+                    if ($anchor !== null && $prevSeq < $anchor['seq']) {
+                        return self::result(false, $checked, $prevSeq, $prevSeq + 1, 'tail_missing');
+                    }
                     return self::result(true, $checked, $prevSeq, null, null);
                 }
                 foreach ($rows as $row) {
@@ -60,7 +76,9 @@ final class RelationshipLogVerifier
                     }
                     try {
                         $expected = RelationshipLogHasher::rowHash(ValidatorRelationshipLogRepository::hashInput($row), $prevHash);
-                    } catch (\UnexpectedValueException | \InvalidArgumentException) {
+                    } catch (\UnexpectedValueException | \InvalidArgumentException | \RuntimeException) {
+                        // A RuntimeException here is an unknown key_id (a
+                        // tampered row): the key itself was checked above.
                         return self::result(false, $checked, $prevSeq, $seq, 'unreadable_row');
                     }
                     if (!hash_equals($expected, (string) $row->row_hash)) {
@@ -70,6 +88,9 @@ final class RelationshipLogVerifier
                         || !self::evidenceMatches($row->evidence_ref, $row->evidence_ref_sha256)
                     ) {
                         return self::result(false, $checked, $prevSeq, $seq, 'evidence_mismatch');
+                    }
+                    if ($anchor !== null && $seq === $anchor['seq'] && !hash_equals($anchor['row_hash'], (string) $row->row_hash)) {
+                        return self::result(false, $checked, $prevSeq, $seq, 'anchor_mismatch');
                     }
                     $prevSeq  = $seq;
                     $prevHash = (string) $row->row_hash;

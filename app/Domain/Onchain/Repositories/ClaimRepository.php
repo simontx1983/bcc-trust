@@ -617,6 +617,37 @@ class ClaimRepository {
      * @return array<int, array{state: string, user_id: int|null}>
      */
     public static function resolveVerifiedOperatorForPages(array $pageIds): array {
+        return self::resolveOperators($pageIds, false);
+    }
+
+    /**
+     * FAIL-CLOSED point variant: the same two-leg resolution, but a read
+     * that fails THROWS instead of reading as UNCLAIMED. For authority
+     * decisions that must not mistake "could not read" for "no owner" (the
+     * page-ownership aligner, live team authorization).
+     *
+     * @return array{state: string, user_id: int|null}
+     * @throws RepositoryReadFailure
+     */
+    public static function resolveVerifiedOperatorForPageStrict(int $pageId): array {
+        if ($pageId <= 0) {
+            return ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+        }
+        $map = self::resolveOperators([$pageId], true);
+        return $map[$pageId] ?? ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+    }
+
+    /**
+     * The resolution behind both variants. Reads go through runRead(), so a
+     * failed read (including wpdb's pre-flush bail, which would otherwise
+     * hand back a previous query's rows) is never read as rows: it answers
+     * no rows, or throws when $failClosed.
+     *
+     * @param array<int|string> $pageIds
+     * @return array<int, array{state: string, user_id: int|null}>
+     * @throws RepositoryReadFailure when $failClosed and a read fails
+     */
+    private static function resolveOperators(array $pageIds, bool $failClosed): array {
         if ($pageIds === []) {
             return [];
         }
@@ -638,8 +669,8 @@ class ClaimRepository {
         $wallets    = \BCC\Core\DB\DB::table('wallet_links');
         $ph         = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<object{page_id: string, user_id: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        /** @var list<object{page_id: string, user_id: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT w.post_id AS page_id, cl.user_id
              FROM {$table} cl
              JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
@@ -648,11 +679,11 @@ class ClaimRepository {
                AND cl.status = 'verified' AND cl.claim_role = 'operator'
              ORDER BY w.post_id, cl.user_id",
             ...$ids
-        ));
+        ), __FUNCTION__, $failClosed);
 
         /** @var array<int, array<int, true>> $byPage */
         $byPage = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
         }
 
@@ -708,8 +739,8 @@ class ClaimRepository {
             // AMBIGUOUS into RESOLVED, handing one of two rival claimants
             // sole authority. Bounded by the 100-id IN-list above instead.
             // CAST per the collation note on findMissingPlaceholderPage.
-            /** @var list<object{page_id: string, user_id: string}>|null $metaRows */
-            $metaRows = $wpdb->get_results($wpdb->prepare(
+            /** @var list<object{page_id: string, user_id: string}> $metaRows */
+            $metaRows = self::runRead($wpdb->prepare(
                 "SELECT pm.post_id AS page_id, cl.user_id
                  FROM {$wpdb->postmeta} pm
                  JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
@@ -719,9 +750,9 @@ class ClaimRepository {
                    AND cl.status = 'verified' AND cl.claim_role = 'operator'
                  ORDER BY pm.post_id, cl.user_id",
                 ...$missing
-            ));
+            ), __FUNCTION__, $failClosed);
 
-            foreach ($metaRows ?: [] as $row) {
+            foreach ($metaRows as $row) {
                 $byPage[(int) $row->page_id][(int) $row->user_id] = true;
             }
         }
@@ -1240,15 +1271,13 @@ class ClaimRepository {
     public static function revoke(int $claimId): array
     {
         global $wpdb;
-        $table = self::table();
-        $none  = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
 
         if (\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
             throw new \LogicException('ClaimRepository::revoke() must not run inside a TransactionManager transaction');
         }
 
         if ($claimId <= 0) {
-            return $none;
+            return self::NOT_REVOKED;
         }
 
         if ($wpdb->query('START TRANSACTION') === false) {
@@ -1256,6 +1285,59 @@ class ClaimRepository {
         }
 
         try {
+            $result = self::flipRevoked($claimId);
+
+            if ($wpdb->query('COMMIT') === false) {
+                throw new \RuntimeException('COMMIT failed');
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw $e;
+        }
+    }
+
+    /**
+     * {@see revoke()}, but INSIDE the caller's TransactionManager::run(), so
+     * the flip commits or rolls back with the caller's other writes (a staff
+     * revoke and its log row; an owner swap). Refused outside a run.
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function revokeInTransaction(int $claimId): array
+    {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::revokeInTransaction() must run inside a TransactionManager transaction');
+        }
+        if ($claimId <= 0) {
+            return self::NOT_REVOKED;
+        }
+
+        return self::flipRevoked($claimId);
+    }
+
+    /** @var array{revoked: false, user_id: 0, entity_type: '', entity_id: 0, claim_role: '', mirror_page_ids: array{}, bound_page_ids: array{}} */
+    private const NOT_REVOKED = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
+
+    /**
+     * The revoke itself, with NO transaction control of its own: lock the
+     * claim row, find the page mirrors it alone grants, flip both to
+     * revoked. The callers own the transaction.
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     */
+    private static function flipRevoked(int $claimId): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        {
             /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, status: string}> $rows */
             $rows = self::runRead($wpdb->prepare(
                 "SELECT id, user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status
@@ -1267,8 +1349,7 @@ class ClaimRepository {
             if ($claim === null
                 || $claim->status !== ClaimStatus::VERIFIED
                 || !in_array($claim->entity_type, ['validator', 'collection'], true)) {
-                $wpdb->query('COMMIT');
-                return $none;
+                return self::NOT_REVOKED;
             }
 
             $userId     = (int) $claim->user_id;
@@ -1310,10 +1391,6 @@ class ClaimRepository {
                 throw new \RuntimeException('claim revoke UPDATE failed: ' . (string) $wpdb->last_error);
             }
 
-            if ($wpdb->query('COMMIT') === false) {
-                throw new \RuntimeException('COMMIT failed');
-            }
-
             return [
                 'revoked'         => true,
                 'user_id'         => $userId,
@@ -1323,10 +1400,186 @@ class ClaimRepository {
                 'mirror_page_ids' => array_values(array_unique($mirrorPages)),
                 'bound_page_ids'  => $boundPages,
             ];
-        } catch (\Throwable $e) {
-            $wpdb->query('ROLLBACK');
-            throw $e;
         }
+    }
+
+    /**
+     * Write a NON-WALLET owner claim (staff-approved or proven) for an
+     * entity, and its page mirrors, INSIDE the caller's TransactionManager
+     * run. Never upsert(): an existing row for the user and entity is
+     * written only when it is not already a verified claim.
+     *
+     * Only a 'staff' claim may store no wallet ('' / chain 0), and it must
+     * name the approving staff user; a proof claim names its proven address
+     * and chain. The mirrors carry the same method. A page row that was a
+     * TEAM row (administrator, representative) becomes the owner row; those
+     * pages are returned so the caller logs the end of that membership.
+     *
+     * @param list<int> $pageIds the pages bound to the entity (boundPagesFor())
+     * @return array{ok: true, claim_id: int, mirror_page_ids: list<int>, converted_team_roles: array<int, string>}|array{ok: false, reason: 'already_verified'}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     * @throws \InvalidArgumentException on an invalid method / wallet combination
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function writeRelationshipClaim(
+        int $userId,
+        string $entityType,
+        int $entityId,
+        string $role,
+        string $method,
+        ?int $verifiedBy,
+        string $walletAddress,
+        int $chainId,
+        array $pageIds
+    ): array {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::writeRelationshipClaim() must run inside a TransactionManager transaction');
+        }
+        if ($userId <= 0 || $entityId <= 0 || !in_array($entityType, ['validator', 'collection'], true)
+            || !in_array($role, \BCC\Trust\Onchain\Services\PageClaimRolePolicy::OWNER_ROLES, true)
+        ) {
+            throw new \InvalidArgumentException('Invalid relationship claim target.');
+        }
+        if ($method === 'staff') {
+            if ($walletAddress !== '' || $chainId !== 0 || $verifiedBy === null || $verifiedBy <= 0) {
+                throw new \InvalidArgumentException('A staff claim stores no wallet and names its approver.');
+            }
+        } elseif (in_array($method, ['siws', 'solana_identity'], true)) {
+            if (trim($walletAddress) === '' || $chainId <= 0 || $verifiedBy !== null) {
+                throw new \InvalidArgumentException('A proof claim names its proven address and chain.');
+            }
+        } else {
+            throw new \InvalidArgumentException('Unknown relationship claim method: ' . $method);
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $now   = gmdate('Y-m-d H:i:s');
+        $set   = [
+            'wallet_address'      => $walletAddress,
+            'chain_id'            => $chainId,
+            'claim_role'          => $role,
+            'status'              => ClaimStatus::VERIFIED,
+            'verified_at'         => $now,
+            'verification_method' => $method,
+            'verified_by'         => $verifiedBy,
+            'invited_by'          => null,
+            'invite_expires_at'   => null,
+            'accepted_at'         => null,
+            'added_by_staff'      => 0,
+            'reconfirmed'         => 0,
+            'show_publicly'       => 0,
+        ];
+
+        $existing = self::lockedUserRow($userId, $entityType, $entityId);
+        if ($existing !== null && $existing->status === ClaimStatus::VERIFIED) {
+            return ['ok' => false, 'reason' => 'already_verified'];
+        }
+        $claimId = self::writeRow($existing, $set + ['user_id' => $userId, 'entity_type' => $entityType, 'entity_id' => $entityId, 'created_at' => $now]);
+
+        $mirrors   = [];
+        $converted = [];
+        foreach (array_values(array_unique(array_map('intval', $pageIds))) as $pageId) {
+            if ($pageId <= 0) {
+                continue;
+            }
+            $row = self::lockedUserRow($userId, 'page', $pageId);
+            if ($row !== null && $row->status === ClaimStatus::VERIFIED
+                && in_array($row->claim_role, \BCC\Trust\Onchain\Services\PageClaimRolePolicy::OWNER_ROLES, true)
+            ) {
+                continue; // already this user's owner row, through another claim
+            }
+            if ($row !== null && \BCC\Trust\Onchain\Services\PageClaimRolePolicy::isTeamRole((string) $row->claim_role)
+                && in_array($row->status, [ClaimStatus::INVITED, ClaimStatus::ACTIVE], true)
+            ) {
+                $converted[$pageId] = (string) $row->claim_role;
+            }
+            self::writeRow($row, $set + ['user_id' => $userId, 'entity_type' => 'page', 'entity_id' => $pageId, 'created_at' => $now]);
+            $mirrors[] = $pageId;
+        }
+
+        return ['ok' => true, 'claim_id' => $claimId, 'mirror_page_ids' => $mirrors, 'converted_team_roles' => $converted];
+    }
+
+    /**
+     * The pages bound to an entity, read fail-closed (both binding legs).
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function boundPagesFor(string $entityType, int $entityId): array
+    {
+        return self::boundPageIds($entityType, $entityId);
+    }
+
+    /**
+     * Does the user hold the page through ANY verified claim bound to it?
+     * Read fail-closed (a failed read throws, never reads as "no").
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function userHoldsPageThroughAnyClaim(int $userId, int $pageId): bool
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return false;
+        }
+
+        return self::otherVerifiedClaimBoundToPage($userId, 0, $pageId);
+    }
+
+    /**
+     * The user's row for an entity, locked FOR UPDATE, or null.
+     *
+     * @return object{id: numeric-string, status: string, claim_role: string}|null
+     * @throws RepositoryReadFailure
+     */
+    private static function lockedUserRow(int $userId, string $entityType, int $entityId): ?object
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string, status: string, claim_role: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id, status, claim_role FROM {$table}
+              WHERE user_id = %d AND entity_type = %s AND entity_id = %d FOR UPDATE",
+            $userId,
+            $entityType,
+            $entityId
+        ), __FUNCTION__, true);
+
+        return $rows[0] ?? null;
+    }
+
+    /**
+     * Insert $set, or update the existing (non-verified) row with it.
+     *
+     * @param object{id: numeric-string, status: string, claim_role: string}|null $existing
+     * @param array<string, int|string|null> $set
+     * @return int the row id
+     * @throws \RuntimeException on a failed write
+     */
+    private static function writeRow(?object $existing, array $set): int
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->last_error = '';
+
+        if ($existing === null) {
+            $ok = $wpdb->insert($table, $set);
+            if ($ok !== 1 || self::lastReadError() !== '') {
+                throw new \RuntimeException('relationship claim insert failed: ' . (string) $wpdb->last_error);
+            }
+            return (int) $wpdb->insert_id;
+        }
+
+        unset($set['user_id'], $set['entity_type'], $set['entity_id'], $set['created_at']);
+        $ok = $wpdb->update($table, $set, ['id' => (int) $existing->id, 'status' => (string) $existing->status]);
+        if ($ok !== 1 || self::lastReadError() !== '') {
+            throw new \RuntimeException('relationship claim update failed: ' . (string) $wpdb->last_error);
+        }
+
+        return (int) $existing->id;
     }
 
     /**

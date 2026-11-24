@@ -91,6 +91,10 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
         self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
         self::assertSame([[WordPressSignInGate::class, 'noXmlRpc'], PHP_INT_MAX, 1], $hooks['xmlrpc_enabled']);
+        self::assertSame([[WordPressSignInGate::class, 'noXmlRpcMethods'], PHP_INT_MAX, 1], $hooks['xmlrpc_methods']);
+        self::assertSame([[WordPressSignInGate::class, 'noPingbackHeader'], PHP_INT_MAX, 1], $hooks['wp_headers']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['comments_open']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['pings_open']);
         self::assertSame([[WordPressSignInGate::class, 'noNativeSignUp'], PHP_INT_MAX, 1], $hooks['pre_option_users_can_register']);
         self::assertSame([[WordPressSignInGate::class, 'peepsoSignUpDisabled'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_site_registration_disabled']);
         self::assertSame([[WordPressSignInGate::class, 'peepsoDataExportOff'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_gdpr_enable']);
@@ -125,6 +129,47 @@ final class WordPressSignInGateTest extends TestCase
         WordPressSignInGate::register();
 
         self::assertFalse(self::filtered('xmlrpc_enabled', true, [[static fn($on): bool => true, 99]]));
+    }
+
+    /** No XML-RPC method answers, even after a later filter adds one back. */
+    public function testNoXmlRpcMethodAnswersWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        $core = ['core.methodOne' => 'this:methodOne', 'core.methodTwo' => 'this:methodTwo'];
+        self::assertSame([], self::filtered('xmlrpc_methods', $core, [[static fn($m): array => $m + ['demo.sayHello' => 'this:sayHello'], 99]]));
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function commentAndPingHooks(): iterable
+    {
+        yield 'comments' => ['comments_open'];
+        yield 'pings'    => ['pings_open'];
+    }
+
+    /**
+     * Core comments and pings are closed on every post: whatever core read
+     * from the post (open), and even after a later plugin opened them again,
+     * the answer core's comment handlers and trackbacks get is false.
+     */
+    #[DataProvider('commentAndPingHooks')]
+    public function testCoreCommentsAndPingsAreClosedWhateverCameBefore(string $hook): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertFalse(self::filtered($hook, true, [[static fn($open): bool => true, 99]]));
+        self::assertFalse(self::filtered($hook, '1', [[static fn($open): string => 'open', 10]]));
+        self::assertFalse(self::filtered($hook, false, []), 'a closed post stays closed');
+    }
+
+    /** X-Pingback is dropped; every other header passes through unchanged. */
+    public function testThePingbackHeaderIsDroppedAndNothingElse(): void
+    {
+        $headers = ['Content-Type' => 'text/html; charset=UTF-8', 'X-Pingback' => 'https://cms.example.test/xmlrpc.php', 'Link' => '<x>; rel=y'];
+
+        self::assertSame(['Content-Type' => 'text/html; charset=UTF-8', 'Link' => '<x>; rel=y'], WordPressSignInGate::noPingbackHeader($headers));
+        self::assertSame(['Content-Type' => 'text/html'], WordPressSignInGate::noPingbackHeader(['Content-Type' => 'text/html']));
+        self::assertSame('not headers', WordPressSignInGate::noPingbackHeader('not headers'), 'anything else passes through');
     }
 
     /** WordPress's own sign-up reads '0', even after a filter turned it on. */

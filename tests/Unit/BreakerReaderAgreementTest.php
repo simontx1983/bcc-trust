@@ -46,6 +46,8 @@ final class BreakerReaderAgreementTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/breaker-real-stubs.php';
+        // Inert until a case sets BccBreakerClock::$now (F-577).
+        require_once __DIR__ . '/../Stubs/breaker-frozen-clock-stubs.php';
         \BccBreakerStore::reset();
         \BCC\Trust\Onchain\Repositories\OnchainCircuitBreakerRepository::$failIncrement = false;
     }
@@ -191,7 +193,15 @@ final class BreakerReaderAgreementTest extends TestCase
     #[DataProvider('boundaryOffsets')]
     public function testTheCooldownBoundaryIsInclusiveEverywhere(int $offset, string $expected): void
     {
-        \BccBreakerStore::seedOpen(self::CHAIN, 5, time() - $offset);
+        // F-577: ONE frozen instant for the seed and every read, so a slow
+        // runner cannot tick "one second before" onto the boundary. A day in
+        // the past: a breaker still reading the wall clock would see the
+        // cooldown long elapsed, and the "before" case would fail loudly.
+        $now = \time() - 86400;
+        \BccBreakerClock::$now = $now;
+        self::assertSame($now, \BCC\Trust\Onchain\Support\time(), 'anti-vacuity: the breaker reads the frozen clock');
+
+        \BccBreakerStore::seedOpen(self::CHAIN, 5, $now - $offset);
 
         $seen = $this->readAll();
 
