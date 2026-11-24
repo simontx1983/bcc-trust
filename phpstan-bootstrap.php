@@ -109,6 +109,30 @@ if (!class_exists('PeepSo')) {
          * `current_user_can()`, or the two drift.
          */
         public static function is_admin(?int $user_id = null): bool { return false; }
+        public static function get_instance(): self { return new self(); }
+        /** PeepSo's hashtag maintenance: scan up to $limit unscanned posts for tags; returns the count scanned. */
+        public function hashtags_build_posts(int $limit = 10): int { return 0; }
+        /** PeepSo's hashtag maintenance: recount up to $limit stale tags; returns the count processed. */
+        public function hashtags_build_hashtags(int $limit = 10): int { return 0; }
+    }
+}
+
+if (!class_exists('PeepSo3_Mayfly')) {
+    class PeepSo3_Mayfly {
+        /**
+         * PeepSo's expiring key/value store purge: expired entries by
+         * default, every entry when $all is true.
+         *
+         * @param string|false $like
+         */
+        public static function clr(bool $all = false, $like = false): ?int { return 0; }
+    }
+}
+
+if (!class_exists('PeepSoRegisterAvatarAjax')) {
+    class PeepSoRegisterAvatarAjax {
+        /** Remove registration-avatar workspaces older than $ttl seconds; returns the count removed. */
+        public static function purge_old(int $ttl): int { return 0; }
     }
 }
 
