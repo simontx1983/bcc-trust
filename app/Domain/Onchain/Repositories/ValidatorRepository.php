@@ -154,7 +154,8 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     voting_power_rank: string|null,
  *     enrichment_attempts: string,
- *     fetched_at: string
+ *     fetched_at: string,
+ *     vote_account: string|null
  * }
  *
  * @phpstan-type ValidatorCountByChain object{
@@ -771,7 +772,7 @@ final class ValidatorRepository
         $existingRows = $wpdb->get_results($wpdb->prepare(
             "SELECT id, operator_address, moniker, status, commission_rate,
                     total_stake, jailed_count, voting_power_rank,
-                    enrichment_attempts, fetched_at
+                    enrichment_attempts, fetched_at, vote_account
              FROM {$table}
              WHERE chain_id = %d
              LIMIT 10000",
@@ -804,6 +805,19 @@ final class ValidatorRepository
             $addr = $data['operator_address'];
             $prev = $existing[$addr] ?? null;
 
+            // F-550: only a fetcher that knows vote accounts (Solana) sends
+            // the key, and then its value is the truth, null included (an
+            // identity it can't trust clears a stored value). Without the
+            // key the column is left exactly as it is. Only the base58
+            // alphabet is accepted, so the SQL fragment built from it can
+            // carry no quote and no `%` into the prepare() below.
+            $ownsVote    = array_key_exists('vote_account', $data);
+            $voteAccount = $ownsVote && is_string($data['vote_account'])
+                && preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $data['vote_account']) === 1
+                ? $data['vote_account']
+                : null;
+            $sqlVoteNew  = $voteAccount !== null ? $wpdb->prepare('%s', $voteAccount) : 'NULL';
+
             if ($prev === null) {
                 // ── NEW ─────────────────────────────────────────────────
                 $jitterSec        = crc32($addr) & 0x3FFF;
@@ -825,8 +839,8 @@ final class ValidatorRepository
                     "INSERT INTO {$table}
                         (wallet_link_id, operator_address, chain_id, moniker, status,
                          commission_rate, total_stake, jailed_count,
-                         voting_power_rank, fetched_at, expires_at, next_enrichment_at)
-                     VALUES (NULL, %s, %d, %s, %s, {$sqlCommission}, {$sqlStake}, %d, %d, %s, %s, %s)",
+                         voting_power_rank, fetched_at, expires_at, next_enrichment_at, vote_account)
+                     VALUES (NULL, %s, %d, %s, %s, {$sqlCommission}, {$sqlStake}, %d, %d, %s, %s, %s, {$sqlVoteNew})",
                     $addr,
                     $chainId,
                     $data['moniker'] ?? null,
@@ -848,6 +862,7 @@ final class ValidatorRepository
                 || round((float) ($data['total_stake'] ?? 0), 6)     !== round((float) ($prev->total_stake ?? 0), 6)
                 || (int) ($data['jailed_count'] ?? 0)       !== (int) ($prev->jailed_count ?? 0)
                 || (int) ($data['voting_power_rank'] ?? 0)  !== (int) ($prev->voting_power_rank ?? 0)
+                || ($ownsVote && $voteAccount !== ($prev->vote_account ?? null))  // F-550, incl. the first backfill
                 || (int) ($prev->enrichment_attempts ?? 0)  > 0;  // reset stuck validators
 
             if (!$changed) {
@@ -880,6 +895,9 @@ final class ValidatorRepository
                 ? $wpdb->prepare('%d', (int) $data['voting_power_rank'])
                 : 'NULL';
 
+            // F-550: a fetcher that doesn't send vote_account keeps the stored one.
+            $sqlVoteKept = $ownsVote ? $sqlVoteNew : 'vote_account';
+
             $wpdb->query($wpdb->prepare(
                 "UPDATE {$table}
                  SET moniker             = %s,
@@ -888,6 +906,7 @@ final class ValidatorRepository
                      total_stake         = {$sqlStake},
                      jailed_count        = %d,
                      voting_power_rank   = {$sqlVotingRank},
+                     vote_account        = {$sqlVoteKept},
                      fetched_at          = %s,
                      expires_at          = %s,
                      enrichment_attempts = 0,

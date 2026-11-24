@@ -48,6 +48,7 @@ function bcc_onchain_create_validators_table(): void {
         retry_after DATETIME DEFAULT NULL,
         enrichment_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
         identity VARCHAR(64) DEFAULT NULL,
+        vote_account VARCHAR(64) DEFAULT NULL,
         logo_url VARCHAR(2048) DEFAULT NULL,
         logo_source_ref VARCHAR(2048) DEFAULT NULL,
         logo_checked_at DATETIME DEFAULT NULL,
