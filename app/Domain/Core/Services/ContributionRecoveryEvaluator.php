@@ -70,9 +70,19 @@ final class ContributionRecoveryEvaluator
             $evaluated++;
 
             try {
+                // F-469: the stored bonus and score, tri-state, read FIRST. A
+                // row that could not be read is a failed evaluation (caught
+                // below, retried on the next run) before anything is
+                // computed, never a bonus derived from the 0.0 / neutral
+                // defaults. No row at all keeps those defaults.
+                $oldBonus = $this->reputationRepo->getContributionBonusOrUnknown($userId);
+                $score    = $this->reputationRepo->getScoreOrUnknown($userId);
+                if ($oldBonus === null || $score === null) {
+                    throw new \RuntimeException('reputation row could not be read');
+                }
+
                 $components = $this->contributionScore->computeBonus($userId);
                 $rawBonus   = round($components['contribution'] + $components['consistency'], 2);
-                $oldBonus   = $this->reputationRepo->getContributionBonus($userId);
 
                 // Rule R2 — contribution alone can lift a member toward Neutral
                 // but never into Trusted. The self-page formula adds
@@ -82,7 +92,7 @@ final class ContributionRecoveryEvaluator
                 // BCC_CONTRIB_CEILING while the genuine (non-contribution) score
                 // is below Trusted. blendContribution is the single source of
                 // the ceiling rule — we derive the writable bonus back out of it.
-                $genuine        = $this->reputationRepo->getScore($userId) - $oldBonus;
+                $genuine        = $score - $oldBonus;
                 $effectiveTotal = ReputationCalculatorService::blendContribution($genuine, $rawBonus);
                 $newBonus       = round(max(0.0, $effectiveTotal - $genuine), 2);
 

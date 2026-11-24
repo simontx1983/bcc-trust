@@ -131,6 +131,66 @@ final class ReputationTriStateTest extends TestCase
         self::assertSame(1, $this->db()->queries, 'one IN read, then the memo');
     }
 
+    // ── F-469 batch 3: the WRITERS' readers ─────────────────────────────
+
+    public function testTheBatchedTierReadMapsRowsAndLeavesRowlessMembersOut(): void
+    {
+        $repo = new ReputationRepository();
+
+        self::assertSame(
+            [self::CAUTION => 'caution', self::TRUSTED => 'trusted'],
+            $repo->getTiersForUsersOrUnknown([self::CAUTION, self::TRUSTED, self::NEW_MEMBER])
+        );
+        self::assertSame([], Logger::$errors, 'a member with no row is left out, not a failure');
+    }
+
+    public function testTheBatchedTierReadIsUnknownWhenItDidNotRun(): void
+    {
+        $repo = new ReputationRepository();
+
+        $this->db()->failNext = 1;
+        self::assertNull($repo->getTiersForUsersOrUnknown([self::CAUTION, self::TRUSTED]));
+        self::assertCount(1, Logger::$errors, 'logged');
+
+        $this->db()->failSilentNext = 1;
+        self::assertNull(
+            $repo->getTiersForUsersOrUnknown([self::CAUTION, self::TRUSTED]),
+            'a silent failure is unknown, not the stale rows'
+        );
+    }
+
+    public function testAnEmptyBatchIsNotARead(): void
+    {
+        $repo = new ReputationRepository();
+
+        self::assertSame([], $repo->getTiersForUsersOrUnknown([]));
+        self::assertSame([], $repo->getTiersForUsersOrUnknown([0, -3]));
+        self::assertSame(0, $this->db()->queries);
+    }
+
+    /** The DISPLAY batch reader keeps its answer: rows, and [] (rendered neutral) on a failed read. */
+    public function testTheDisplayBatchReaderIsUnchanged(): void
+    {
+        $repo = new ReputationRepository();
+
+        self::assertSame([self::TRUSTED => 'trusted'], $repo->getTiersForUsers([self::TRUSTED, self::NEW_MEMBER]));
+
+        $this->db()->failNext = 1;
+        self::assertSame([], $repo->getTiersForUsers([self::TRUSTED]));
+    }
+
+    public function testTheContributionBonusReaderIsTriState(): void
+    {
+        $this->db()->rows[self::CAUTION]['bonus'] = 4.5;
+        $repo = new ReputationRepository();
+
+        self::assertSame(4.5, $repo->getContributionBonusOrUnknown(self::CAUTION));
+        self::assertSame(0.0, $repo->getContributionBonusOrUnknown(self::NEW_MEMBER), 'no row: 0.0, never unknown');
+
+        $this->db()->failNext = 1;
+        self::assertNull($repo->getContributionBonusOrUnknown(self::TRUSTED), 'the read did not run');
+    }
+
     private function db(): ReputationRowWpdb
     {
         /** @var ReputationRowWpdb $wpdb */

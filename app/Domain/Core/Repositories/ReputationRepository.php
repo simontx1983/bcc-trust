@@ -303,6 +303,20 @@ class ReputationRepository {
     }
 
     /**
+     * F-469: the contribution bonus for a WRITER. 0.0 when there is no row,
+     * as getContributionBonus() answers; NULL means the read did not run,
+     * and the writer skips (a later run retries).
+     */
+    public function getContributionBonusOrUnknown(int $userId): ?float {
+        $record = $this->getByUserIdOrFail($userId);
+        if ($record === false) {
+            return null;
+        }
+
+        return $record !== null ? (float) $record->contribution_bonus : 0.0;
+    }
+
+    /**
      * Get reputation score for a user
      */
     /**
@@ -356,14 +370,60 @@ class ReputationRepository {
      * Bounded by caller (feed page cap = 50; comment page cap = 50).
      * Empty input short-circuits.
      *
+     * ⚠ DISPLAY. A failed read answers [], which callers render as
+     * neutral. A caller that WRITES from the tiers uses
+     * {@see getTiersForUsersOrUnknown()} (F-469).
+     *
      * @param list<int> $userIds
      * @return array<int, string> user_id → reputation_tier
      */
     public function getTiersForUsers(array $userIds): array {
-        if ($userIds === []) {
+        $idList = self::positiveUniqueIds($userIds);
+        if ($idList === []) {
             return [];
         }
 
+        global $wpdb;
+        /** @var list<object{page_owner_id: int|numeric-string, reputation_tier: string}>|null $rows */
+        $rows = $wpdb->get_results($this->tiersForUsersSql($idList));
+
+        return self::mapTierRows($rows ?: []);
+    }
+
+    /**
+     * F-469: getTiersForUsers() for a WRITER (the tier snapshot, the score
+     * syntheses). Same rows, but NULL when the read did not run, read
+     * through bcc-core's ProbesReads::trustedRows() so wpdb's silent
+     * pre-flush failure counts too. A user absent from the map has no row
+     * (neutral), as before. Callers compare `=== null` and skip the write:
+     * a later run retries.
+     *
+     * @param list<int> $userIds
+     * @return array<int, string>|null user_id → reputation_tier
+     */
+    public function getTiersForUsersOrUnknown(array $userIds): ?array {
+        $idList = self::positiveUniqueIds($userIds);
+        if ($idList === []) {
+            return [];
+        }
+
+        $sql  = $this->tiersForUsersSql($idList);
+        $rows = is_string($sql) ? self::trustedRows($sql) : null;
+        if ($rows === null) {
+            \BCC\Core\Log\Logger::error('[ReputationRepository] batched tier read failed; answered as unknown', [
+                'users' => count($idList),
+            ]);
+            return null;
+        }
+
+        return self::mapTierRows($rows);
+    }
+
+    /**
+     * @param array<int|string, mixed> $userIds
+     * @return list<int>
+     */
+    private static function positiveUniqueIds(array $userIds): array {
         $clean = [];
         foreach ($userIds as $id) {
             $intId = (int) $id;
@@ -371,10 +431,16 @@ class ReputationRepository {
                 $clean[$intId] = true;
             }
         }
-        if ($clean === []) {
-            return [];
-        }
-        $idList  = array_keys($clean);
+
+        return array_keys($clean);
+    }
+
+    /**
+     * The one batched tier SELECT, by self-page id (Architecture A).
+     *
+     * @param non-empty-list<int> $idList
+     */
+    private function tiersForUsersSql(array $idList): ?string {
         // Self-page ids (Architecture A); map page_owner_id back to user.
         $pageIds = array_map(
             static fn(int $uid): int => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($uid),
@@ -383,16 +449,26 @@ class ReputationRepository {
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
         global $wpdb;
-        /** @var list<object{page_owner_id: int|numeric-string, reputation_tier: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT page_owner_id, reputation_tier
                FROM {$this->scoreTable}
               WHERE page_id IN ({$placeholders}) AND category_id = 0",
             ...$pageIds
-        ));
+        );
 
+        return is_string($sql) ? $sql : null;
+    }
+
+    /**
+     * @param array<int|string, mixed> $rows
+     * @return array<int, string> user_id → reputation_tier
+     */
+    private static function mapTierRows(array $rows): array {
         $out = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->page_owner_id, $row->reputation_tier)) {
+                continue;
+            }
             $uid = (int) $row->page_owner_id;
             if ($uid > 0) {
                 $out[$uid] = (string) $row->reputation_tier;

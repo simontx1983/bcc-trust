@@ -280,6 +280,46 @@ namespace BCC\Trust\Rank\Tests\Unit {
             self::assertSame(0, \RankSweepWorld::$purges);
         }
 
+        /**
+         * F-469: rows are INSERT IGNORE (first write for a day wins), so a
+         * batch whose tiers could not be read must never be written as the
+         * Neutral default. It throws like a failed write and the cursor stays.
+         */
+        public function testAnUnreadableTierBatchWritesNothingAndKeepsTheCursor(): void
+        {
+            \RankSweepWorld::$userIds = self::users(5);
+            TestSnapshot::$state = ['day' => '2026-11-11', 'after' => 6, 'complete' => false];
+            \RankSweepWorld::$tierReadFails = true;
+
+            try {
+                self::snapshot()->runDailySnapshot();
+                self::fail('an unreadable tier batch must not be written');
+            } catch (\RuntimeException) {
+            }
+
+            self::assertSame([], \RankSweepWorld::$recorded, 'nothing written');
+            self::assertSame(['day' => '2026-11-11', 'after' => 6, 'complete' => false], TestSnapshot::$state);
+            self::assertSame(0, \RankSweepWorld::$purges);
+        }
+
+        /**
+         * F-469: the request-time fallback writes nothing for a tier it could
+         * not read, and does not memoise the miss: the next call writes the
+         * real row.
+         */
+        public function testEnsureTodayRowWritesNothingForAnUnreadableTierAndRetries(): void
+        {
+            $snapshot = self::snapshot();
+
+            \RankSweepWorld::$tierReadFails = true;
+            $snapshot->ensureTodayRow(7);
+            self::assertSame([], \RankSweepWorld::$recorded, 'nothing written');
+
+            \RankSweepWorld::$tierReadFails = false;
+            $snapshot->ensureTodayRow(7);
+            self::assertSame([gmdate('Y-m-d') => [7]], \RankSweepWorld::$recorded, 'retried, not memoised');
+        }
+
         public function testAFailedSnapshotReadKeepsTheCursor(): void
         {
             \RankSweepWorld::$userIds = self::users(5);
