@@ -28,6 +28,8 @@ final class RelationshipLogLockOrderGuardTest extends TestCase
     private const RELEASE = '/AdvisoryLock::release\(\s*(?:ValidatorRelationshipLogRepository|Log)::LOCK_NAME/';
     private const ADVANCE = '/RelationshipLogAnchor::advance\(/';
     private const WRAP    = 'self::underLocks(';
+    /** Calls that take an advisory lock themselves (directly or inside a helper). */
+    private const LOCK_TAKERS = '/AdvisoryLock::acquire\(|createExclusiveClaim\(|ClaimRepository::revoke\(|ClaimService::revokeClaim\(/';
 
     public function testEveryLogAppendHoldsTheVrlLockFirst(): void
     {
@@ -143,5 +145,43 @@ final class RelationshipLogLockOrderGuardTest extends TestCase
             }
         }
         self::assertGreaterThanOrEqual(1, $checked, 'the scan found the known advance paths (it is not scanning nothing)');
+    }
+
+    /**
+     * In a method that takes the vrl lock, NOTHING that takes a lock runs
+     * before it: not a direct AdvisoryLock::acquire(), and not a helper that
+     * takes one inside (createExclusiveClaim(), ClaimRepository::revoke(),
+     * ClaimService::revokeClaim()). Any of those first = out of order.
+     */
+    public function testNoLockTakingHelperRunsBeforeTheVrlLock(): void
+    {
+        $root    = dirname(__DIR__, 2);
+        $checked = 0;
+        $it      = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app', \FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $file) {
+            if (!$file instanceof \SplFileInfo || $file->getExtension() !== 'php') {
+                continue;
+            }
+            $relative = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+            $code     = GateOrder::code($relative);
+            if (preg_match(self::VRL, $code) !== 1) {
+                continue;
+            }
+            preg_match_all('/function\s+(\w+)\s*\(/', $code, $m);
+            foreach ($m[1] as $method) {
+                $body = GateOrder::body($code, $method);
+                if (preg_match(self::VRL, $body, $vrl, PREG_OFFSET_CAPTURE) !== 1) {
+                    continue;
+                }
+                ++$checked;
+                preg_match(self::LOCK_TAKERS, $body, $first, PREG_OFFSET_CAPTURE);
+                self::assertSame(
+                    $vrl[0][1],
+                    $first[0][1] ?? -1,
+                    "{$relative} {$method}(): '" . trim($first[0][0] ?? '') . "' runs before the vrl lock"
+                );
+            }
+        }
+        self::assertGreaterThanOrEqual(2, $checked, 'the scan found the known vrl paths (it is not scanning nothing)');
     }
 }
