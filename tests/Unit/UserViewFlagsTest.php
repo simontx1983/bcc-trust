@@ -51,8 +51,12 @@ namespace BCC\Trust\Core\Services {
          */
         function get_user_meta($userId, string $key = '', bool $single = false)
         {
-            unset($single); // matches the WP signature; not consulted here
-            return \BCC\Trust\Core\Tests\Unit\FlagMetaStore::$meta[(int) $userId . ':' . $key] ?? '';
+            // As WordPress: every row as a list, or the first row ('' for
+            // none) when $single. A list in the store is several rows.
+            $stored = \BCC\Trust\Core\Tests\Unit\FlagMetaStore::$meta[(int) $userId . ':' . $key] ?? null;
+            $rows   = $stored === null ? [] : (is_array($stored) ? array_values($stored) : [$stored]);
+
+            return $single ? ($rows[0] ?? '') : $rows;
         }
     }
 }
@@ -206,6 +210,35 @@ namespace BCC\Trust\Core\Tests\Unit {
                 ['shadow_limited', 'hidden', 'under_review'],
                 UserViewService::resolveFlags(1101)
             );
+        }
+
+        /**
+         * F-518 follow-up: WordPress allows duplicate rows. ANY row that
+         * reads as on sets the flag, whichever row came first, so the
+         * profile agrees with the public index (which reads every row the
+         * same way) and a flagged member is never listed.
+         */
+        public function testResolveFlagsAnOnRowBesideAnOffRowSetsTheFlag(): void
+        {
+            FlagMetaStore::$meta = [
+                '1102:bcc_shadow_limited' => ['0', '1'],
+                '1102:bcc_hidden'         => ['yes', 'no'],
+                '1102:bcc_under_review'   => ['', 'off', 'on'],
+            ];
+            self::assertSame(
+                ['shadow_limited', 'hidden', 'under_review'],
+                UserViewService::resolveFlags(1102)
+            );
+        }
+
+        public function testResolveFlagsOnlyOffRowsAddNoFlag(): void
+        {
+            FlagMetaStore::$meta = [
+                '1103:bcc_shadow_limited' => ['0', 'false'],
+                '1103:bcc_hidden'         => ['', 'no'],
+                '1103:bcc_under_review'   => [],
+            ];
+            self::assertSame([], UserViewService::resolveFlags(1103));
         }
 
         /**

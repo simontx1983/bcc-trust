@@ -522,6 +522,21 @@ final class ProfileAccessTest extends TestCase
         );
     }
 
+    /**
+     * F-518: the app sitemap's public index (PublicIndexRepository) splices
+     * this clause, for viewer 0, into a statement it then passes through
+     * prepare() itself, as it does UserSyncRepository::listingOptOutSql().
+     * A `%` left in either fragment would be read there as a placeholder.
+     */
+    public function testTheSuspensionClauseCarriesNoPercentForASecondPrepare(): void
+    {
+        $GLOBALS['wpdb'] = new \BCC_F182_Wpdb();
+
+        $clause = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->listingSuspensionClause(0);
+
+        self::assertStringNotContainsString('%', $clause['from'] . $clause['where']);
+    }
+
     public function testANonPeepSoUserQueryIsLeftCompletelyAlone(): void
     {
         $GLOBALS['__bcc_profile_access']['viewer_id'] = 7;

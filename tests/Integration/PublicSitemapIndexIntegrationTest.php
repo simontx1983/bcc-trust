@@ -86,6 +86,11 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951829 => ['f518-hide-off-legacy-on', $member, null, [[$hide, '0'], ['bcc_privacy_discovery_optout', '1']], false, "hide '0' but legacy '1', fold not done"],
             951830 => ['f518-hide-on', $member, null, [[$hide, 'on']], false, 'hide stored as "on"'],
             951831 => ['f518-hide-true', $member, null, [[$hide, 'true']], false, 'hide stored as "true"'],
+            // A moderation flag is set when ANY of its rows reads as on, as on
+            // the profile (UserViewService::resolveFlags()), whichever came first.
+            951832 => ['f518-flag-off-then-on', $member, null, [['bcc_hidden', '0'], ['bcc_hidden', '1']], false, 'moderation: an on row after an off row'],
+            951833 => ['f518-flag-on-then-off', $member, null, [['bcc_shadow_limited', 'yes'], ['bcc_shadow_limited', 'no']], false, 'moderation: an on row before an off row'],
+            951834 => ['f518-flag-two-off', $member, null, [['bcc_under_review', '0'], ['bcc_under_review', 'false']], true, 'moderation: only off rows'],
         ];
     }
 
