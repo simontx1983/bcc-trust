@@ -122,7 +122,9 @@ class CapabilityResolver
                 // close, open for the length of the fault. Reading the
                 // count FIRST makes `unavailable` independent of the
                 // receiver: during a fault every receiver gets the same
-                // 503, whatever their status.
+                // 503, whatever their status. (F-469: the trust TIER is read
+                // up front for the same reason, since it too can answer
+                // `unavailable`.)
                 //
                 // ⚠ Create keeps its own order, which the contract
                 // documents as the gate sequence. There is no third party
@@ -175,9 +177,19 @@ class CapabilityResolver
         // is false, so CREATE's order is unchanged and every other caller
         // keeps the documented sequence.
         $custody = null;
+        $tierOk  = null;
         if ($countBeforeStatusGates) {
             $custody = $this->custodyState($userId);
             if ($custody === null) {
+                return CapabilityDecision::denied('unavailable', 'community_custody');
+            }
+            // F-469: the TIER too, for the same reason. An unreadable tier is
+            // `unavailable`, and read after the status gates it would again
+            // depend on the receiver (a suspended or New Member receiver
+            // answers its own reason first). Read here, the value is reused
+            // at the documented position below.
+            $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+            if ($tierOk === null) {
                 return CapabilityDecision::denied('unavailable', 'community_custody');
             }
         }
@@ -193,7 +205,8 @@ class CapabilityResolver
             return CapabilityDecision::denied('new_member', 'community_custody');
         }
         // F-469: an unreadable tier is `unavailable` (503), not below_neutral.
-        $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+        // Already read above on RECEIVE; CREATE reads it here, in order.
+        $tierOk ??= $this->tierAtLeastOrUnknown($userId, 'neutral');
         if ($tierOk === null) {
             return CapabilityDecision::denied('unavailable', 'community_custody');
         }

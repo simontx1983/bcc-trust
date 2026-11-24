@@ -558,6 +558,54 @@ final class CapabilityMatrixTest extends TestCase
     }
 
     /**
+     * ⭐⭐ F-469: THE SAME, DURING A TIER FAULT. An unreadable trust tier is
+     * `unavailable` too, so it is read up front on RECEIVE like the count.
+     * Read after the status gates, a suspended, New Member or in-recovery
+     * receiver would answer its own reason (→ 403 receiver_ineligible) while
+     * an eligible one answered `unavailable` (→ 503): the same probe.
+     *
+     * Asserts SAMENESS across every status variant, not only `unavailable`
+     * on each.
+     */
+    public function testDuringATierFaultEveryReceiverGetsTheSameReason(): void
+    {
+        $eligible = $this->resolver(rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+        self::assertSame('unavailable', $eligible->reason);
+        self::assertFalse($eligible->isAllowed());
+
+        $variants = [
+            'suspended'   => ['ok' => false, 'rank' => 'journeyman', 'rec' => false],
+            'new member'  => ['ok' => true,  'rank' => null,         'rec' => false],
+            'in recovery' => ['ok' => true,  'rank' => 'journeyman', 'rec' => true],
+        ];
+
+        foreach ($variants as $label => $v) {
+            $decision = $this->resolver(
+                notSuspended: $v['ok'],
+                rank: $v['rank'],
+                tier: 'unknown',
+                inRecovery: $v['rec']
+            )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+            self::assertSame(
+                $eligible->reason,
+                $decision->reason,
+                "a tier fault lets the giver tell a receiver who is {$label} from an eligible one"
+            );
+        }
+    }
+
+    /** F-469: and CREATE still keeps its documented order during a tier fault. */
+    public function testCreateKeepsItsDocumentedGateOrderDuringATierFault(): void
+    {
+        $decision = $this->resolver(notSuspended: false, rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertSame('suspended', $decision->reason, "create's documented gate order changed");
+    }
+
+    /**
      * ⚠ THE SCOPE CONTROL: CREATE's order is UNCHANGED. Its reasons are the
      * caller's own, there is no third party to disclose to, and the contract
      * documents the sequence — so a suspended creator still reads
