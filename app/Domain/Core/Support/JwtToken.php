@@ -206,6 +206,7 @@ final class JwtToken
             \BCC\Core\Log\Logger::error('[bcc-trust] token revocation write failed; tokens NOT revoked', [
                 'user_id' => $userId,
             ]);
+            self::countRevokeWriteFailure();
             return null;
         }
         return $next;
@@ -647,9 +648,23 @@ final class JwtToken
                 'user_id'  => $userId,
                 'meta_key' => $metaKey,
             ]);
+            self::countRevokeWriteFailure();
             return false;
         }
         return true;
+    }
+
+    /**
+     * A token revocation write that did not land, counted as well as logged
+     * (`auth_token` / `revoke_write_failed`): the revoke-all version bump, a
+     * sign-out's denylist entry, or a refresh's retired-list entry. Steady
+     * state zero.
+     */
+    private static function countRevokeWriteFailure(): void
+    {
+        if (class_exists(\BCC\Core\Observability\DegradationMetrics::class)) {
+            \BCC\Core\Observability\DegradationMetrics::record('auth_token', 'revoke_write_failed');
+        }
     }
 
     private const DENYLIST_LOCK_PREFIX = 'bcc_jwt_deny_';

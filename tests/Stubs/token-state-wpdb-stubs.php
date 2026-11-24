@@ -40,6 +40,21 @@
 
 declare(strict_types=1);
 
+namespace BCC\Core\Observability {
+    // Records each metric in $GLOBALS['__bcc_ph']['metrics'] as
+    // "subsystem/event". Guarded: a suite that loads another double first
+    // keeps that one.
+    if (!class_exists(DegradationMetrics::class, false)) {
+        final class DegradationMetrics
+        {
+            public static function record(string $subsystem, string $event = 'activation'): void
+            {
+                $GLOBALS['__bcc_ph']['metrics'][] = $subsystem . '/' . $event;
+            }
+        }
+    }
+}
+
 namespace {
     if (!trait_exists('BCC\\Core\\Repositories\\ProbesReads', false)) {
         require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');

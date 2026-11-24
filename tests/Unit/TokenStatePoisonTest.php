@@ -382,6 +382,15 @@ final class TokenStatePoisonTest extends TestCase
 
         self::assertNull(JwtToken::revokeAllForUser(self::USER), 'nothing was revoked, so no version is claimed');
         self::assertSame(['bcc_token_version'], $GLOBALS['__bcc_ph']['failed_updates'] ?? null);
+        self::assertSame(['auth_token/revoke_write_failed'], $GLOBALS['__bcc_ph']['metrics'] ?? null, 'counted, not just logged');
+    }
+
+    public function testARevokeThatLandsCountsNothing(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+
+        self::assertSame(6, JwtToken::revokeAllForUser(self::USER));
+        self::assertArrayNotHasKey('metrics', $GLOBALS['__bcc_ph']);
     }
 
     public function testALogOutWhoseWriteFailsAnswersFalse(): void
@@ -390,6 +399,7 @@ final class TokenStatePoisonTest extends TestCase
         $GLOBALS['__bcc_ph']['fail_update']['bcc_jwt_denylist'] = true;
 
         self::assertFalse(JwtToken::logOut($payload));
+        self::assertSame(['auth_token/revoke_write_failed'], $GLOBALS['__bcc_ph']['metrics'] ?? null);
     }
 
     public function testARetireWhoseWriteFailsAnswersFalse(): void
@@ -398,6 +408,7 @@ final class TokenStatePoisonTest extends TestCase
         $GLOBALS['__bcc_ph']['fail_update']['bcc_jwt_retired'] = true;
 
         self::assertFalse(JwtToken::retireAfterRefresh($payload));
+        self::assertSame(['auth_token/revoke_write_failed'], $GLOBALS['__bcc_ph']['metrics'] ?? null);
     }
 
     /**
@@ -413,5 +424,6 @@ final class TokenStatePoisonTest extends TestCase
 
         self::assertTrue(JwtToken::retireAfterRefresh($payload));
         self::assertArrayNotHasKey('failed_updates', $GLOBALS['__bcc_ph'], 'no write was attempted');
+        self::assertArrayNotHasKey('metrics', $GLOBALS['__bcc_ph'], 'and nothing is counted');
     }
 }
