@@ -34,9 +34,14 @@ if (!defined('ABSPATH')) {
  *  - Just before releasing, the departing author is re-checked: if they
  *    still hold the page through any verified claim (or the read fails), the
  *    page is left alone.
- *  - A page whose author is someone the claims do not name (a manual
- *    reassignment, or a swap this step does not make) is left alone and
- *    reported (page_owner_misaligned), never overwritten.
+ *  - A SWAP (the author is not the desired owner) is made only when the
+ *    author has DEPARTED: they hold no verified claim on the page (re-read)
+ *    AND either they once owned it through a claim that is now revoked (a
+ *    wallet proof superseded their staff approval) or their account is
+ *    gone. It goes through PeepSoIntegration::swapClaimedPageOwner():
+ *    demote, then a compare-and-set of post_author, banned pages skipped.
+ *  - Any other author the claims do not name (a manual reassignment) is
+ *    left alone and reported (page_owner_misaligned), never overwritten.
  *  - One run per page at a time (a per-page advisory lock); a second run
  *    is a no-op. An aligned page appends an `owner_aligned` row.
  *
@@ -93,7 +98,7 @@ final class PageOwnershipAligner
         if ($outcome === self::OUTCOME_ALIGNED || $outcome === self::OUTCOME_NOOP) {
             self::forget($pageId);
         } else {
-            \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'page_owner_' . $outcome);
+            self::recordNotAligned($outcome);
         }
         if ($outcome === self::OUTCOME_ALIGNED) {
             RelationshipLogWriter::appendStandalone([
@@ -145,7 +150,7 @@ final class PageOwnershipAligner
 
         if ($desiredId > 0) {
             if ($author !== 0 && $author !== $desiredId) {
-                return self::OUTCOME_MISALIGNED; // never overwrite an author the claims do not name
+                return self::swapFromDepartedOwner($pageId, $author, $desiredId, $peepso);
             }
             $peepso->onPageClaimed($desiredId, $pageId); // moves post_author only from 0; ensures the owner row
 
@@ -169,6 +174,49 @@ final class PageOwnershipAligner
         BonusService::clearForUnownedPage($pageId);
 
         return self::OUTCOME_ALIGNED;
+    }
+
+    /**
+     * The page is the desired owner's by the claims but still authored by
+     * someone else: swap only from an owner who has DEPARTED (see the class
+     * rules); otherwise report it. Every read fail-closed.
+     *
+     * @param \BCC\Trust\Core\Integration\PeepSoIntegration $peepso
+     */
+    private static function swapFromDepartedOwner(int $pageId, int $author, int $desiredId, object $peepso): string
+    {
+        try {
+            if (ClaimRepository::userHoldsPageThroughAnyClaim($author, $pageId)) {
+                return self::OUTCOME_MISALIGNED; // the author still holds the page through a claim
+            }
+            $departed = get_userdata($author) === false || ClaimRepository::userHadRevokedOwnerRowOnPage($author, $pageId);
+        } catch (RepositoryReadFailure) {
+            return self::OUTCOME_UNKNOWN;
+        }
+        if (!$departed) {
+            return self::OUTCOME_MISALIGNED; // never overwrite an author the claims do not name
+        }
+        $peepso->swapClaimedPageOwner($pageId, $author, $desiredId);
+
+        return self::author($pageId) === $desiredId ? self::OUTCOME_ALIGNED : self::OUTCOME_MISALIGNED;
+    }
+
+    /**
+     * One metric per outcome that left the page unaligned. Each event is a
+     * literal, so the trust↔core metric registration check can see it.
+     */
+    private static function recordNotAligned(string $outcome): void
+    {
+        switch ($outcome) {
+            case self::OUTCOME_LOCKED:
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'page_owner_locked');
+                break;
+            case self::OUTCOME_UNKNOWN:
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'page_owner_unknown');
+                break;
+            default:
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'page_owner_misaligned');
+        }
     }
 
     /** The page's post_author, read past the object cache. */

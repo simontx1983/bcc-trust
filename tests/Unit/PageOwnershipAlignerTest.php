@@ -66,6 +66,66 @@ final class PageOwnershipAlignerTest extends TestCase
         self::assertSame([self::PAGE], A::pending(), 'still queued and listed for the health view');
     }
 
+    /** A wallet proof superseded the staff-approved author: the page moves to the new owner. */
+    public function testADepartedOwnerIsSwappedToTheNewOwner(): void
+    {
+        \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE] = 9;
+        \AlignWorld::$hadRevoked        = true;
+
+        self::assertSame('aligned', A::align(self::PAGE));
+        self::assertSame(['swap:501:9:5'], \AlignWorld::$calls);
+        self::assertSame(5, \AlignWorld::$author[self::PAGE]);
+        self::assertSame('owner_aligned', \AlignWorld::$logRows[0]['action']);
+        self::assertSame([], A::pending());
+    }
+
+    public function testAnAuthorWhoseAccountIsGoneIsSwapped(): void
+    {
+        \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE] = 9;
+        \AlignWorld::$deletedUsers      = [9];
+
+        self::assertSame('aligned', A::align(self::PAGE));
+        self::assertSame(['swap:501:9:5'], \AlignWorld::$calls);
+    }
+
+    public function testAnAuthorWhoStillHoldsThePageIsNeverSwapped(): void
+    {
+        \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE] = 9;
+        \AlignWorld::$hadRevoked        = true;
+        \AlignWorld::$holds             = true;
+
+        self::assertSame('misaligned', A::align(self::PAGE));
+        self::assertSame([], \AlignWorld::$calls);
+        self::assertSame(9, \AlignWorld::$author[self::PAGE]);
+    }
+
+    public function testAnUnreadableDepartureNeverSwaps(): void
+    {
+        \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE] = 9;
+        \AlignWorld::$hadRevoked        = null;
+
+        self::assertSame('unknown', A::align(self::PAGE));
+        self::assertSame([], \AlignWorld::$calls);
+        self::assertContains('validator_relationships/page_owner_unknown', \AlignWorld::$metrics);
+    }
+
+    public function testASkippedSwapIsReportedAndStaysQueued(): void
+    {
+        \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE] = 9;
+        \AlignWorld::$hadRevoked        = true;
+        \AlignWorld::$swapSkips         = true;
+
+        self::assertSame('misaligned', A::align(self::PAGE));
+        self::assertSame(['swap:501:9:5'], \AlignWorld::$calls);
+        self::assertSame(9, \AlignWorld::$author[self::PAGE]);
+        self::assertSame([self::PAGE], A::pending());
+    }
+
     public function testAPageWithNoOwnerLeftIsReleased(): void
     {
         \AlignWorld::$author[self::PAGE] = 5;

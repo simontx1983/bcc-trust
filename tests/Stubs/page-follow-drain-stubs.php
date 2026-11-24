@@ -405,6 +405,19 @@ namespace BCC\Trust\Core\Repositories {
                 return 0;
             }
 
+            /** The compare-and-set author move (`cas_fails` = the write fails). */
+            public static function compareAndSetPageAuthor(int $pageId, int $fromUserId, int $toUserId): ?bool
+            {
+                if (!empty($GLOBALS['__bcc_drain']['cas_fails'])) {
+                    return null;
+                }
+                if (($GLOBALS['__bcc_drain']['post_author'][$pageId] ?? 0) !== $fromUserId) {
+                    return false;
+                }
+                $GLOBALS['__bcc_drain']['post_author'][$pageId] = $toUserId;
+                return true;
+            }
+
             /** @return array{status: ?string}|null */
             public static function claimerPageStatus(int $pageId, int $userId): ?array
             {
@@ -420,6 +433,14 @@ namespace BCC\Trust\Core\Repositories {
 
                 return ['status' => $rows[0] ?? null];
             }
+        }
+    }
+}
+
+namespace {
+    if (!function_exists('clean_post_cache')) {
+        function clean_post_cache(int $postId): void
+        {
         }
     }
 }

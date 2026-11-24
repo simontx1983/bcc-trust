@@ -21,6 +21,11 @@ namespace {
         /** @var bool|null null = the read fails */
         public static ?bool $holds = false;
         public static bool $releaseSkips = false;
+        /** @var bool|null did the author own the page through a now-revoked claim; null = the read fails */
+        public static ?bool $hadRevoked = false;
+        /** @var list<int> user ids whose account is gone */
+        public static array $deletedUsers = [];
+        public static bool $swapSkips = false;
         /** @var array<int, int> page => post_author */
         public static array $author = [];
         /** @var array<string, mixed> */
@@ -40,6 +45,9 @@ namespace {
             self::$desired      = ['state' => 'UNCLAIMED', 'user_id' => null];
             self::$holds        = false;
             self::$releaseSkips = false;
+            self::$hadRevoked   = false;
+            self::$deletedUsers = [];
+            self::$swapSkips    = false;
             self::$author       = [];
             self::$options      = [];
             self::$calls        = [];
@@ -51,6 +59,11 @@ namespace {
 
     function clean_post_cache(int $postId): void
     {
+    }
+
+    function get_userdata(int $userId): object|false
+    {
+        return in_array($userId, \AlignWorld::$deletedUsers, true) ? false : (object) ['ID' => $userId];
     }
 
     function get_post_field(string $field, int $postId): int
@@ -138,6 +151,14 @@ namespace BCC\Trust\Onchain\Repositories {
             return \AlignWorld::$desired;
         }
 
+        public static function userHadRevokedOwnerRowOnPage(int $userId, int $pageId): bool
+        {
+            if (\AlignWorld::$hadRevoked === null) {
+                throw new RepositoryReadFailure(self::class, __FUNCTION__, 'read failed');
+            }
+            return \AlignWorld::$hadRevoked;
+        }
+
         public static function userHoldsPageThroughAnyClaim(int $userId, int $pageId): bool
         {
             if (\AlignWorld::$holds === null) {
@@ -185,6 +206,16 @@ namespace BCC\Trust\Core {
                     if ((\AlignWorld::$author[$pageId] ?? 0) === 0) {
                         \AlignWorld::$author[$pageId] = $userId; // only ever from 0
                     }
+                }
+
+                public function swapClaimedPageOwner(int $pageId, int $fromUserId, int $toUserId): bool
+                {
+                    \AlignWorld::$calls[] = "swap:{$pageId}:{$fromUserId}:{$toUserId}";
+                    if (\AlignWorld::$swapSkips || (\AlignWorld::$author[$pageId] ?? 0) !== $fromUserId) {
+                        return false; // a ban, or the author changed: left in place
+                    }
+                    \AlignWorld::$author[$pageId] = $toUserId;
+                    return true;
                 }
 
                 public function releaseClaimedPage(int $pageId, int $userId): bool
