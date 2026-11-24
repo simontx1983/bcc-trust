@@ -53,6 +53,20 @@ final class WalletDisconnectRevokesClaimsTest extends TestCase
         self::assertSame(['revokeAllForUser', 5, 'wallet_unlinked', 'cosmos1abc', null], $GLOBALS['__f521']['calls'][0]);
     }
 
+    /**
+     * A blank address is no wallet. Matching on it would reach every claim
+     * that stores none (staff-approved), so it is a no-op. Whitespace counts
+     * as blank: the column collation pads, so '' = '   '.
+     */
+    public function testABlankAddressRevokesAndPurgesNothing(): void
+    {
+        foreach (['', '   ', "\t"] as $blank) {
+            BonusService::handleWalletDisconnect(5, 'cosmoshub', $blank);
+        }
+
+        self::assertSame([], $GLOBALS['__f521']['calls']);
+    }
+
     public function testAFailedRevokePurgesNothingAndThrows(): void
     {
         $GLOBALS['__f521']['revoke_throws'] = true;

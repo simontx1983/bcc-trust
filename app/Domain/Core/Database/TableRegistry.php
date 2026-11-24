@@ -354,6 +354,17 @@ final class TableRegistry
     }
 
     /**
+     * The hash-chained, append-only history of validator relationships
+     * (owner links, revokes, cancels, team changes). Written ONLY by
+     * ValidatorRelationshipLogRepository::append().
+     */
+    public static function validatorRelationshipLog(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_validator_relationship_log';
+    }
+
+    /**
      * Rank Phase 8 — formal MISCONDUCT findings (§15). Distinct from
      * clusterFindings() (Phase 4 non-independence determinations).
      */

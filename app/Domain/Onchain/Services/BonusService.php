@@ -71,6 +71,18 @@ final class BonusService
      */
     public static function handleWalletDisconnect(int $userId, string $chainSlug, string $walletAddress): void
     {
+        // A blank address is no wallet: there is nothing to revoke or purge,
+        // and matching on it would reach claims that store no wallet.
+        if (trim($walletAddress) === '') {
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-onchain] handleWalletDisconnect: blank wallet address ignored', [
+                    'user_id' => $userId,
+                    'chain'   => $chainSlug,
+                ]);
+            }
+            return;
+        }
+
         // Resolve chain_id so deletion is scoped to the specific chain.
         // Prevents collateral deletion of claims on other chains sharing
         // the same address format (e.g., Ethereum + Polygon + Arbitrum).

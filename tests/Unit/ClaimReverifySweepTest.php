@@ -140,6 +140,73 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             self::assertSame(['error' => 1], $stats['skipped_reasons']);
         }
 
+        // ── claims no linked wallet proved ──────────────────────────────────
+
+        private static function notWalletProven(int $id, string $method): object
+        {
+            $claim                      = self::validatorClaim($id);
+            $claim->wallet_address      = '';
+            $claim->chain_id            = '0';
+            $claim->chain_slug          = null;
+            $claim->chain_type          = null;
+            $claim->verification_method = $method;
+
+            return $claim;
+        }
+
+        /**
+         * A staff-approved claim stores no wallet ('' / chain 0). It must never
+         * be decided by a wallet match, which would read "link gone" and revoke
+         * every staff row on the first run.
+         */
+        public function testAStaffApprovedClaimIsKeptWithoutAnyWallet(): void
+        {
+            TestSweep::$rows    = [self::notWalletProven(1, 'staff')];
+            TestSweep::$wallets = [5 => [self::wallet('')]];
+
+            $stats = (new TestSweep())->sweep();
+
+            self::assertSame(1, $stats['kept']);
+            self::assertSame([], TestSweep::$wouldRevoke);
+        }
+
+        public function testAProofClaimIsNeverRevokedByTheWalletSweep(): void
+        {
+            TestSweep::$rows    = [self::notWalletProven(1, 'siws'), self::notWalletProven(2, 'solana_identity')];
+            TestSweep::$wallets = [5 => []];
+
+            $stats = (new TestSweep())->sweep();
+
+            self::assertSame([], TestSweep::$wouldRevoke);
+            self::assertSame(['proof_recheck_not_here' => 2], $stats['skipped_reasons']);
+        }
+
+        public function testAnUnknownMethodIsNeverRevokedAndIsCounted(): void
+        {
+            $GLOBALS['__metrics'] = [];
+            if (!class_exists('\\BCC\\Core\\Observability\\DegradationMetrics', false)) {
+                eval('namespace BCC\\Core\\Observability; final class DegradationMetrics { public static function record(string $s, string $e = "activation"): void { $GLOBALS["__metrics"][] = [$s, $e]; } }');
+            }
+            TestSweep::$rows    = [self::notWalletProven(1, 'carrier_pigeon')];
+            TestSweep::$wallets = [5 => []];
+
+            $stats = (new TestSweep())->sweep();
+
+            self::assertSame([], TestSweep::$wouldRevoke);
+            self::assertSame(['unknown_verification_method' => 1], $stats['skipped_reasons']);
+            self::assertSame([['validator_relationships', 'unknown_verification_method']], $GLOBALS['__metrics']);
+        }
+
+        public function testARowWithoutAMethodIsAWalletClaimAsBefore(): void
+        {
+            TestSweep::$rows    = [self::validatorClaim(1)]; // no verification_method property
+            TestSweep::$wallets = [5 => []];
+
+            (new TestSweep())->sweep();
+
+            self::assertSame([[1, 'wallet_link_gone']], TestSweep::$wouldRevoke);
+        }
+
         // ── holder / creator claims ─────────────────────────────────────────
 
         public function testHolderVerdictsMapToKeepRevokeAndUnknown(): void
