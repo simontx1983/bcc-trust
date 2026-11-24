@@ -215,6 +215,20 @@ final class CardsListEndpoint
     }
 
     /**
+     * The page types discovery is asked for: the one a valid `kind` maps
+     * to, or with no kind, every card kind's ({@see cardPageTypes()}).
+     * The caller has already refused an unknown kind.
+     *
+     * @return list<string>
+     */
+    public static function discoveryTypes(string $kind): array
+    {
+        $type = $kind !== '' ? (PageTypeMap::KIND_TO_PAGE_TYPE[$kind] ?? null) : null;
+
+        return $type !== null ? [$type] : self::cardPageTypes();
+    }
+
+    /**
      * The list's pagination, from one discovery result. `total` (structure
      * A, for the Explore tab counts) is the count behind `total_pages`: the
      * same discovery statement's COUNT, with the same filters and the same
@@ -280,20 +294,16 @@ final class CardsListEndpoint
         }
 
         // ── kind → page_type translation ────────────────────────────────
-        // No kind = every CARD kind's page type, never "all page types":
-        // a page type with no card kind (e.g. 'dao') would be counted in
-        // the total and take a slot on the page, then render nothing.
-        $types = self::cardPageTypes();
-        if ($kindParam !== '') {
-            if (!in_array($kindParam, self::ALLOWED_KINDS, true)) {
-                return ApiResponse::error(
-                    'bcc_invalid_request',
-                    'kind must be validator, project, or creator.',
-                    400
-                );
-            }
-            $types = [PageTypeMap::KIND_TO_PAGE_TYPE[$kindParam]];
+        // No kind = every CARD kind's page type, never "all page types"
+        // (see discoveryTypes()).
+        if ($kindParam !== '' && !in_array($kindParam, self::ALLOWED_KINDS, true)) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'kind must be validator, project, or creator.',
+                400
+            );
         }
+        $types = self::discoveryTypes($kindParam);
 
         // ── tier filter validation (no translation since v1.57) ────────
         $reputationTier = '';

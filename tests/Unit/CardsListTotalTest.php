@@ -6,6 +6,7 @@ namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\REST\CardsListEndpoint;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
@@ -30,6 +31,35 @@ final class CardsListTotalTest extends TestCase
         sort($expected);
         self::assertSame($expected, $kinds);
         self::assertNotContains('dao', $types);
+    }
+
+    /** A list with no kind asks for the card page types; a kind asks for its own one. */
+    public function testTheDiscoveryTypesFollowTheKind(): void
+    {
+        self::assertSame(CardsListEndpoint::cardPageTypes(), CardsListEndpoint::discoveryTypes(''));
+        self::assertSame(['validator'], CardsListEndpoint::discoveryTypes('validator'));
+        self::assertSame(['builder'], CardsListEndpoint::discoveryTypes('project'));
+        self::assertSame(['nft'], CardsListEndpoint::discoveryTypes('creator'));
+    }
+
+    /**
+     * Wiring (source-level, comments removed): the route refuses an unknown
+     * kind, then takes its discovery types from discoveryTypes(), hands them
+     * to discovery, and builds its pagination with pagination(). A route that
+     * built its own "all types" list or its own pagination would drop out of
+     * the order below.
+     */
+    public function testTheRouteUsesTheTypesAndThePaginationItIsTestedWith(): void
+    {
+        $body = GateOrder::body(GateOrder::code('app/Domain/Core/REST/CardsListEndpoint.php'), 'handle');
+
+        GateOrder::assertOrder($body, [
+            "'kind must be validator, project, or creator.'",
+            '$types = self::discoveryTypes($kindParam);',
+            "'types'              => \$types,",
+            "'pagination' => self::pagination(\$page, \$perPage, \$discoveryResult),",
+        ], 'GET /cards: kind check, discovery types, discovery, pagination');
+        self::assertSame(1, substr_count($body, '$types ='), 'one source for the discovery types');
     }
 
     public function testThePaginationCarriesDiscoverysTotal(): void
