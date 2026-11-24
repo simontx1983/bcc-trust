@@ -75,6 +75,15 @@ final class HallsEndpoint
                     'type'              => 'string',
                     'sanitize_callback' => 'sanitize_text_field',
                 ],
+                'q' => [
+                    'required'          => false,
+                    'type'              => 'string',
+                    // A longer q is a 400 before the handler runs; the
+                    // handler checks again (same wiring as GET /cards).
+                    'maxLength'         => CardsListEndpoint::Q_MAX_LENGTH,
+                    'validate_callback' => 'rest_validate_request_arg',
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
             ],
         ]);
 
@@ -161,6 +170,21 @@ final class HallsEndpoint
         $pageSize = (int) $request->get_param('page_size');
         $chainRaw = $request->get_param('chain');
         $chain    = is_string($chainRaw) && $chainRaw !== '' ? $chainRaw : null;
+        $query    = (string) $request->get_param('q');
+
+        // A name search is the expensive call, so only searches are
+        // throttled, with GET /cards's numbers. Before any query work.
+        if ($query !== '' && !\BCC\Core\Security\Throttle::allow('halls_list', CardsListEndpoint::Q_RATE_LIMIT, CardsListEndpoint::Q_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many searches. Please wait a few seconds.', 429);
+        }
+        // Defence in depth behind the arg's maxLength.
+        if (mb_strlen($query) > CardsListEndpoint::Q_MAX_LENGTH) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('q must be at most %d characters.', CardsListEndpoint::Q_MAX_LENGTH),
+                400
+            );
+        }
 
         if ($page < 1) {
             $page = 1;
@@ -173,7 +197,8 @@ final class HallsEndpoint
             $viewerId,
             $page,
             $pageSize,
-            $chain
+            $chain,
+            $query
         );
 
         $response = ApiResponse::ok($payload);
