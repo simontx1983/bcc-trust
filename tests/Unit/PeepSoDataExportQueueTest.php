@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Security\PeepSoDataExportQueue;
+use BCC\Trust\Tests\Support\BootFileScope;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -63,6 +64,20 @@ final class PeepSoDataExportQueueTest extends TestCase
                 'admin_init'              => [[PeepSoDataExportQueue::class, 'refuseQueueRun'], 1],
             ],
             self::hooks()
+        );
+    }
+
+    /**
+     * bcc-trust.php registers this at boot: one call at file scope, so both
+     * hooks exist before `admin_init` and before PeepSo builds its Queues
+     * screen.
+     */
+    public function testItRegistersAtBoot(): void
+    {
+        self::assertSame(
+            [true],
+            BootFileScope::calls('bcc-trust.php', '\\BCC\\Trust\\Core\\Security\\PeepSoDataExportQueue', 'register'),
+            'exactly one register() call, at file scope'
         );
     }
 
