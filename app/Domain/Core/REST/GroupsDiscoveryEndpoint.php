@@ -127,6 +127,17 @@ final class GroupsDiscoveryEndpoint
     }
 
     /**
+     * `kind`: only the groups of that type, keyed and ordered as they came.
+     *
+     * @param array<int, GroupContext> $contexts
+     * @return array<int, GroupContext>
+     */
+    public static function filterContextsByKind(array $contexts, GroupType $kind): array
+    {
+        return array_filter($contexts, static fn(GroupContext $c): bool => $c->type === $kind);
+    }
+
+    /**
      * @param WP_REST_Request<array<string, mixed>> $request
      */
     public function getList(WP_REST_Request $request): WP_REST_Response
@@ -178,10 +189,7 @@ final class GroupsDiscoveryEndpoint
         $contexts = $resolver->forManyGroups($candidateIds);
 
         if ($kind !== null) {
-            $contexts = array_filter(
-                $contexts,
-                static fn(GroupContext $c): bool => $c->type === $kind
-            );
+            $contexts = self::filterContextsByKind($contexts, $kind);
             if ($contexts === []) {
                 return $this->respond([], $page, $pageSize, 0, $mineOnly);
             }

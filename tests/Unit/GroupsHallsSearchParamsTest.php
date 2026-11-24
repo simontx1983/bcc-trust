@@ -6,7 +6,9 @@ namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\REST\GroupsDiscoveryEndpoint;
 use BCC\Trust\Core\REST\HallsEndpoint;
+use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -155,6 +157,25 @@ final class GroupsHallsSearchParamsTest extends TestCase
             'kind must be one of: ' . implode(', ', array_map(static fn (GroupType $t): string => $t->value, GroupType::cases())) . '.',
             $res['message']
         );
+    }
+
+    /** `kind` keeps only the groups of that type, keyed and ordered as they came. */
+    public function testAKindKeepsOnlyTheGroupsOfThatType(): void
+    {
+        $ctx = static fn (int $id, GroupType $type): GroupContext => new GroupContext($id, $type, PeepSoPrivacy::Open, false, null, null, null);
+        $contexts = [
+            31 => $ctx(31, GroupType::Hall),
+            12 => $ctx(12, GroupType::Nft),
+            47 => $ctx(47, GroupType::Hall),
+            5  => $ctx(5, GroupType::User),
+            9  => $ctx(9, GroupType::Validator),
+        ];
+
+        self::assertSame([31, 47], array_keys(GroupsDiscoveryEndpoint::filterContextsByKind($contexts, GroupType::Hall)));
+        self::assertSame([12], array_keys(GroupsDiscoveryEndpoint::filterContextsByKind($contexts, GroupType::Nft)));
+        self::assertSame([9], array_keys(GroupsDiscoveryEndpoint::filterContextsByKind($contexts, GroupType::Validator)));
+        self::assertSame([5], array_keys(GroupsDiscoveryEndpoint::filterContextsByKind($contexts, GroupType::User)));
+        self::assertSame([], GroupsDiscoveryEndpoint::filterContextsByKind($contexts, GroupType::System));
     }
 
     /** The accepted values are exactly the group types cards and search use. */
