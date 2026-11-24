@@ -255,6 +255,157 @@ final class SecretPagesOnMemberListsIntegrationTest extends TestCase
         self::assertSame(count($pages), $data['total']);
     }
 
+    /**
+     * F-571: the hidden vouches are left out IN SQL, so a limit is filled
+     * with vouches the viewer may see. Newest first the member vouched for
+     * OPEN, SECRET, then the other member; at limit 2 a stranger gets OPEN
+     * and the member, not OPEN alone.
+     */
+    public function testTheVouchesTabFillsItsLimitWithWhatTheViewerMaySee(): void
+    {
+        $this->viewAs(self::STRANGER);
+
+        $data  = $this->ok($this->call('endorsements', ['limit' => 2]));
+        $shown = array_map(static fn (array $item): int => (int) $item['page_id'], $data['items']);
+
+        self::assertSame([self::OPEN, MemberSelfPageService::selfPageId(self::SUBJECT)], $shown);
+        self::assertSame(2, $data['total']);
+    }
+
+    /** F-571: a vouch for a member is titled with the name OTHERS see. */
+    public function testAVouchForAMemberWhoHidesTheirRealNameShowsTheirHandle(): void
+    {
+        global $wpdb;
+        $wpdb->delete($wpdb->users, ['ID' => self::SUBJECT]);
+        self::assertNotFalse($wpdb->insert($wpdb->users, ['ID' => self::SUBJECT, 'user_login' => 'f528_subject', 'display_name' => 'Subject Realname']), $wpdb->last_error);
+        foreach (['bcc_handle' => 'f528subject', 'bcc_privacy_real_name_hidden' => '1'] as $key => $value) {
+            self::assertNotFalse($wpdb->insert($wpdb->usermeta, ['user_id' => self::SUBJECT, 'meta_key' => $key, 'meta_value' => $value]), $wpdb->last_error);
+        }
+
+        try {
+            $this->viewAs(self::STRANGER);
+            $titles = [];
+            foreach ($this->ok($this->call('endorsements'))['items'] as $item) {
+                $titles[(int) $item['page_id']] = $item['page_title'];
+            }
+
+            self::assertSame('@f528subject', $titles[MemberSelfPageService::selfPageId(self::SUBJECT)] ?? null);
+            self::assertNotContains('Subject Realname', $titles);
+        } finally {
+            $wpdb->delete($wpdb->users, ['ID' => self::SUBJECT]);
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->usermeta} WHERE user_id = %d", self::SUBJECT));
+        }
+    }
+
+    /**
+     * @return array<string, array{int, int, int}> viewer => [reviews_written, disputes_signed]
+     *         (reviews_written counts every active vote, as countByVoter does)
+     */
+    public static function countViewers(): array
+    {
+        return [
+            'the member themselves'               => [self::AUTHOR, 4, 3],
+            'a stranger'                          => [self::STRANGER, 2, 1],
+            'anonymous'                           => [0, 2, 1],
+            'a member of one of the secret pages' => [self::PAGE_MEMBER, 3, 2],
+        ];
+    }
+
+    /**
+     * F-571: the profile's own counts (the summary's `engagement` and the
+     * profile `counts` block) leave out what the lists leave out.
+     */
+    #[DataProvider('countViewers')]
+    public function testTheProfileCountsLeaveOutTheSecretPagesTheViewerMayNotSee(int $viewer, int $reviews, int $disputes): void
+    {
+        $this->viewAs($viewer);
+        $views = \BCC\Trust\Core\Plugin::instance()->userViewService();
+
+        $summary = $views->getSummary(self::AUTHOR, $viewer);
+        self::assertIsArray($summary);
+        self::assertSame([$reviews, $disputes], [$summary['engagement']['reviews_written'], $summary['engagement']['disputes_signed']], 'engagement');
+
+        $user = $views->getUser(self::AUTHOR, $viewer);
+        self::assertIsArray($user);
+        self::assertSame([$reviews, $disputes], [$user['counts']['reviews_written'], $user['counts']['disputes_signed']], 'profile counts');
+    }
+
+    /**
+     * F-571: a site admin sees every count. The exemption is the REQUEST's
+     * user's: a summary the admin's request builds FOR someone else still
+     * leaves out what that viewer may not see.
+     */
+    public function testAnAdminSeesEveryCountButCannotLendTheExemption(): void
+    {
+        $this->viewAs(self::ADMIN);
+        $GLOBALS['__bcc_test_caps'] = ['manage_options'];
+        $views = \BCC\Trust\Core\Plugin::instance()->userViewService();
+
+        $asAdmin = $views->getSummary(self::AUTHOR, self::ADMIN);
+        self::assertSame([4, 3], [$asAdmin['engagement']['reviews_written'] ?? null, $asAdmin['engagement']['disputes_signed'] ?? null], 'the admin, reading as themselves');
+
+        $forStranger = $views->getSummary(self::AUTHOR, self::STRANGER);
+        self::assertSame([2, 1], [$forStranger['engagement']['reviews_written'] ?? null, $forStranger['engagement']['disputes_signed'] ?? null], 'built for a stranger');
+    }
+
+    /** F-571: a secret-page read that fails shows 0, never a count that includes hidden pages. */
+    public function testAFailedSecretPageReadShowsTheCountsAsZero(): void
+    {
+        $this->viewAs(self::STRANGER);
+        $GLOBALS['wpdb']->failQueriesMatching = self::REVIEW_SECRET_READ;
+
+        $summary = \BCC\Trust\Core\Plugin::instance()->userViewService()->getSummary(self::AUTHOR, self::STRANGER);
+
+        self::assertIsArray($summary);
+        self::assertSame(0, $summary['engagement']['reviews_written']);
+        self::assertSame(0, $summary['engagement']['disputes_signed']);
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures);
+    }
+
+    private const VOUCH_SECRET_READ ='/SELECT DISTINCT a\.target_id\s+FROM\s+`?\S*bcc_trust_attestations/';
+    private const VOUCHES_UNAVAILABLE = 'Vouches are temporarily unavailable. Please try again.';
+
+    /** F-571: the vouches' secret-page read failing is the tab's 503, never the unfiltered list. */
+    public function testAFailedVouchSecretPageReadIsThe503(): void
+    {
+        $this->viewAs(self::STRANGER);
+        $GLOBALS['wpdb']->failQueriesMatching = self::VOUCH_SECRET_READ;
+
+        $response = $this->call('endorsements');
+
+        self::assertSame(503, $response->get_status());
+        self::assertSame(self::VOUCHES_UNAVAILABLE, $response->get_data()['error']['message'] ?? null);
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the vouch secret-page read');
+    }
+
+    /** F-571: over the cap the vouches tab answers 503 too, logged and counted. */
+    public function testOverTheCapTheVouchesTabFailsClosed(): void
+    {
+        // The fixture vouches for one secret page: CAP more puts it one over.
+        $this->seedBulkSecretPages(PageAccess::HIDDEN_LIST_CAP);
+        $this->viewAs(self::STRANGER);
+        $before = \BCC\Core\Observability\DegradationMetrics::readEvent('page_privacy', 'member_list_over_cap', time());
+
+        $response = $this->call('endorsements', ['limit' => 50]);
+
+        self::assertSame(503, $response->get_status());
+        self::assertSame(self::VOUCHES_UNAVAILABLE, $response->get_data()['error']['message'] ?? null);
+        self::assertSame($before + 1, \BCC\Core\Observability\DegradationMetrics::readEvent('page_privacy', 'member_list_over_cap', time()));
+    }
+
+    /** F-571: site admins see every page and never pay the vouches' secret-page read. */
+    public function testAnAdminNeverPaysTheVouchSecretPageRead(): void
+    {
+        $this->viewAs(self::ADMIN);
+        $GLOBALS['__bcc_test_caps']           = ['manage_options'];
+        $GLOBALS['wpdb']->failQueriesMatching = self::VOUCH_SECRET_READ;
+
+        $data = $this->ok($this->call('endorsements'));
+
+        self::assertSame(3, $data['total']);
+        self::assertSame(0, $GLOBALS['wpdb']->injectedFailures);
+    }
+
     // ── Failing closed ───────────────────────────────────────────────────
 
     /** @return array<string, array{string, string}> */
@@ -499,13 +650,22 @@ final class SecretPagesOnMemberListsIntegrationTest extends TestCase
         }
     }
 
-    /** $count more secret pages, each with the member's review and dispute. */
+    /** $count more secret pages, each with the member's review, dispute and vouch. */
     private function seedBulkSecretPages(int $count): void
     {
+        global $wpdb;
         for ($i = 1; $i <= $count; $i++) {
             $pageId = self::BULK_BASE + $i;
             $this->insertPage($pageId, ['2']);
             $this->insertDispute($pageId, $this->insertReview($pageId, 100 + $i), 100 + $i);
+            self::assertNotFalse($wpdb->insert(TableRegistry::trustAttestations(), [
+                'attestor_user_id' => self::AUTHOR,
+                'target_kind'      => 'project_card',
+                'target_id'        => $pageId,
+                'kind'             => 'vouch',
+                'weight_at_time'   => 1.0,
+                'created_at'       => gmdate('Y-m-d H:i:s', time() - 60 * (100 + $i)),
+            ]), $wpdb->last_error);
         }
     }
 

@@ -524,16 +524,20 @@ final class UserViewService
                 : $this->reactionRepo->countReceivedByUser($userId, $solidId);
         }
 
+        // F-571: the single-member counts leave out the SECRET pages this
+        // viewer may not see, as the member's Reviews and Disputes lists do.
         if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
             $reviewsWritten = $prefetched['reviews_written_counts'][$userId] ?? 0;
         } else {
-            $reviewsWritten = $this->voteRepo->countByVoter($userId);
+            $hidden         = $this->secretPagesHiddenFrom($userId, $viewerId);
+            $reviewsWritten = $hidden === null ? 0 : $this->voteRepo->countByVoter($userId, $hidden['votes']);
         }
 
         if ($prefetched !== null && isset($prefetched['disputes_signed_counts'])) {
             $disputesSigned = $prefetched['disputes_signed_counts'][$userId] ?? 0;
         } else {
-            $disputesSigned = DisputeRepository::countByReporter($userId);
+            $hidden         = $this->secretPagesHiddenFrom($userId, $viewerId);
+            $disputesSigned = $hidden === null ? 0 : DisputeRepository::countByReporter($userId, null, $hidden['disputes']);
         }
 
         // Verifications. X / GitHub are batched-prefetched maps of
@@ -1131,6 +1135,68 @@ final class UserViewService
     // Counts
     // ──────────────────────────────────────────────────────────────────
 
+    /** @var array<string, array{votes: list<int>, disputes: list<int>}|null> */
+    private array $hiddenSecretPages = [];
+
+    /**
+     * F-571: the SECRET pages among $userId's reviews and disputes that
+     * $viewerId may not see. The single-member counts leave them out, as the
+     * member's Reviews and Disputes lists do (UserReviewsService /
+     * UserDisputesService, F-528), so a chip agrees with its list.
+     *
+     * None for the member themselves, or for a site admin, who see every
+     * page. ⚠ The admin exemption is the REQUEST's user's: a viewer who is
+     * not the request's user is never treated as exempt, so a summary built
+     * for someone else cannot borrow the requester's rights.
+     *
+     * Null when it could not be read, or the member is over
+     * PageAccess::HIDDEN_LIST_CAP (logged and counted there): the caller
+     * shows 0 rather than a count that includes hidden pages. A whole
+     * profile cannot answer 503 over one count. Read once per member and
+     * viewer per request. Rationale: F-571 (private tracker).
+     *
+     * @return array{votes: list<int>, disputes: list<int>}|null
+     */
+    private function secretPagesHiddenFrom(int $userId, int $viewerId): ?array
+    {
+        $none = ['votes' => [], 'disputes' => []];
+        if ($viewerId > 0 && $viewerId === $userId) {
+            return $none;
+        }
+        if ($viewerId > 0 && $viewerId === (int) get_current_user_id()
+            && \BCC\Trust\Core\Support\ProfileAccess::viewerIsExemptFromVisibility()) {
+            return $none;
+        }
+
+        $key = $userId . ':' . $viewerId;
+        if (array_key_exists($key, $this->hiddenSecretPages)) {
+            return $this->hiddenSecretPages[$key];
+        }
+
+        try {
+            $hidden = [
+                'votes'    => \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
+                    $this->voteRepo->findSecretPageIdsReviewedBy($userId),
+                    $viewerId,
+                    false
+                ),
+                'disputes' => \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
+                    DisputeRepository::findSecretPageIdsDisputedBy($userId),
+                    $viewerId,
+                    false
+                ),
+            ];
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::error('[UserViewService] secret-page read failed, member counts shown as 0', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            $hidden = null;
+        }
+
+        return $this->hiddenSecretPages[$key] = $hidden;
+    }
+
     /**
      * §K2: when the viewer isn't the owner, hidden categories collapse
      * to 0 in the publicly-visible counts. Owner always sees the truth
@@ -1172,16 +1238,22 @@ final class UserViewService
         // repository sources (countByVoters / countByReporters /
         // countReceivedByUsers with the same solid-id gate), single-user
         // fallbacks otherwise. Same pattern as getSummary's signal blocks.
+        // F-571: the single-member counts leave out the SECRET pages this
+        // viewer may not see (secretPagesHiddenFrom()), so the chip agrees
+        // with the member's Reviews and Disputes lists.
+        $hidden = ($prefetched !== null && isset($prefetched['reviews_written_counts'], $prefetched['disputes_signed_counts']))
+            ? ['votes' => [], 'disputes' => []]
+            : $this->secretPagesHiddenFrom($userId, $viewerId);
         $reviewsWritten = ($prefetched !== null && isset($prefetched['reviews_written_counts']))
             ? (int) ($prefetched['reviews_written_counts'][$userId] ?? 0)
-            : (int) $this->voteRepo->countByVoter($userId);
+            : ($hidden === null ? 0 : (int) $this->voteRepo->countByVoter($userId, $hidden['votes']));
         // disputes_signed: disputes this user has FILED, read from the
         // live bcc_disputes table keyed on reporter_id (the filer). For
         // a member, reporter_id = their user id (they own the self-page
         // being defended), so the per-user count is direct.
         $disputesSigned = ($prefetched !== null && isset($prefetched['disputes_signed_counts']))
             ? (int) ($prefetched['disputes_signed_counts'][$userId] ?? 0)
-            : DisputeRepository::countByReporter($userId);
+            : ($hidden === null ? 0 : DisputeRepository::countByReporter($userId, null, $hidden['disputes']));
 
         // §C2 single-graph rule: watchlist IS the follow set;
         // watching_size equals the following count by design. Do not
