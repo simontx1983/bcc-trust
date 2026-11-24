@@ -96,7 +96,7 @@ final class ValidatorRelationshipService
             return self::refused($stepUpError, 403);
         }
 
-        return self::underLocks($validatorId, static function () use ($staffId, $pageId, $userId, $validatorId, $evidenceType, $evidenceNote, $evidenceRef, $stepUpId): array {
+        $result = self::underLocks($validatorId, static function () use ($staffId, $pageId, $userId, $validatorId, $evidenceType, $evidenceNote, $evidenceRef, $stepUpId): array {
             if (!ValidatorStepUpService::consumeInTransaction($staffId, $stepUpId, 'link_owner', $pageId, $userId, 'owner')) {
                 throw new RelationshipRefusal('step_up_invalid', 403);
             }
@@ -148,6 +148,12 @@ final class ValidatorRelationshipService
 
             return ['ok' => true, 'link_id' => (int) $done['link_id']];
         });
+
+        if (($result['ok'] ?? false) !== true) {
+            return self::refused((string) ($result['reason'] ?? 'unavailable'), (int) ($result['status'] ?? 503));
+        }
+
+        return ['ok' => true, 'link_id' => (int) ($result['link_id'] ?? 0)];
     }
 
     /**
@@ -203,7 +209,7 @@ final class ValidatorRelationshipService
             return self::refused($stepUpError, 403);
         }
 
-        return self::underLocks($validatorId, static function () use ($staffId, $pageId, $linkId, $reason, $note, $stepUpId, $stepUpAction, $logAction): array {
+        $result = self::underLocks($validatorId, static function () use ($staffId, $pageId, $linkId, $reason, $note, $stepUpId, $stepUpAction, $logAction): array {
             $link = null;
             foreach (ClaimRepository::ownerClaimsForPageStrict($pageId) as $owner) {
                 if ($owner['claim_id'] === $linkId) {
@@ -250,6 +256,12 @@ final class ValidatorRelationshipService
 
             return ['ok' => true];
         });
+
+        if (($result['ok'] ?? false) !== true) {
+            return self::refused((string) ($result['reason'] ?? 'unavailable'), (int) ($result['status'] ?? 503));
+        }
+
+        return ['ok' => true];
     }
 
     /**
@@ -259,7 +271,7 @@ final class ValidatorRelationshipService
      *
      * @param callable(): array<string, mixed> $work returns at least ['appended' => array{seq: int, row_hash: string}]
      * @param callable(array<string, mixed>): array<string, mixed> $after
-     * @return array<string, mixed>
+     * @return array<string, mixed> $after's result, or a refusal ['ok' => false, 'reason', 'status']
      */
     private static function underLocks(int $validatorId, callable $work, callable $after): array
     {
