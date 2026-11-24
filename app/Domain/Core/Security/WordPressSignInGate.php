@@ -90,7 +90,8 @@ if (!defined('ABSPATH')) {
  */
 final class WordPressSignInGate
 {
-    public const CAPABILITY = 'manage_options';
+    /** The admin capability. BearerAuth owns the one literal every admin check reads. */
+    public const CAPABILITY = BearerAuth::ADMIN_CAPABILITY;
 
     /**
      * The last word: after core's password checks (20), its cookie re-login
