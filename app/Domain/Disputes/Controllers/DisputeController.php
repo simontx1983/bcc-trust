@@ -99,7 +99,7 @@ class DisputeController
         register_rest_route(self::NS, '/disputes/(?P<id>\d+)/resolve', [
             'methods'             => WP_REST_Server::CREATABLE,
             'callback'            => [$this, 'force_resolve'],
-            'permission_callback' => function () { return current_user_can('manage_options'); },
+            'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
             'args'                => [
                 'decision' => ['required' => true, 'type' => 'string', 'enum' => ['accepted', 'rejected']],
             ],
@@ -109,7 +109,7 @@ class DisputeController
         register_rest_route(self::NS, '/disputes/health', [
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [$this, 'health'],
-            'permission_callback' => function () { return current_user_can('manage_options'); },
+            'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
         ]);
     }
 
@@ -269,7 +269,7 @@ class DisputeController
         $page_id         = (int) $req->get_param('page_id');
         $current_user_id = get_current_user_id();
 
-        if (!Permissions::owns_page($page_id, $current_user_id) && !current_user_can('manage_options')) {
+        if (!Permissions::owns_page($page_id, $current_user_id) && !\BCC\Trust\Core\Support\BearerAuth::requireAdmin()) {
             return $this->error('forbidden', 'Access denied.', 403);
         }
 
@@ -324,10 +324,10 @@ class DisputeController
         // "show me disputes I filed on THIS page" — which only makes sense if
         // they own the page. Without this gate an attacker could probe any
         // page_id to learn whether they have disputes against it. Admins
-        // bypass via manage_options.
+        // bypass via BearerAuth::requireAdmin().
         if ($page_id !== null && $page_id > 0
             && !Permissions::owns_page($page_id, $userId)
-            && !current_user_can('manage_options')
+            && !\BCC\Trust\Core\Support\BearerAuth::requireAdmin()
         ) {
             return $this->error('forbidden', 'You do not own this page.', 403);
         }

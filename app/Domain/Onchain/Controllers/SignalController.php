@@ -24,7 +24,7 @@ final class SignalController
         register_rest_route('bcc/v1', '/onchain/(?P<page_id>\d+)/refresh', [
             'methods'             => \WP_REST_Server::CREATABLE,
             'callback'            => [self::class, 'refresh'],
-            'permission_callback' => function () { return current_user_can('manage_options'); },
+            'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
         ]);
     }
 
