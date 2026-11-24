@@ -1102,6 +1102,9 @@ class VoteRepository {
      * carries the long-form review body when present (reviews are the
      * §D2 long-form variant of votes — bare votes leave it empty).
      *
+     * @param list<int> $excludePageIds pages whose reviews this read leaves
+     *        out (F-528: the secret pages the viewer may not see); pass the
+     *        same list to {@see countReviewsByVoter()} so the total agrees
      * @return list<object{
      *   id: int|numeric-string,
      *   page_id: int|numeric-string,
@@ -1114,12 +1117,17 @@ class VoteRepository {
      *   page_type: string|null
      * }>
      */
-    public function findByVoterPaginated(int $voterId, int $limit, int $offset): array
+    public function findByVoterPaginated(int $voterId, int $limit, int $offset, array $excludePageIds = []): array
     {
         if ($voterId <= 0) {
             return [];
         }
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND v.page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -1136,12 +1144,10 @@ class VoteRepository {
                  LEFT JOIN {$wpdb->posts} p ON v.page_id = p.ID
                  WHERE v.voter_user_id = %d
                    AND v.status        = 1
-                   AND " . $this->hiddenReviewExclusion('v') . "
+                   AND " . $this->hiddenReviewExclusion('v') . $notIn . "
                  ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
-                $voterId,
-                $limit,
-                $offset
+                ...[$voterId, ...$exclude, $limit, $offset]
             )
         );
 
@@ -1250,19 +1256,74 @@ class VoteRepository {
      * feeds vote weight, quests and profile stats, where whether a hidden
      * review should still count is an open product question (scoring is
      * out of F-55's scope).
+     *
+     * @param list<int> $excludePageIds as {@see findByVoterPaginated()}
      */
-    public function countReviewsByVoter(int $voterId): int
+    public function countReviewsByVoter(int $voterId, array $excludePageIds = []): int
     {
         if ($voterId <= 0) {
             return 0;
         }
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND v.page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
+
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table} v
              WHERE v.voter_user_id = %d
                AND v.status        = 1
-               AND " . $this->hiddenReviewExclusion('v'),
-            $voterId
+               AND " . $this->hiddenReviewExclusion('v') . $notIn,
+            ...[$voterId, ...$exclude]
+        ));
+    }
+
+    /**
+     * The SECRET pages this member has an active review of, each once
+     * (F-528). bcc-core's shared rule decides what is secret
+     * (PeepSoPagePrivacy::notSecretSql()), so this agrees with
+     * PageAccess. A member self-page has no post and is never returned.
+     *
+     * The member's Reviews list passes these through
+     * PageAccess::hiddenAmong() for a viewer other than the member, and
+     * leaves the ones that viewer may not see out of its rows and total.
+     * Only secret pages are read, so the list stays small for every member.
+     *
+     * ⚠ FAILS CLOSED: a read that did not run, or a member with more than
+     * PageAccess::HIDDEN_LIST_CAP secret pages, THROWS, and the list
+     * answers 503. An empty answer would show every review.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public function findSecretPageIdsReviewedBy(int $voterId): array
+    {
+        if ($voterId <= 0) {
+            return [];
+        }
+        global $wpdb;
+
+        $notSecret = \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('v.page_id');
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT DISTINCT v.page_id
+               FROM {$this->table} v
+              WHERE v.voter_user_id = %d
+                AND v.status        = 1
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            $voterId,
+            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
+        ), __FUNCTION__, true);
+
+        if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $voterId);
+        }
+
+        return self::positiveIds(array_map(
+            static fn (object $row): int => (int) ($row->page_id ?? 0),
+            $rows
         ));
     }
 

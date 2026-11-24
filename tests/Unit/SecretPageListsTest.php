@@ -172,6 +172,35 @@ final class SecretPageListsTest extends TestCase
         self::assertSame([], PageAccess::visibleAmong([self::OPEN, self::SECRET], self::VIEWER));
     }
 
+    // ── PageAccess::hiddenAmong (F-528) ─────────────────────────────────
+
+    /** @param list<string> $statuses */
+    #[DataProvider('membership')]
+    public function testHiddenAmongIsExactlyWhatVisibleAmongLeavesOut(array $statuses, bool $kept): void
+    {
+        $GLOBALS['__bcc_spl']['statuses'][self::SECRET][self::VIEWER] = $statuses;
+
+        $hidden = PageAccess::hiddenAmong([self::SECRET, self::OPEN, self::SECRET, 0, self::OTHER], self::VIEWER);
+
+        self::assertSame($kept ? [] : [self::SECRET], $hidden, 'each hidden id once, no non-positive id');
+    }
+
+    public function testHiddenAmongKeepsInputOrderAndHidesEveryUnreadablePage(): void
+    {
+        $GLOBALS['__bcc_spl']['fail_batch']  = true;
+        $GLOBALS['__bcc_spl']['fail_single'] = true;
+
+        self::assertSame([self::OTHER, self::OPEN], PageAccess::hiddenAmong([self::OTHER, self::OPEN], self::VIEWER));
+    }
+
+    public function testAnAdminHasNothingHiddenWithoutARead(): void
+    {
+        $GLOBALS['__bcc_profile_access']['is_admin'] = true;
+
+        self::assertSame([], PageAccess::hiddenAmong([self::OPEN, self::SECRET], self::VIEWER));
+        self::assertSame([], $this->db->queries);
+    }
+
     // ── the watchlist: a followed user's page, as the viewer sees it ────
 
     public function testAnOwnerWhoseOnlyPageIsSecretReadsExactlyLikeAUserWithNoPage(): void

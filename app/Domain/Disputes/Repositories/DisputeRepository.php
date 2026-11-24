@@ -715,10 +715,16 @@ class DisputeRepository
 
     /**
      * Count disputes filed by a user.
+     *
+     * @param list<int> $excludePageIds pages whose disputes this count leaves
+     *        out (F-528: the secret pages the viewer may not see). Pass the
+     *        same list to {@see getByReporterPaginated()}. It is part of the
+     *        cache key, so each exclusion is cached on its own.
      */
-    public static function countByReporter(int $userId, ?int $pageId = null): int
+    public static function countByReporter(int $userId, ?int $pageId = null, array $excludePageIds = []): int
     {
-        $pageSuffix = $pageId !== null ? ":{$pageId}" : '';
+        $exclude    = self::excludedPageIds($excludePageIds);
+        $pageSuffix = ($pageId !== null ? ":{$pageId}" : '') . self::excludeSuffix($exclude);
         $gen      = DisputeRepositorySupport::getGeneration("reporter_gen:{$userId}");
         $cacheKey = "reporter_count:{$userId}:{$gen}{$pageSuffix}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
@@ -735,6 +741,10 @@ class DisputeRepository
         if ($pageId !== null) {
             $where   .= " AND page_id = %d";
             $params[] = $pageId;
+        }
+        if ($exclude !== []) {
+            $where .= ' AND page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
+            $params = [...$params, ...$exclude];
         }
 
         // F-101: a failed read used to cache 0 ("signed no disputes") for
@@ -893,11 +903,13 @@ class DisputeRepository
     /**
      * Paginated disputes filed by a user, with post/user display names.
      *
+     * @param list<int> $excludePageIds as {@see countByReporter()}
      * @return list<DisputeDetailDTO>
      */
-    public static function getByReporterPaginated(int $userId, int $limit, int $offset, ?int $pageId = null): array
+    public static function getByReporterPaginated(int $userId, int $limit, int $offset, ?int $pageId = null, array $excludePageIds = []): array
     {
-        $pageSuffix = $pageId !== null ? ":{$pageId}" : '';
+        $exclude    = self::excludedPageIds($excludePageIds);
+        $pageSuffix = ($pageId !== null ? ":{$pageId}" : '') . self::excludeSuffix($exclude);
         $gen      = DisputeRepositorySupport::getGeneration("reporter_gen:{$userId}");
         $cacheKey = "reporter:{$userId}:{$gen}:{$limit}:{$offset}{$pageSuffix}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
@@ -915,6 +927,10 @@ class DisputeRepository
         if ($pageId !== null) {
             $where   .= " AND d.page_id = %d";
             $params[] = $pageId;
+        }
+        if ($exclude !== []) {
+            $where .= ' AND d.page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
+            $params = [...$params, ...$exclude];
         }
 
         $params[] = $limit;
@@ -963,6 +979,83 @@ class DisputeRepository
 
         wp_cache_set($cacheKey, $dtos, self::CACHE_GROUP, self::TTL_HOT);
         return $dtos;
+    }
+
+    /**
+     * The SECRET pages this user has filed a dispute on, each once (F-528).
+     * bcc-core's shared rule decides what is secret
+     * (PeepSoPagePrivacy::notSecretSql()), so this agrees with PageAccess.
+     * A member self-page has no post and is never returned.
+     *
+     * The member's Disputes list passes these through
+     * PageAccess::hiddenAmong() for a viewer other than the member, and
+     * leaves the ones that viewer may not see out of its rows and total.
+     *
+     * ⚠ FAILS CLOSED, and is NOT cached: a read that did not run, or more
+     * than PageAccess::HIDDEN_LIST_CAP secret pages, THROWS, and the list
+     * answers 503. An empty answer would show every dispute.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public static function findSecretPageIdsDisputedBy(int $reporterId): array
+    {
+        if ($reporterId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table     = self::disputes_table();
+        $notSecret = \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('d.page_id');
+
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT DISTINCT d.page_id
+               FROM {$table} d
+              WHERE d.reporter_id = %d
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            $reporterId,
+            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
+        ), __FUNCTION__, true);
+
+        if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $reporterId);
+        }
+
+        return self::excludedPageIds(array_map(
+            static fn (object $row): int => (int) ($row->page_id ?? 0),
+            $rows
+        ));
+    }
+
+    /**
+     * Positive ids, each once, ascending, so one exclusion always builds
+     * one cache key.
+     *
+     * @param array<mixed> $ids
+     * @return list<int>
+     */
+    private static function excludedPageIds(array $ids): array
+    {
+        $out = [];
+        foreach ($ids as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $out[$i] = $i;
+            }
+        }
+        ksort($out);
+        return array_values($out);
+    }
+
+    /**
+     * The cache-key part for an exclusion: '' for none, so the keys of an
+     * unfiltered read are unchanged.
+     *
+     * @param list<int> $exclude from excludedPageIds()
+     */
+    private static function excludeSuffix(array $exclude): string
+    {
+        return $exclude === [] ? '' : ':x' . md5(implode(',', $exclude));
     }
 
     /**

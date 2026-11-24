@@ -43,6 +43,39 @@ if (!defined('ABSPATH')) {
 
 final class PageAccess
 {
+    /**
+     * The most secret pages one member list checks for a viewer (F-528).
+     * Each one may cost a member check, so a list with more fails closed
+     * rather than run them all: its read throws and the route answers 503.
+     */
+    public const HIDDEN_LIST_CAP = 100;
+
+    /**
+     * Refuse a member list that covers more than HIDDEN_LIST_CAP secret
+     * pages (F-528): log it, count it, and throw, so the route answers 503.
+     *
+     * ⚠ Not a passing failure. The member's tab answers 503 to every other
+     * viewer for as long as they stay over the cap, so any count on
+     * `page_privacy` / `member_list_over_cap` means real members cannot be
+     * read; the log line names the member and the list.
+     *
+     * @param string $repository the reading repository's class
+     * @param string $method     its method, usually `__FUNCTION__`
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure always
+     */
+    public static function refuseOverCap(string $repository, string $method, int $memberId): never
+    {
+        \BCC\Core\Log\Logger::error('[bcc-trust] member list over the secret-page cap: refused rather than checked page by page', [
+            'repository' => $repository,
+            'method'     => $method,
+            'member_id'  => $memberId,
+            'cap'        => self::HIDDEN_LIST_CAP,
+        ]);
+        \BCC\Core\Observability\DegradationMetrics::record('page_privacy', 'member_list_over_cap');
+
+        throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure($repository, $method, 'more secret pages than the list can check');
+    }
+
     /** For a caller that already holds the page's post. */
     public static function viewerMaySee(\WP_Post $page, int $viewerId): bool
     {
@@ -100,6 +133,31 @@ final class PageAccess
         return array_values(array_filter(
             $pageIds,
             static fn (int $id): bool => !isset($secret[$id]) || self::viewerMaySeeId($id, $viewerId, $viewerIsExempt)
+        ));
+    }
+
+    /**
+     * Of $pageIds, the ones $viewerId may NOT see: exactly the ids
+     * visibleAmong() leaves out, in input order, each id once.
+     *
+     * For a list read in SQL, which leaves these pages out of both its rows
+     * and its total (`page_id NOT IN (…)`), so the pages and the count agree.
+     *
+     * @param list<int> $pageIds
+     * @param bool|null $viewerIsExempt as {@see viewerMaySeeId()}
+     * @return list<int>
+     */
+    public static function hiddenAmong(array $pageIds, int $viewerId, ?bool $viewerIsExempt = null): array
+    {
+        $pageIds = array_values(array_unique(array_filter(
+            $pageIds,
+            static fn (int $id): bool => $id > 0
+        )));
+        $visible = array_flip(self::visibleAmong($pageIds, $viewerId, $viewerIsExempt));
+
+        return array_values(array_filter(
+            $pageIds,
+            static fn (int $id): bool => !isset($visible[$id])
         ));
     }
 

@@ -107,12 +107,26 @@ final class UserDisputesService
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
-        $total = DisputeRepository::countByReporter($userId);
+        // F-528: for anyone but the member, disputes on SECRET pages this
+        // viewer may not see are left out, as PageAccess decides for each
+        // page. The same ids go to the count and the page, so the total
+        // agrees. A read that cannot tell throws, and the route answers 503.
+        // The member and site admins see every page, so neither pays the
+        // read (nor its 503).
+        // Rationale: F-528 (private tracker).
+        $hiddenPageIds = $isSelf || \BCC\Trust\Core\Support\ProfileAccess::viewerIsExemptFromVisibility()
+            ? []
+            : \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
+                DisputeRepository::findSecretPageIdsDisputedBy($userId),
+                $viewerId
+            );
+
+        $total = DisputeRepository::countByReporter($userId, null, $hiddenPageIds);
         if ($total === 0) {
             return self::emptyPage($page, $perPage, false);
         }
 
-        $rows = DisputeRepository::getByReporterPaginated($userId, $perPage, $offset);
+        $rows = DisputeRepository::getByReporterPaginated($userId, $perPage, $offset, null, $hiddenPageIds);
 
         $items = [];
         $now   = time();

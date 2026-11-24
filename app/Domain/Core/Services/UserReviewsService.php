@@ -99,16 +99,31 @@ final class UserReviewsService
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
+        // F-528: for anyone but the member, reviews of SECRET pages this
+        // viewer may not see are left out, as PageAccess decides for each
+        // page: its members, invitees and author see it, as do site admins.
+        // The same ids go to the count and the page, so the total agrees.
+        // A read that cannot tell throws, and the route answers 503. The
+        // member and site admins see every page, so neither pays the read
+        // (nor its 503).
+        // Rationale: F-528 (private tracker).
+        $hiddenPageIds = $isSelf || \BCC\Trust\Core\Support\ProfileAccess::viewerIsExemptFromVisibility()
+            ? []
+            : \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
+                $this->voteRepository->findSecretPageIdsReviewedBy($userId),
+                $viewerId
+            );
+
         // F-55: the count paired with findByVoterPaginated(): it excludes
         // moderation-hidden reviews exactly as the list does, so the total
         // and the pages agree. (countByVoter() still counts every active
         // vote for weight and stats; that is a separate product question.)
-        $total = $this->voteRepository->countReviewsByVoter($userId);
+        $total = $this->voteRepository->countReviewsByVoter($userId, $hiddenPageIds);
         if ($total === 0) {
             return self::emptyPage($page, $perPage, false);
         }
 
-        $rows = $this->voteRepository->findByVoterPaginated($userId, $perPage, $offset);
+        $rows = $this->voteRepository->findByVoterPaginated($userId, $perPage, $offset, $hiddenPageIds);
 
         // Member self-page targets have no wp_posts row (the LEFT JOIN
         // columns come back NULL) — batch-resolve their owners' display

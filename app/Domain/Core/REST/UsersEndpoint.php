@@ -615,7 +615,9 @@ final class UsersEndpoint
 
         $service = Plugin::instance()->endorsementService();
         try {
-            $endorsements = $service->getUserEndorsements($userId, $limit);
+            // The viewer is the request's user: PageAccess reads their
+            // admin exemption (F-528).
+            $endorsements = $service->getUserEndorsements($userId, $limit, get_current_user_id());
         } catch (RepositoryReadFailure) {
             // F-421: a read that did not run is not "hasn't vouched for any
             // pages yet". The 503 is answered `private, no-store`, never
@@ -1205,7 +1207,17 @@ final class UsersEndpoint
         }
 
         $viewerId = get_current_user_id();
-        $payload  = $compose($userId, $viewerId, $page, $perPage);
+        try {
+            $payload = $compose($userId, $viewerId, $page, $perPage);
+        } catch (RepositoryReadFailure) {
+            // F-528: the list could not tell which pages this viewer may
+            // see. That is not "no reviews" or "no disputes", and showing
+            // the list unfiltered is not an option. `no-store`, never the
+            // cache header below.
+            $response = ApiResponse::error('bcc_unavailable', 'This list is temporarily unavailable. Please try again.', 503);
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        }
 
         $response = ApiResponse::ok($payload);
         // Same posture as /feed and /users/:handle/blog — per-viewer
