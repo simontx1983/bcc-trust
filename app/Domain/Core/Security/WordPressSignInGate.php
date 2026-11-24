@@ -64,12 +64,15 @@ if (!defined('ABSPATH')) {
  *    the app too; ops' wp-cli is the fallback.
  *
  * And for every caller, admins included:
- *   - XML-RPC is off. `xmlrpc_enabled` → false only switches off the
- *     methods that sign in, so the method list is emptied too
- *     (`xmlrpc_methods` → []: pingback.ping, system.multicall and
- *     system.listMethods answer nothing), and no page advertises a
- *     pingback endpoint (`X-Pingback` is dropped from `wp_headers`). Nothing
- *     BCC runs uses it.
+ *   - XML-RPC is off: `xmlrpc_enabled` → false, the method list is
+ *     emptied (`xmlrpc_methods` → []), and no pingback header is sent
+ *     (`X-Pingback` is dropped from `wp_headers`). Nothing BCC runs uses it.
+ *   - Core comments and pings are closed on every post, whatever its type
+ *     or its own setting: `comments_open` and `pings_open` → false, as the
+ *     last word. Core's comment handlers (the comment form's endpoint, the
+ *     REST comments route) and trackbacks ask these before writing. BCC
+ *     uses no core comments; PeepSo's comments are PeepSo's own and never
+ *     ask them.
  *   - WordPress's and PeepSo's own sign-up are off: `users_can_register`
  *     reads '0' (`pre_option_`, so nothing downstream sees another value)
  *     and PeepSo's `site_registration_disabled` reads 1. Members sign up
@@ -172,6 +175,8 @@ final class WordPressSignInGate
         add_filter('xmlrpc_enabled', [self::class, 'noXmlRpc'], PHP_INT_MAX);
         add_filter('xmlrpc_methods', [self::class, 'noXmlRpcMethods'], PHP_INT_MAX);
         add_filter('wp_headers', [self::class, 'noPingbackHeader'], PHP_INT_MAX);
+        add_filter('comments_open', [self::class, 'closedToCoreComments'], PHP_INT_MAX);
+        add_filter('pings_open', [self::class, 'closedToCoreComments'], PHP_INT_MAX);
         add_filter('pre_option_users_can_register', [self::class, 'noNativeSignUp'], PHP_INT_MAX);
         add_filter('peepso_filter_get_option_site_registration_disabled', [self::class, 'peepsoSignUpDisabled'], PHP_INT_MAX);
     }
@@ -216,6 +221,19 @@ final class WordPressSignInGate
         }
 
         return $headers;
+    }
+
+    /**
+     * `comments_open` and `pings_open`, last: closed on every post, whatever
+     * core, the post or an earlier filter answered.
+     *
+     * @param mixed $open
+     */
+    public static function closedToCoreComments($open = true): bool
+    {
+        unset($open);
+
+        return false;
     }
 
     /**

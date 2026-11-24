@@ -561,41 +561,31 @@ final class WordPressFrontEndGateTest extends TestCase
         self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 
-    /** @return iterable<string, array{0: string}> */
+    /** @return iterable<string, array{0: array<string, string>}> */
     public static function peepsoCronTriggers(): iterable
     {
-        foreach (WordPressFrontEndGate::PEEPSO_CRON_TRIGGERS as $trigger) {
-            yield $trigger => [$trigger];
-        }
+        // PeepSo's four external-cron triggers (PeepSo::check_query,
+        // peepso.php 9.0.5.5), written out: no list in the gate exempts them.
+        yield 'mail queue'             => [['peepso_process_mailqueue' => '1']];
+        yield 'maintenance'            => [['peepso_process_maintenance' => '1']];
+        yield 'ranking'                => [['peepso_process_ranking' => '1']];
+        yield 'inactive-user removal'  => [['peepso_process_remove_inactive_users' => '1']];
+        yield 'with an empty value'    => [['peepso_process_mailqueue' => '']];
+        yield 'among other parameters' => [['p' => '5', 'peepso_process_maintenance' => '1']];
     }
 
-    /** PeepSo's external-cron triggers still reach PeepSo, as before the rule. */
+    /**
+     * PeepSo's external-cron GET triggers are redirected like any request,
+     * before PeepSo's own `wp` handler (-1) could run the job: no PeepSo job
+     * runs from a public URL.
+     *
+     * @param array<string, string> $get
+     */
     #[DataProvider('peepsoCronTriggers')]
-    public function testAPeepSoCronTriggerIsLeftToPeepSo(string $trigger): void
+    public function testAPeepSoCronTriggerIsRedirectedLikeAnyRequest(array $get): void
     {
         self::frontEndRequest();
-        $_GET = [$trigger => '1'];
-
-        WordPressFrontEndGate::sendFrontEndToTheApp();
-
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
-        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
-    }
-
-    /** Exactly PeepSo's four live triggers (PeepSo::check_query, peepso.php 9.0.5.5). */
-    public function testTheTriggersArePeepSosFour(): void
-    {
-        self::assertSame(
-            ['peepso_process_mailqueue', 'peepso_process_maintenance', 'peepso_process_ranking', 'peepso_process_remove_inactive_users'],
-            WordPressFrontEndGate::PEEPSO_CRON_TRIGGERS
-        );
-    }
-
-    /** Any other GET parameter, a lookalike included, is redirected like any request. */
-    public function testAnotherParameterIsStillRedirected(): void
-    {
-        self::frontEndRequest();
-        $_GET = ['peepso_process' => '1', 'logout' => '1'];
+        $_GET = $get;
 
         try {
             WordPressFrontEndGate::sendFrontEndToTheApp();
@@ -603,7 +593,23 @@ final class WordPressFrontEndGateTest extends TestCase
         } catch (\SignInGateHalt) {
         }
 
-        self::assertSame(302, $GLOBALS['__bcc_sig']['redirect'][1] ?? null);
+        self::assertSame(['https://cms.example.test/', 302], $GLOBALS['__bcc_sig']['redirect']);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false, 'no-cache headers on the redirect');
+    }
+
+    /** The gate keeps no exemption list a later change could add a trigger back to. */
+    public function testTheGateExemptsNoGetParameter(): void
+    {
+        $constants = (new \ReflectionClass(WordPressFrontEndGate::class))->getConstants();
+
+        self::assertArrayNotHasKey('PEEPSO_CRON_TRIGGERS', $constants);
+        foreach ($constants as $name => $value) {
+            if (is_array($value)) {
+                foreach ($value as $item) {
+                    self::assertFalse(is_string($item) && str_starts_with($item, 'peepso_process'), $name . ' lists a PeepSo trigger');
+                }
+            }
+        }
     }
 
     /** @return iterable<string, array{0: string}> */

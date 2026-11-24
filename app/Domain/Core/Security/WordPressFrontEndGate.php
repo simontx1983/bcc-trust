@@ -68,10 +68,11 @@ if (!defined('ABSPATH')) {
  *   7. cms has no public front end. EVERY front-end request from a
  *      non-admin (signed out included) is sent to the app's front page with
  *      a 302: pages, posts, archives, the front page, search, feeds, 404s,
- *      whatever they are built from. Two things still reach core and
- *      PeepSo: robots.txt, and PeepSo's external-cron triggers
- *      (PEEPSO_CRON_TRIGGERS: PeepSo runs the job and exits, rendering no
- *      page), so a server cron that calls them keeps working.
+ *      whatever they are built from. Only robots.txt still reaches core.
+ *      - PeepSo's external-cron GET triggers (`?peepso_process_*`, handled
+ *        by PeepSo's own `wp` handler) are redirected like any other
+ *        request: no PeepSo job runs from a public URL. PeepSo's jobs run
+ *        server-side only (wp-cron or wp-cli).
  *      - It runs on `wp` at -1000, before PeepSo's own `wp` handler (-1,
  *        PeepSo::check_query) can act on the request, and before
  *        `template_redirect`, so for a non-admin it is the only answer.
@@ -93,18 +94,6 @@ final class WordPressFrontEndGate
 
     /** `wp`, before PeepSo's own handler there (-1). */
     public const FRONT_END_PRIORITY = -1000;
-
-    /**
-     * PeepSo's external-cron triggers (PeepSo::check_query, `wp` at -1): a GET
-     * parameter that runs one job and exits. Left to PeepSo, exactly as
-     * before this rule existed.
-     */
-    public const PEEPSO_CRON_TRIGGERS = [
-        'peepso_process_mailqueue',
-        'peepso_process_maintenance',
-        'peepso_process_ranking',
-        'peepso_process_remove_inactive_users',
-    ];
 
     public static function register(): void
     {
@@ -224,18 +213,14 @@ final class WordPressFrontEndGate
     /**
      * `wp`, first: a non-admin's front-end request goes to the app's front
      * page (302, no-cache), or answers a bare 403 if home is this same host.
-     * robots.txt is left to core, and PEEPSO_CRON_TRIGGERS to PeepSo.
+     * Only robots.txt is left to core; every GET parameter, PeepSo's
+     * external-cron triggers included, gets the same answer.
      */
     public static function sendFrontEndToTheApp(): void
     {
         $userId = get_current_user_id();
         if (($userId > 0 && user_can($userId, WordPressSignInGate::CAPABILITY)) || is_robots()) {
             return;
-        }
-        foreach (self::PEEPSO_CRON_TRIGGERS as $trigger) {
-            if (isset($_GET[$trigger])) {
-                return;
-            }
         }
 
         $target     = home_url('/');
