@@ -80,7 +80,14 @@ class ClaimService {
      * F-14: why a claim was revoked. A closed list — it is written to the
      * audit log and handed to `bcc_onchain_claim_revoked` listeners.
      */
-    public const REVOKE_REASONS = ['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator', 'wallet_unlinked', 'account_deleted'];
+    public const REVOKE_REASONS = [
+        'wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator', 'wallet_unlinked', 'account_deleted',
+        // Validator relationship changes (ValidatorRelationshipService):
+        // a staff revoke's reasons, a staff link cancelled, and a staff or
+        // node-key owner replaced by a wallet proof.
+        'linked_in_error', 'evidence_withdrawn', 'owner_requested', 'ownership_disputed',
+        'link_cancelled', 'superseded_by_wallet_proof',
+    ];
 
     /**
      * Max wallets checked per claim match (Phase 8). Each wallet on the
@@ -683,6 +690,26 @@ class ClaimService {
             return false;
         }
 
+        self::afterRevokeCommitted($claimId, $result, $reason, true);
+
+        return true;
+    }
+
+    /**
+     * The post-commit steps of a revoke: audit, page release, bonus, read
+     * model, hooks. Shared by revokeClaim() and by revokes committed inside
+     * a larger transaction (ValidatorRelationshipService).
+     *
+     * $releasePagesInline false leaves the page OWNERSHIP move (PeepSo owner
+     * role, post_author, score rows, the unowned-page bonus clear) to the
+     * PageOwnershipAligner, which runs it asynchronously with no current
+     * user: a release run inline from a staff request would fire the page
+     * save handlers as that editor.
+     *
+     * @param array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>} $result
+     */
+    public static function afterRevokeCommitted(int $claimId, array $result, string $reason, bool $releasePagesInline): void
+    {
         // ── COMMITTED. Nothing below may report the revoke as failed. ──
         // A throw here used to escape after the commit: the next sweep sees
         // the claim as already revoked and returns early, so the lost event
@@ -711,7 +738,7 @@ class ClaimService {
         // ⚠ BEFORE the bonus step: with the rows moved, getPageForOwner()
         // no longer resolves the user to a page they lost, so their bonus is
         // recomputed onto a page they still own.
-        foreach ($result['mirror_page_ids'] as $lostPageId) {
+        foreach ($releasePagesInline ? $result['mirror_page_ids'] : [] as $lostPageId) {
             self::afterCommit('page_release', $claimId, static function () use ($lostPageId, $userId): void {
                 \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->releaseClaimedPage((int) $lostPageId, $userId);
             });
@@ -758,8 +785,6 @@ class ClaimService {
                 $reason
             );
         });
-
-        return true;
     }
 
     /**
