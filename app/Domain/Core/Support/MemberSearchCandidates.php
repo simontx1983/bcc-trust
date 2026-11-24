@@ -271,15 +271,13 @@ final class MemberSearchCandidates
             return is_array($ids) ? array_values($ids) : [];
         }
 
-        global $wpdb;
-
         $captured = null;
         $capture  = static function (object $query) use (&$captured): void {
             $captured = $query;
         };
 
         self::clearReadError();
-        $queriesBefore = (int) ($wpdb->num_queries ?? 0);
+        $queriesBefore = self::queryCountSnapshot();
 
         // Added and removed around this one call, at a priority late
         // enough to see PeepSo's clauses already in place. Removed in a
@@ -308,15 +306,15 @@ final class MemberSearchCandidates
      */
     private static function throwUnlessLookupRan(?object $query, int $queriesBefore, string $step): void
     {
-        global $wpdb;
-
         $request = $query !== null ? (string) ($query->request ?? '') : '';
         if ($request === '') {
             return; // answered through users_pre_query; see the docblock.
         }
 
-        $ran    = (int) ($wpdb->num_queries ?? 0) > $queriesBefore;
-        $isOurs = (string) ($wpdb->last_query ?? '') === $request;
+        // ⚠ Both facts come from GuardsReadFailures, not from $wpdb:
+        // Core/Support may not touch it (§1, WPDB_OUTSIDE_REPO).
+        $ran    = self::aStatementRanSince($queriesBefore);
+        $isOurs = self::lastStatementWas($request);
         if ($ran && $isOurs) {
             return;
         }
