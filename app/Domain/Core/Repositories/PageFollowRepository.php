@@ -152,26 +152,28 @@ final class PageFollowRepository
      *
      * @phpstan-return list<PageFollowRow>
      */
-    public function findByUserId(int $userId, int $limit, int $offset): array
+    public function findByUserId(int $userId, int $limit, int $offset, ?string $like = null): array
     {
         if ($userId <= 0) {
             return [];
         }
-
         global $wpdb;
-
+        [$matchSql, $matchArgs] = $this->pageMatch($like);
         /** @var list<PageFollowRow>|null */
         $rows = $wpdb->get_results($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
-              WHERE user_id = %d
+              WHERE user_id = %d{$matchSql}
               ORDER BY created_at DESC, id DESC
               LIMIT %d OFFSET %d",
             $userId,
-            // A PAGE size bound only (callers pass ≤ 50). F-255: there is
-            // no cap on how many pages a member can watch; the watchlist
-            // pages through every row with $offset.
-            max(1, min($limit, 100)),
-            max(0, $offset)
+            ...[
+                ...$matchArgs,
+                // A PAGE size bound only (callers pass ≤ 50). F-255: there is
+                // no cap on how many pages a member can watch; the watchlist
+                // pages through every row with $offset.
+                max(1, min($limit, 100)),
+                max(0, $offset),
+            ]
         ));
 
         return $rows ?: [];
@@ -229,18 +231,44 @@ final class PageFollowRepository
      * Count page-follows for one user. Cheap companion to
      * `findByUserId` used in pagination totals.
      */
-    public function countByUserId(int $userId): int
+    public function countByUserId(int $userId, ?string $like = null): int
     {
         if ($userId <= 0) {
             return 0;
         }
+        global $wpdb;
+        [$matchSql, $matchArgs] = $this->pageMatch($like);
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table} WHERE user_id = %d{$matchSql}",
+            $userId,
+            ...$matchArgs
+        ));
+    }
+
+    /**
+     * Structure A row 14: the watchlist search on a followed placeholder
+     * page. It matches the page's title or slug when the page is PUBLISHED
+     * and NOT SECRET; a secret page's title is never searched. `$like` is
+     * bcc-core's UserMetaRepository::nameQueryLike(); NULL is no filter.
+     *
+     * @return array{0: string, 1: list<string>}
+     */
+    private function pageMatch(?string $like): array
+    {
+        if ($like === null) {
+            return ['', []];
+        }
 
         global $wpdb;
 
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table} WHERE user_id = %d",
-            $userId
-        ));
+        return [
+            " AND EXISTS (SELECT 1 FROM {$wpdb->posts} AS bcc_pq"
+            . " WHERE bcc_pq.ID = {$this->table}.page_id"
+            . " AND bcc_pq.post_type = 'peepso-page' AND bcc_pq.post_status = 'publish'"
+            . ' AND ' . \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('bcc_pq.ID')
+            . ' AND (bcc_pq.post_title LIKE %s OR bcc_pq.post_name LIKE %s))',
+            [$like, $like],
+        ];
     }
 
     /**
