@@ -185,7 +185,7 @@ final class ValidatorStepUpRepository
             $beforeUtc,
             self::PURGE_BATCH
         ));
-        if ($deleted === false || (string) $wpdb->last_error !== '') {
+        if ($deleted === false || self::lastReadError() !== '') {
             throw new \RuntimeException('Step-up purge failed: ' . (string) $wpdb->last_error);
         }
 
@@ -202,7 +202,7 @@ final class ValidatorStepUpRepository
         global $wpdb;
         $wpdb->last_error = '';
         $affected = $wpdb->query($sql);
-        if ($affected === false || (string) $wpdb->last_error !== '') {
+        if ($affected === false || self::lastReadError() !== '') {
             throw new \RuntimeException('Step-up update failed: ' . (string) $wpdb->last_error);
         }
 

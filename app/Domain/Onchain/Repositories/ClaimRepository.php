@@ -1567,7 +1567,7 @@ class ClaimRepository {
 
         if ($existing === null) {
             $ok = $wpdb->insert($table, $set);
-            if ($ok !== 1 || (string) $wpdb->last_error !== '') {
+            if ($ok !== 1 || self::lastReadError() !== '') {
                 throw new \RuntimeException('relationship claim insert failed: ' . (string) $wpdb->last_error);
             }
             return (int) $wpdb->insert_id;
@@ -1575,7 +1575,7 @@ class ClaimRepository {
 
         unset($set['user_id'], $set['entity_type'], $set['entity_id'], $set['created_at']);
         $ok = $wpdb->update($table, $set, ['id' => (int) $existing->id, 'status' => (string) $existing->status]);
-        if ($ok !== 1 || (string) $wpdb->last_error !== '') {
+        if ($ok !== 1 || self::lastReadError() !== '') {
             throw new \RuntimeException('relationship claim update failed: ' . (string) $wpdb->last_error);
         }
 
