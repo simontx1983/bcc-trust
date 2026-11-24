@@ -166,6 +166,24 @@ final class ChainRepository
      *
      * @return ChainRow|null
      */
+    public static function getByIdUncached(int $chainId): ?object
+    {
+        if ($chainId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var ChainRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
+            $chainId
+        ));
+
+        return $row;
+    }
+
     /**
      * One chain by slug, active or not, read past every cache and
      * FAIL-CLOSED: a failed read throws instead of answering "no such chain".
@@ -186,24 +204,6 @@ final class ChainRepository
             __FUNCTION__,
             true
         );
-    }
-
-    public static function getByIdUncached(int $chainId): ?object
-    {
-        if ($chainId <= 0) {
-            return null;
-        }
-
-        global $wpdb;
-        $table = self::table();
-
-        /** @var ChainRow|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
-            $chainId
-        ));
-
-        return $row;
     }
 
     /** @return ChainRow|null */
