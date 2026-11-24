@@ -132,9 +132,9 @@ final class PeepSoDataExportQueueTest extends TestCase
     }
 
     /**
-     * Refused for every caller, admins included: keyed on the action and
-     * page alone, before any nonce is checked, so a valid or missing nonce
-     * makes no difference.
+     * Refused for every caller, admins included (the caller here holds
+     * every capability): keyed on the action and page alone, before any
+     * nonce is checked, so a valid or missing nonce makes no difference.
      *
      * @param array<string, string> $query
      */

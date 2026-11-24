@@ -61,6 +61,14 @@ if (!function_exists('wp_die')) {
     }
 }
 
+if (!function_exists('current_user_can')) {
+    /** Every caller here is an admin: the queue stays closed to admins too. */
+    function current_user_can(string $capability, ...$args): bool
+    {
+        return true;
+    }
+}
+
 if (!function_exists('check_admin_referer')) {
     /** @return int|false */
     function check_admin_referer($action = -1, string $queryArg = '_wpnonce')
