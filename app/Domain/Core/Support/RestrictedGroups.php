@@ -3,20 +3,18 @@
 /**
  * RestrictedGroups — "which PeepSo groups may this viewer NOT see".
  *
- * The computation used to live as `private static` inside
- * FeedRankingService, where only the feed could reach it. The profile
- * Blog tab needs the same answer once a blog post can live inside a
- * group, so it was extracted here rather than copied (§11). The feed's
- * own method now delegates, so there is exactly one definition of
- * "restricted" in the codebase.
+ * The one definition of "restricted" (§11), used by the profile Blog tab,
+ * which replaces its group gate with this list once a blog post can live
+ * inside a group.
  *
- * Two entry points, deliberately different in their failure behaviour:
+ *   forViewerOrNull()       — the restricted set, or NULL when it cannot be
+ *                             proven complete: the caller uses it as its
+ *                             ONLY group gate and must fail closed.
+ *   memberGroupsForViewer() — the groups the viewer belongs to, for the
+ *                             members_only parity rule.
  *
- *   forViewer()           — the feed's historical contract. Returns a
- *                           best-effort list and never signals doubt.
- *   forViewerOrNull()     — returns NULL when the list cannot be proven
- *                           complete, for callers that use the list as
- *                           their ONLY group gate and must fail closed.
+ * The feeds pass no restricted-group list: bcc-core's `public_all` gate and
+ * the F-23 syndication gate decide group posts there.
  *
  * @package BCC\Trust\Core\Support
  * @since §D6 group blogs
@@ -33,8 +31,7 @@ if (!defined('ABSPATH')) {
 final class RestrictedGroups
 {
     /**
-     * Membership-lookup bound, carried over verbatim from
-     * FeedRankingService so the feed's behaviour does not change.
+     * Membership-lookup bound.
      *
      * ⚠ A viewer in more than this many groups gets a truncated
      * membership list, so groups they really belong to stay on the
@@ -47,48 +44,17 @@ final class RestrictedGroups
     /**
      * The bound to ask the non-open lookup for.
      *
-     * The LENIENT `getNonOpenGroupIds()` clamps to its own private
-     * ceiling and returns a plain list with NO signal that rows were
-     * dropped — it orders by `p.ID DESC` and truncates, so the OLDEST
-     * non-open groups silently fall off the end — and it also flattens a
-     * FAILED query into an empty list. Both of those under-restrict,
-     * which is the leaking direction.
-     *
-     * {@see self::forViewerOrNull()} therefore does not use it. It calls
-     * `getNonOpenGroupIdsStrict()`, which returns null for a query error
-     * and for truncation and caches neither. Kept in step with bcc-core's
-     * `NONOPEN_DEFAULT_LIMIT`, which is private there.
+     * {@see self::forViewerOrNull()} calls `getNonOpenGroupIdsStrict()`,
+     * which returns null for a query error and for truncation and caches
+     * neither, so an incomplete set is never served as complete. Kept in
+     * step with bcc-core's `NONOPEN_DEFAULT_LIMIT`, which is private there.
      */
     private const NON_OPEN_BOUND = 500;
 
     /**
-     * Groups the viewer may not see: every non-open group, minus the
-     * ones they are a member of. An anonymous viewer (id <= 0) is
-     * restricted from all of them.
-     *
-     * Behaviourally identical to the FeedRankingService original.
-     *
-     * @return list<int>
-     */
-    public static function forViewer(int $viewerId): array
-    {
-        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIds(self::NON_OPEN_BOUND);
-        if ($nonOpen === []) {
-            return [];
-        }
-        if ($viewerId <= 0) {
-            return $nonOpen;
-        }
-        $myGroups = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, self::MEMBER_GROUPS_LOOKUP);
-        if ($myGroups === []) {
-            return $nonOpen;
-        }
-
-        return array_values(array_diff($nonOpen, $myGroups));
-    }
-
-    /**
-     * Same answer, but NULL when the non-open set may be incomplete.
+     * The groups the viewer may not see, or NULL when the non-open set may
+     * be incomplete. Every non-open group, minus the ones they are a member
+     * of; an anonymous viewer (id <= 0) is restricted from all of them.
      *
      * For a caller that replaces a visibility gate with this list — the
      * profile Blog tab does exactly that — an incomplete list is not a
@@ -102,11 +68,9 @@ final class RestrictedGroups
     public static function forViewerOrNull(int $viewerId): ?array
     {
         // STRICT: null for a query error AND for truncation, caching
-        // neither. ⚠ Do NOT swap this for the lenient getNonOpenGroupIds().
-        // That one flattens a FAILED query into [], and [] here would be
-        // forwarded to the caller as "this viewer is restricted from
-        // nothing" — which relaxes its gate with no list behind it. null is
-        // the only safe answer when the set cannot be proven.
+        // neither. A [] here would be forwarded to the caller as "this
+        // viewer is restricted from nothing", so null is the only safe
+        // answer when the set cannot be proven.
         $nonOpen = PeepSoGroupRepository::getNonOpenGroupIdsStrict(self::NON_OPEN_BOUND);
         if ($nonOpen === null) {
             return null;

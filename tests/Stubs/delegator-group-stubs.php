@@ -30,6 +30,14 @@
 declare(strict_types=1);
 
 namespace {
+    // H7: the opt-out map is read through bcc-core's UserMetaRepository and
+    // written through UserMetaSwapRepository, both over the user-meta
+    // fixture below. The integration bootstrap autoloads core's REAL
+    // classes (which would read the real wp_usermeta, not this fixture),
+    // so the unit read double is declared here explicitly, first.
+    require_once __DIR__ . '/user-meta-repository-double.php';
+    require_once __DIR__ . '/user-meta-fixture-stand-ins.php';
+
     if (!class_exists('WP_Post', false)) {
         class WP_Post
         {

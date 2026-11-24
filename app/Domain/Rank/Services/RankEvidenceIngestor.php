@@ -68,7 +68,8 @@ class RankEvidenceIngestor
      * Ingest one evidence event for a subject. Unknown source types
      * ingest nothing (fail-safe: a typo can never mint credit).
      * Throws only on DB failure — the subscriber wiring records the
-     * DegradationMetric.
+     * DegradationMetric. That includes a failed confirmed-cluster read
+     * (F-464): the event is then not ledgered at all.
      *
      * @param int $relationshipUserId The counterparty identity the
      *        per-recognizer / per-recipient caps key on (recognizer for

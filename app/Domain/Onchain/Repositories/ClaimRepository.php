@@ -85,6 +85,30 @@ class ClaimRepository {
      */
     private static array $ambiguousAudited = [];
 
+    /**
+     * D1: the `claim_role IN (...)` condition every role-scoped reader
+     * adds. Roles must be ones PageClaimRolePolicy knows; anything else is
+     * a programming error and throws rather than reading the wrong rows.
+     *
+     * @param list<string> $roles non-empty
+     * @return array{0: string, 1: list<string>} the SQL fragment and its args
+     */
+    private static function roleCondition(string $column, array $roles): array
+    {
+        $known = array_merge(
+            \BCC\Trust\Onchain\Services\PageClaimRolePolicy::ENTITY_CLAIM_ROLES,
+            \BCC\Trust\Onchain\Services\PageClaimRolePolicy::TEAM_ROLES
+        );
+        foreach ($roles as $role) {
+            if (!in_array($role, $known, true)) {
+                throw new \InvalidArgumentException('Unknown claim role: ' . $role);
+            }
+        }
+        $roles = array_values(array_unique($roles));
+
+        return [$column . ' IN (' . implode(',', array_fill(0, count($roles), '%s')) . ')', $roles];
+    }
+
     public static function table(): string {
         return \BCC\Core\DB\DB::table('onchain_claims');
     }
@@ -160,15 +184,30 @@ class ClaimRepository {
         $status     = ClaimStatus::assert($status);
         $verifiedAt = ($status === ClaimStatus::VERIFIED) ? current_time('mysql', true) : null;
 
+        // upsert() is the WALLET claim path. A row it touches is a wallet
+        // claim from then on: the update clause resets how it was proven
+        // (a re-claim of a once staff-approved entity must not stay 'staff',
+        // or a wallet unlink and the sweep would skip it) and clears the
+        // page team columns (a team member who becomes the owner is no
+        // longer a team row). Staff, proof and team writes have their own
+        // writers and never come through here.
         $wpdb->query($wpdb->prepare(
-            "INSERT INTO {$table} (user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status, verified_at, created_at)
-             VALUES (%d, %s, %d, %s, %d, %s, %s, %s, %s)
+            "INSERT INTO {$table} (user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status, verified_at, created_at, verification_method)
+             VALUES (%d, %s, %d, %s, %d, %s, %s, %s, %s, 'wallet')
              ON DUPLICATE KEY UPDATE
-                wallet_address = VALUES(wallet_address),
-                chain_id       = VALUES(chain_id),
-                claim_role     = VALUES(claim_role),
-                status         = VALUES(status),
-                verified_at    = VALUES(verified_at)",
+                wallet_address      = VALUES(wallet_address),
+                chain_id            = VALUES(chain_id),
+                claim_role          = VALUES(claim_role),
+                status              = VALUES(status),
+                verified_at         = VALUES(verified_at),
+                verification_method = 'wallet',
+                verified_by         = NULL,
+                invited_by          = NULL,
+                invite_expires_at   = NULL,
+                accepted_at         = NULL,
+                added_by_staff      = 0,
+                reconfirmed         = 0,
+                show_publicly       = 0",
             $userId,
             $entityType,
             $entityId,
@@ -249,19 +288,28 @@ class ClaimRepository {
     }
 
     /**
-     * Get all verified claims for an entity.
+     * Get all verified claims for an entity in the given roles.
+     *
+     * D1: the caller names the roles it reads, from PageClaimRolePolicy
+     * (OWNER_ROLES for "is this page claimed", ENTITY_CLAIM_ROLES for an
+     * entity row), so a page TEAM row is never read as an owner.
      *
      * Wallet addresses are NOT included by default to prevent data leaks.
      * Pass $includeWalletAddress = true only when the caller needs it
      * (e.g. admin views).
      *
+     * @param list<string> $roles
      * @return list<ClaimPublic> Array of claim objects with user display_name.
      */
-    public static function getForEntity(string $entityType, int $entityId, bool $includeWalletAddress = false): array {
+    public static function getForEntity(string $entityType, int $entityId, array $roles, bool $includeWalletAddress = false): array {
+        if ($roles === []) {
+            return [];
+        }
         global $wpdb;
         $table = self::table();
 
         $walletCol = $includeWalletAddress ? ', cl.wallet_address' : '';
+        [$roleSql, $roleArgs] = self::roleCondition('cl.claim_role', $roles);
 
         /** @var list<ClaimPublic>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -271,10 +319,12 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id = %d AND cl.status = 'verified'
+               AND {$roleSql}
              ORDER BY cl.verified_at ASC
              LIMIT 100",
             $entityType,
-            $entityId
+            $entityId,
+            ...$roleArgs
         ));
 
         return $rows ?: [];
@@ -320,19 +370,26 @@ class ClaimRepository {
     }
 
     /**
-     * Get a user's claim on a specific entity (if any).
+     * Get a user's claim on a specific entity (if any) in the given roles.
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
      *
+     * @param list<string> $roles
      * @return ClaimRow|null
      */
-    public static function getUserClaim(int $userId, string $entityType, int $entityId): ?object {
+    public static function getUserClaim(int $userId, string $entityType, int $entityId, array $roles): ?object {
+        if ($roles === []) {
+            return null;
+        }
         global $wpdb;
         $table = self::table();
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', $roles);
 
         /** @var ClaimRow|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
-             WHERE user_id = %d AND entity_type = %s AND entity_id = %d",
-            $userId, $entityType, $entityId
+             WHERE user_id = %d AND entity_type = %s AND entity_id = %d
+               AND {$roleSql}",
+            $userId, $entityType, $entityId, ...$roleArgs
         ));
     }
 
@@ -349,27 +406,32 @@ class ClaimRepository {
      * Bounded: caller-paginated IN-list (cards per_page ≤ 50); LIMIT
      * is belt-and-suspenders.
      *
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
+     *
      * @param int[] $entityIds
+     * @param list<string> $roles
      * @return array<int, object> entity_id => claim row.
      * @phpstan-return array<int, ClaimRow>
      */
-    public static function getUserClaimsForEntities(int $userId, string $entityType, array $entityIds): array {
-        if ($userId <= 0 || empty($entityIds)) {
+    public static function getUserClaimsForEntities(int $userId, string $entityType, array $entityIds, array $roles): array {
+        if ($userId <= 0 || empty($entityIds) || $roles === []) {
             return [];
         }
 
         global $wpdb;
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', $roles);
 
         /** @var list<ClaimRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE user_id = %d AND entity_type = %s AND entity_id IN ({$ph})
+               AND {$roleSql}
              LIMIT 500",
             $userId,
             $entityType,
-            ...$entityIds
+            ...[...$entityIds, ...$roleArgs]
         ));
 
         $map = [];
@@ -555,6 +617,37 @@ class ClaimRepository {
      * @return array<int, array{state: string, user_id: int|null}>
      */
     public static function resolveVerifiedOperatorForPages(array $pageIds): array {
+        return self::resolveOperators($pageIds, false);
+    }
+
+    /**
+     * FAIL-CLOSED point variant: the same two-leg resolution, but a read
+     * that fails THROWS instead of reading as UNCLAIMED. For authority
+     * decisions that must not mistake "could not read" for "no owner" (the
+     * page-ownership aligner, live team authorization).
+     *
+     * @return array{state: string, user_id: int|null}
+     * @throws RepositoryReadFailure
+     */
+    public static function resolveVerifiedOperatorForPageStrict(int $pageId): array {
+        if ($pageId <= 0) {
+            return ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+        }
+        $map = self::resolveOperators([$pageId], true);
+        return $map[$pageId] ?? ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+    }
+
+    /**
+     * The resolution behind both variants. Reads go through runRead(), so a
+     * failed read (including wpdb's pre-flush bail, which would otherwise
+     * hand back a previous query's rows) is never read as rows: it answers
+     * no rows, or throws when $failClosed.
+     *
+     * @param array<int|string> $pageIds
+     * @return array<int, array{state: string, user_id: int|null}>
+     * @throws RepositoryReadFailure when $failClosed and a read fails
+     */
+    private static function resolveOperators(array $pageIds, bool $failClosed): array {
         if ($pageIds === []) {
             return [];
         }
@@ -576,8 +669,8 @@ class ClaimRepository {
         $wallets    = \BCC\Core\DB\DB::table('wallet_links');
         $ph         = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<object{page_id: string, user_id: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        /** @var list<object{page_id: string, user_id: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT w.post_id AS page_id, cl.user_id
              FROM {$table} cl
              JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
@@ -586,11 +679,11 @@ class ClaimRepository {
                AND cl.status = 'verified' AND cl.claim_role = 'operator'
              ORDER BY w.post_id, cl.user_id",
             ...$ids
-        ));
+        ), __FUNCTION__, $failClosed);
 
         /** @var array<int, array<int, true>> $byPage */
         $byPage = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
         }
 
@@ -646,8 +739,8 @@ class ClaimRepository {
             // AMBIGUOUS into RESOLVED, handing one of two rival claimants
             // sole authority. Bounded by the 100-id IN-list above instead.
             // CAST per the collation note on findMissingPlaceholderPage.
-            /** @var list<object{page_id: string, user_id: string}>|null $metaRows */
-            $metaRows = $wpdb->get_results($wpdb->prepare(
+            /** @var list<object{page_id: string, user_id: string}> $metaRows */
+            $metaRows = self::runRead($wpdb->prepare(
                 "SELECT pm.post_id AS page_id, cl.user_id
                  FROM {$wpdb->postmeta} pm
                  JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
@@ -657,9 +750,9 @@ class ClaimRepository {
                    AND cl.status = 'verified' AND cl.claim_role = 'operator'
                  ORDER BY pm.post_id, cl.user_id",
                 ...$missing
-            ));
+            ), __FUNCTION__, $failClosed);
 
-            foreach ($metaRows ?: [] as $row) {
+            foreach ($metaRows as $row) {
                 $byPage[(int) $row->page_id][(int) $row->user_id] = true;
             }
         }
@@ -723,17 +816,21 @@ class ClaimRepository {
      *                           (page claims back the card-level
      *                           is_claimed flag; see CardViewService /
      *                           PageCardPrefetcher).
+     * D1: the roles come from PageClaimRolePolicy — see getForEntity().
+     *
      * @param int[]  $entityIds
+     * @param list<string> $roles
      * @return array<int, list<ClaimWithClaimer>> entity_id => array of claim objects
      */
-    public static function getForEntityBatch(string $entityType, array $entityIds): array {
-        if (empty($entityIds)) {
+    public static function getForEntityBatch(string $entityType, array $entityIds, array $roles): array {
+        if (empty($entityIds) || $roles === []) {
             return [];
         }
 
         global $wpdb;
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+        [$roleSql, $roleArgs] = self::roleCondition('cl.claim_role', $roles);
 
         /** @var list<ClaimWithClaimer>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -743,10 +840,11 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id IN ({$ph}) AND cl.status = 'verified'
+               AND {$roleSql}
              ORDER BY cl.verified_at ASC
              LIMIT 500",
             $entityType,
-            ...$entityIds
+            ...[...$entityIds, ...$roleArgs]
         ));
 
         $map = [];
@@ -837,6 +935,65 @@ class ClaimRepository {
         }
     }
 
+    /** Most claims one revoke-all reads at once (F-521); more is refused, never truncated. */
+    public const REVOKE_ALL_MAX = 200;
+
+    /**
+     * F-521: the ids of the VERIFIED validator/collection claims a user holds,
+     * or only those on one wallet address (and chain, when given), lowest id
+     * first. The same wallet/chain match as {@see deleteByUserAndWallet()}.
+     *
+     * Read FAIL-CLOSED and bounded: a failed read, or more than
+     * REVOKE_ALL_MAX rows, THROWS rather than answering with a part, so a
+     * caller never revokes some claims and purges the rest unaudited.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $where = "user_id = %d AND status = 'verified' AND entity_type IN ('validator', 'collection')";
+        $args  = [$userId];
+        if ($walletAddress !== null) {
+            // A wallet's claims are the ones PROVEN by that wallet. A staff
+            // or proof claim stores no linked wallet ('' / 0) and never
+            // matches, and a blank address is refused: it would otherwise
+            // match every claim that has none.
+            if (trim($walletAddress) === '') {
+                throw new \InvalidArgumentException('A blank wallet address matches no claim.');
+            }
+            $where .= " AND wallet_address = %s AND verification_method = 'wallet'";
+            $args[] = $walletAddress;
+            if ($chainId !== null) {
+                $where .= ' AND chain_id = %d';
+                $args[] = $chainId;
+            }
+        }
+        $args[] = self::REVOKE_ALL_MAX + 1;
+
+        /** @var list<object{id: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE {$where} ORDER BY id ASC LIMIT %d",
+            ...$args
+        ), __FUNCTION__, true);
+        if (count($rows) > self::REVOKE_ALL_MAX) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'more verified claims than REVOKE_ALL_MAX');
+        }
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->id;
+        }
+
+        return $ids;
+    }
+
     /**
      * Delete all claims linked to a specific wallet address for a user on a specific chain.
      *
@@ -847,12 +1004,19 @@ class ClaimRepository {
      * @return int Number of rows deleted.
      */
     public static function deleteByUserAndWallet(int $userId, string $walletAddress, ?int $chainId = null): int {
+        // Only claims PROVEN by this wallet are its claims: a staff or proof
+        // claim ('' / 0, its own verification_method) is never purged with a
+        // wallet, and a blank address is refused outright.
+        if (trim($walletAddress) === '') {
+            throw new \InvalidArgumentException('A blank wallet address matches no claim.');
+        }
         global $wpdb;
         $table = self::table();
 
         if ($chainId !== null) {
             return (int) $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s AND chain_id = %d",
+                "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s AND chain_id = %d
+                    AND verification_method = 'wallet'",
                 $userId,
                 $walletAddress,
                 $chainId
@@ -861,7 +1025,8 @@ class ClaimRepository {
 
         // Fallback for callers that don't have chain context (backward compat).
         return (int) $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s",
+            "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s
+                AND verification_method = 'wallet'",
             $userId,
             $walletAddress
         ));
@@ -1106,15 +1271,13 @@ class ClaimRepository {
     public static function revoke(int $claimId): array
     {
         global $wpdb;
-        $table = self::table();
-        $none  = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
 
         if (\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
             throw new \LogicException('ClaimRepository::revoke() must not run inside a TransactionManager transaction');
         }
 
         if ($claimId <= 0) {
-            return $none;
+            return self::NOT_REVOKED;
         }
 
         if ($wpdb->query('START TRANSACTION') === false) {
@@ -1122,6 +1285,59 @@ class ClaimRepository {
         }
 
         try {
+            $result = self::flipRevoked($claimId);
+
+            if ($wpdb->query('COMMIT') === false) {
+                throw new \RuntimeException('COMMIT failed');
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw $e;
+        }
+    }
+
+    /**
+     * {@see revoke()}, but INSIDE the caller's TransactionManager::run(), so
+     * the flip commits or rolls back with the caller's other writes (a staff
+     * revoke and its log row; an owner swap). Refused outside a run.
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function revokeInTransaction(int $claimId): array
+    {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::revokeInTransaction() must run inside a TransactionManager transaction');
+        }
+        if ($claimId <= 0) {
+            return self::NOT_REVOKED;
+        }
+
+        return self::flipRevoked($claimId);
+    }
+
+    /** @var array{revoked: false, user_id: 0, entity_type: '', entity_id: 0, claim_role: '', mirror_page_ids: array{}, bound_page_ids: array{}} */
+    private const NOT_REVOKED = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
+
+    /**
+     * The revoke itself, with NO transaction control of its own: lock the
+     * claim row, find the page mirrors it alone grants, flip both to
+     * revoked. The callers own the transaction.
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     */
+    private static function flipRevoked(int $claimId): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        {
             /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, status: string}> $rows */
             $rows = self::runRead($wpdb->prepare(
                 "SELECT id, user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status
@@ -1133,8 +1349,7 @@ class ClaimRepository {
             if ($claim === null
                 || $claim->status !== ClaimStatus::VERIFIED
                 || !in_array($claim->entity_type, ['validator', 'collection'], true)) {
-                $wpdb->query('COMMIT');
-                return $none;
+                return self::NOT_REVOKED;
             }
 
             $userId     = (int) $claim->user_id;
@@ -1176,10 +1391,6 @@ class ClaimRepository {
                 throw new \RuntimeException('claim revoke UPDATE failed: ' . (string) $wpdb->last_error);
             }
 
-            if ($wpdb->query('COMMIT') === false) {
-                throw new \RuntimeException('COMMIT failed');
-            }
-
             return [
                 'revoked'         => true,
                 'user_id'         => $userId,
@@ -1189,10 +1400,186 @@ class ClaimRepository {
                 'mirror_page_ids' => array_values(array_unique($mirrorPages)),
                 'bound_page_ids'  => $boundPages,
             ];
-        } catch (\Throwable $e) {
-            $wpdb->query('ROLLBACK');
-            throw $e;
         }
+    }
+
+    /**
+     * Write a NON-WALLET owner claim (staff-approved or proven) for an
+     * entity, and its page mirrors, INSIDE the caller's TransactionManager
+     * run. Never upsert(): an existing row for the user and entity is
+     * written only when it is not already a verified claim.
+     *
+     * Only a 'staff' claim may store no wallet ('' / chain 0), and it must
+     * name the approving staff user; a proof claim names its proven address
+     * and chain. The mirrors carry the same method. A page row that was a
+     * TEAM row (administrator, representative) becomes the owner row; those
+     * pages are returned so the caller logs the end of that membership.
+     *
+     * @param list<int> $pageIds the pages bound to the entity (boundPagesFor())
+     * @return array{ok: true, claim_id: int, mirror_page_ids: list<int>, converted_team_roles: array<int, string>}|array{ok: false, reason: 'already_verified'}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed write
+     * @throws \InvalidArgumentException on an invalid method / wallet combination
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function writeRelationshipClaim(
+        int $userId,
+        string $entityType,
+        int $entityId,
+        string $role,
+        string $method,
+        ?int $verifiedBy,
+        string $walletAddress,
+        int $chainId,
+        array $pageIds
+    ): array {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::writeRelationshipClaim() must run inside a TransactionManager transaction');
+        }
+        if ($userId <= 0 || $entityId <= 0 || !in_array($entityType, ['validator', 'collection'], true)
+            || !in_array($role, \BCC\Trust\Onchain\Services\PageClaimRolePolicy::OWNER_ROLES, true)
+        ) {
+            throw new \InvalidArgumentException('Invalid relationship claim target.');
+        }
+        if ($method === 'staff') {
+            if ($walletAddress !== '' || $chainId !== 0 || $verifiedBy === null || $verifiedBy <= 0) {
+                throw new \InvalidArgumentException('A staff claim stores no wallet and names its approver.');
+            }
+        } elseif (in_array($method, ['siws', 'solana_identity'], true)) {
+            if (trim($walletAddress) === '' || $chainId <= 0 || $verifiedBy !== null) {
+                throw new \InvalidArgumentException('A proof claim names its proven address and chain.');
+            }
+        } else {
+            throw new \InvalidArgumentException('Unknown relationship claim method: ' . $method);
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $now   = gmdate('Y-m-d H:i:s');
+        $set   = [
+            'wallet_address'      => $walletAddress,
+            'chain_id'            => $chainId,
+            'claim_role'          => $role,
+            'status'              => ClaimStatus::VERIFIED,
+            'verified_at'         => $now,
+            'verification_method' => $method,
+            'verified_by'         => $verifiedBy,
+            'invited_by'          => null,
+            'invite_expires_at'   => null,
+            'accepted_at'         => null,
+            'added_by_staff'      => 0,
+            'reconfirmed'         => 0,
+            'show_publicly'       => 0,
+        ];
+
+        $existing = self::lockedUserRow($userId, $entityType, $entityId);
+        if ($existing !== null && $existing->status === ClaimStatus::VERIFIED) {
+            return ['ok' => false, 'reason' => 'already_verified'];
+        }
+        $claimId = self::writeRow($existing, $set + ['user_id' => $userId, 'entity_type' => $entityType, 'entity_id' => $entityId, 'created_at' => $now]);
+
+        $mirrors   = [];
+        $converted = [];
+        foreach (array_values(array_unique(array_map('intval', $pageIds))) as $pageId) {
+            if ($pageId <= 0) {
+                continue;
+            }
+            $row = self::lockedUserRow($userId, 'page', $pageId);
+            if ($row !== null && $row->status === ClaimStatus::VERIFIED
+                && in_array($row->claim_role, \BCC\Trust\Onchain\Services\PageClaimRolePolicy::OWNER_ROLES, true)
+            ) {
+                continue; // already this user's owner row, through another claim
+            }
+            if ($row !== null && \BCC\Trust\Onchain\Services\PageClaimRolePolicy::isTeamRole((string) $row->claim_role)
+                && in_array($row->status, [ClaimStatus::INVITED, ClaimStatus::ACTIVE], true)
+            ) {
+                $converted[$pageId] = (string) $row->claim_role;
+            }
+            self::writeRow($row, $set + ['user_id' => $userId, 'entity_type' => 'page', 'entity_id' => $pageId, 'created_at' => $now]);
+            $mirrors[] = $pageId;
+        }
+
+        return ['ok' => true, 'claim_id' => $claimId, 'mirror_page_ids' => $mirrors, 'converted_team_roles' => $converted];
+    }
+
+    /**
+     * The pages bound to an entity, read fail-closed (both binding legs).
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function boundPagesFor(string $entityType, int $entityId): array
+    {
+        return self::boundPageIds($entityType, $entityId);
+    }
+
+    /**
+     * Does the user hold the page through ANY verified claim bound to it?
+     * Read fail-closed (a failed read throws, never reads as "no").
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function userHoldsPageThroughAnyClaim(int $userId, int $pageId): bool
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return false;
+        }
+
+        return self::otherVerifiedClaimBoundToPage($userId, 0, $pageId);
+    }
+
+    /**
+     * The user's row for an entity, locked FOR UPDATE, or null.
+     *
+     * @return object{id: numeric-string, status: string, claim_role: string}|null
+     * @throws RepositoryReadFailure
+     */
+    private static function lockedUserRow(int $userId, string $entityType, int $entityId): ?object
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string, status: string, claim_role: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id, status, claim_role FROM {$table}
+              WHERE user_id = %d AND entity_type = %s AND entity_id = %d FOR UPDATE",
+            $userId,
+            $entityType,
+            $entityId
+        ), __FUNCTION__, true);
+
+        return $rows[0] ?? null;
+    }
+
+    /**
+     * Insert $set, or update the existing (non-verified) row with it.
+     *
+     * @param object{id: numeric-string, status: string, claim_role: string}|null $existing
+     * @param array<string, int|string|null> $set
+     * @return int the row id
+     * @throws \RuntimeException on a failed write
+     */
+    private static function writeRow(?object $existing, array $set): int
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->last_error = '';
+
+        if ($existing === null) {
+            $ok = $wpdb->insert($table, $set);
+            if ($ok !== 1 || self::lastReadError() !== '') {
+                throw new \RuntimeException('relationship claim insert failed: ' . (string) $wpdb->last_error);
+            }
+            return (int) $wpdb->insert_id;
+        }
+
+        unset($set['user_id'], $set['entity_type'], $set['entity_id'], $set['created_at']);
+        $ok = $wpdb->update($table, $set, ['id' => (int) $existing->id, 'status' => (string) $existing->status]);
+        if ($ok !== 1 || self::lastReadError() !== '') {
+            throw new \RuntimeException('relationship claim update failed: ' . (string) $wpdb->last_error);
+        }
+
+        return (int) $existing->id;
     }
 
     /**
@@ -1344,9 +1731,10 @@ class ClaimRepository {
         $collections = \BCC\Core\DB\DB::table('onchain_collections');
         $chains      = \BCC\Core\DB\DB::table('chains');
 
-        /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}> $rows */
+        /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, verification_method: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}> $rows */
         $rows = self::runRead($wpdb->prepare(
             "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address, cl.chain_id, cl.claim_role,
+                    cl.verification_method,
                     COALESCE(v.id, c.id)                 AS entity_row_id,
                     v.operator_address                   AS operator_address,
                     c.contract_address                   AS contract_address,

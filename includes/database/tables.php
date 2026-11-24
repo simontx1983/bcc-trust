@@ -78,6 +78,10 @@ require_once __DIR__ . '/schema-ballots.php';
 // Rank redesign Phase 7 — append-only community-custody ledger (§21.2
 // caps + 30-day global cooldown; create/receive/transfer_out events).
 require_once __DIR__ . '/schema-community-ownership-log.php';
+// Validator relationships — hash-chained, append-only history of owner
+// links, revokes, cancels and team changes.
+require_once __DIR__ . '/schema-validator-relationship-log.php';
+require_once __DIR__ . '/schema-validator-step-ups.php';
 // Rank redesign Phase 8 — misconduct findings (§15) + append-only
 // decision history (§15.5). Distinct from cluster findings (Phase 4).
 require_once __DIR__ . '/schema-findings.php';
@@ -265,6 +269,14 @@ function bcc_trust_create_tables() {
     if (function_exists('bcc_trust_create_community_ownership_log_table')) {
         bcc_trust_create_community_ownership_log_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Community ownership log table created', []);
+    }
+    if (function_exists('bcc_trust_create_validator_relationship_log_table')) {
+        bcc_trust_create_validator_relationship_log_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Validator relationship log table created', []);
+    }
+    if (function_exists('bcc_trust_create_validator_step_ups_table')) {
+        bcc_trust_create_validator_step_ups_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Validator step-ups table created', []);
     }
     if (function_exists('bcc_trust_create_findings_table')) {
         bcc_trust_create_findings_table();

@@ -31,6 +31,11 @@
  * the profile gate's back door. A non-matching target gets the same empty
  * page a missing one does.
  *
+ * ⚠ A SECRET page the viewer may not see (PageAccess: members, invitees, the
+ * author and admins may) gets that same empty page too, and BEFORE the
+ * owner's profile gate: a 403 for a hidden page would itself say "this page
+ * exists".
+ *
  * @package BCC\Trust\Core\Services
  * @since 2026-05-14 (Phase 2 entity tab parity)
  */
@@ -42,6 +47,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -95,6 +101,11 @@ final class CardWatchersService
             || ($cardKind !== ''
                 && PageTypeMap::kindForStoredPageType((string) get_post_meta($pageId, '_bcc_page_type', true)) !== $cardKind)
         ) {
+            return self::emptyPage($offset, $limit);
+        }
+        // A SECRET page this viewer may not see answers like a missing one,
+        // and before the profile gate below, whose 403 would give it away.
+        if (!PageAccess::viewerMaySee($post, $viewerId)) {
             return self::emptyPage($offset, $limit);
         }
         $ownerUserId = (int) $post->post_author;

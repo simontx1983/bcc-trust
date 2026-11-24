@@ -26,6 +26,8 @@ namespace {
         public static array $chatEnabled = [];
         /** @var array<int, true> users with chat_friends_only on */
         public static array $friendsOnly = [];
+        /** H6: the chat settings cannot be read (PeepSoChatPrefs answers null) */
+        public static bool $chatPrefsReadFails = false;
         /** @var array<int, true> suspended users */
         public static array $suspended = [];
         /** true / false / null (unreadable) for the viewer↔peer pair */
@@ -42,6 +44,7 @@ namespace {
             self::$hiddenFromViewer = [];
             self::$chatEnabled      = [];
             self::$friendsOnly      = [];
+            self::$chatPrefsReadFails = false;
             self::$suspended        = [];
             self::$blocked          = false;
             self::$viewedCalls      = [];
@@ -49,20 +52,10 @@ namespace {
         }
     }
 
-    if (!class_exists('PeepSoChatModel', false)) {
-        final class PeepSoChatModel
-        {
-            public static function chat_enabled(int $userId): bool
-            {
-                return DmWorld::$chatEnabled[$userId] ?? true;
-            }
-
-            public static function chat_friends_only(int $userId): bool
-            {
-                return isset(DmWorld::$friendsOnly[$userId]);
-            }
-        }
-    }
+    // H6: MessagesService only checks that PeepSoChatModel EXISTS; its
+    // methods throw (they write on read). The settings come from the
+    // PeepSoChatPrefs stand-in below.
+    require_once __DIR__ . '/peepso-chat-model-throws-stub.php';
 
     if (!function_exists('cache_users')) {
         /** @param list<int> $ids */
@@ -74,6 +67,49 @@ namespace {
         function get_userdata(int $userId)
         {
             return $userId > 0 ? (object) ['ID' => $userId] : false;
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Support {
+    /**
+     * H6: the DmWorld stand-in for the trusted chat-settings reader. Skipped
+     * when a test loaded the REAL reader first (ChatPrefsReadFailClosedTest
+     * drives it over a $wpdb double instead).
+     */
+    if (!class_exists(__NAMESPACE__ . '\PeepSoChatPrefs', false)) {
+        final class PeepSoChatPrefs
+        {
+            /** @return array{chat_enabled: bool, chat_friends_only: bool}|null */
+            public static function forUser(int $userId): ?array
+            {
+                return \DmWorld::$chatPrefsReadFails ? null : self::one($userId);
+            }
+
+            /**
+             * @param list<int> $userIds
+             * @return array<int, array{chat_enabled: bool, chat_friends_only: bool}>|null
+             */
+            public static function forUsers(array $userIds): ?array
+            {
+                if (\DmWorld::$chatPrefsReadFails) {
+                    return null;
+                }
+                $out = [];
+                foreach ($userIds as $id) {
+                    $out[$id] = self::one($id);
+                }
+                return $out;
+            }
+
+            /** @return array{chat_enabled: bool, chat_friends_only: bool} */
+            private static function one(int $userId): array
+            {
+                return [
+                    'chat_enabled'      => \DmWorld::$chatEnabled[$userId] ?? true,
+                    'chat_friends_only' => isset(\DmWorld::$friendsOnly[$userId]),
+                ];
+            }
         }
     }
 }

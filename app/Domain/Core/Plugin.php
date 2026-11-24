@@ -705,7 +705,11 @@ final class Plugin
         return $this->notificationDispatcher ??= new Services\NotificationDispatcher(
             $this->pageOwnerResolver(),
             $this->pushDispatcher(),
-            $this->commentRepository()
+            $this->commentRepository(),
+            // A mention bell is owed only to a member the post's own
+            // permalink would show it to. Resolved lazily, so building the
+            // dispatcher does not build the feed stack.
+            fn (int $actId, int $viewerId): bool => $this->feedRankingService()->canView($actId, $viewerId)
         );
     }
 
@@ -876,7 +880,18 @@ final class Plugin
             $this->userViewService(),
             $this->cardViewService(),
             $this->shiftLogService(),
-            $this->attestationService()
+            $this->attestationService(),
+            $this->publicProfileIndex()
+        );
+    }
+
+    /** F-518: the one owner of "may this be listed publicly" (sitemap + `indexable`). */
+    private ?Services\PublicProfileIndex $publicProfileIndex = null;
+    public function publicProfileIndex(): Services\PublicProfileIndex
+    {
+        return $this->publicProfileIndex ??= new Services\PublicProfileIndex(
+            new Repositories\PublicIndexRepository($this->userInfoRepository()),
+            $this->groupContextResolver()
         );
     }
 
@@ -1491,6 +1506,9 @@ final class Plugin
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
+        // F-518: the app sitemap's public index (members, pages, groups).
+        // Anonymous, viewer-independent, fail-closed.
+        \BCC\Trust\Core\REST\SitemapEndpoint::register();
 
         // V1 contract: per-user 52-week shift-log activity grid (§4.4)
         \BCC\Trust\Core\REST\UsersEndpoint::register();
@@ -2003,17 +2021,23 @@ final class Plugin
             [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handlePostVoteRetry']
         );
 
-        // Edge recalculation after vote removal. Resolve the page owner
-        // here: recalculateVoteEdge expects (source_user_id, target_user_id)
-        // — passing $pageId as the target silently wrote a zero-weight edge
-        // against a non-existent owner id and left the real voter→owner edge
-        // stale after every remove-vote / dispute-accept path.
-        add_action('bcc_trust_async_edge_recalculate', function (int $voterId, int $pageId): void {
-            $ownerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
-            if ($ownerId > 0 && $ownerId !== $voterId) {
-                $this->edgeRepository()->recalculateVoteEdge($voterId, $ownerId);
-            }
-        }, 10, 2);
+        // Edge recalculation after vote removal. The handler resolves the page
+        // owner (recalculateVoteEdge takes source_user_id, target_user_id) and
+        // contains its own failures, so a failed recalc never ends the tick.
+        add_action(
+            'bcc_trust_async_edge_recalculate',
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handleEdgeRecalculate'],
+            10,
+            2
+        );
+
+        // Its delayed retries (+5 min, then +30 min) before it gives up.
+        add_action(
+            \BCC\Trust\Core\Services\Vote\VoteJobDispatcher::EDGE_RETRY_HOOK,
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handleEdgeRetry'],
+            10,
+            3
+        );
 
         // ── Fraud threshold-crossing async fan-out ─────────────────────
         //

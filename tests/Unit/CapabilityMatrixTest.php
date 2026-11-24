@@ -55,43 +55,51 @@ final class CapabilityMatrixTest extends TestCase
     private const DAY = 86400;
 
     /**
-     * @param bool $writeReview  writeReviewGate() verdict
+     * @param bool|null $writeReview writeReviewGate() verdict (null = the tier could not be read, F-469)
      * @param \Throwable|null $attestationThrows attestationGate() behavior
      * @param bool $notSuspended notSuspended() verdict
      * @param bool $ownsPage     ownsPage() verdict
      * @param ?string $rank      rank_state rank_slug (null = New Member / no row)
-     * @param string $tier       current reputation tier slug
+     * @param string $tier       current reputation tier slug ('unknown' = could not be read, F-469)
      * @param bool $inRecovery   §14.2 recovery pause (rank_state 'grace')
      * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null $custody
      *                           custody facts (null = fresh under-cap default)
      */
     private function resolver(
-        bool $writeReview = false,
+        ?bool $writeReview = false,
         ?\Throwable $attestationThrows = null,
         bool $notSuspended = true,
         bool $ownsPage = false,
         ?string $rank = null,
         string $tier = 'neutral',
         bool $inRecovery = false,
-        ?array $custody = null
+        ?array $custody = null,
+        bool $custodyUnavailable = false
     ): CapabilityResolver {
-        return new class ($writeReview, $attestationThrows, $notSuspended, $ownsPage, $rank, $tier, $inRecovery, $custody) extends CapabilityResolver {
+        return new class ($writeReview, $attestationThrows, $notSuspended, $ownsPage, $rank, $tier, $inRecovery, $custody, $custodyUnavailable) extends CapabilityResolver {
             /**
+             * ⚠ `$fakeCustody === null` means "use the default facts" — it is
+             * NOT the unreadable-count case. That one needs
+             * `$fakeCustodyUnavailable`, because `custodyState()` returning
+             * null is a distinct state from "the test did not specify facts",
+             * and `?? [...]` below would otherwise collapse the two.
+             *
              * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null $fakeCustody
              */
             public function __construct(
-                private readonly bool $fakeWriteReview,
+                private readonly ?bool $fakeWriteReview,
                 private readonly ?\Throwable $fakeAttestationThrows,
                 private readonly bool $fakeNotSuspended,
                 private readonly bool $fakeOwnsPage,
                 private readonly ?string $fakeRank,
                 private readonly string $fakeTier,
                 private readonly bool $fakeInRecovery,
-                private readonly ?array $fakeCustody
+                private readonly ?array $fakeCustody,
+                private readonly bool $fakeCustodyUnavailable = false
             ) {
             }
 
-            protected function writeReviewGate(int $userId): bool
+            protected function writeReviewGate(int $userId): ?bool
             {
                 return $this->fakeWriteReview;
             }
@@ -125,6 +133,14 @@ final class CapabilityMatrixTest extends TestCase
 
             protected function tierAtLeast(int $userId, string $tierSlug): bool
             {
+                return $this->tierAtLeastOrUnknown($userId, $tierSlug) === true;
+            }
+
+            protected function tierAtLeastOrUnknown(int $userId, string $tierSlug): ?bool
+            {
+                if ($this->fakeTier === 'unknown') {
+                    return null;
+                }
                 $ord = ['risky' => 0, 'caution' => 1, 'neutral' => 2, 'trusted' => 3, 'elite' => 4];
                 return ($ord[$this->fakeTier] ?? 2) >= ($ord[$tierSlug] ?? 2);
             }
@@ -134,8 +150,14 @@ final class CapabilityMatrixTest extends TestCase
                 return $this->fakeInRecovery;
             }
 
-            protected function custodyState(int $userId): array
+            protected function custodyState(int $userId): ?array
             {
+                // F-503: the owned count could not be READ. Distinct from
+                // every set of facts, including zero-owned.
+                if ($this->fakeCustodyUnavailable) {
+                    return null;
+                }
+
                 return $this->fakeCustody ?? [
                     'owned'            => 0,
                     'cap'              => 2,
@@ -219,6 +241,34 @@ final class CapabilityMatrixTest extends TestCase
         self::assertTrue($denied->isDenied());
         self::assertSame('feature_gate', $denied->reason);
         self::assertSame('feature_access', $denied->source);
+    }
+
+    /**
+     * F-469: a standing that could not be read is `unavailable` (the F-503
+     * reason callers answer with 503), never feature_gate and never allowed.
+     */
+    public function testAnUnreadableStandingIsUnavailableForBothWriteActions(): void
+    {
+        foreach ([CapabilityCatalog::WRITE_REVIEW, CapabilityCatalog::CAST_DISPUTE_VOTE] as $key) {
+            $decision = $this->resolver(writeReview: null)->can(7, $key);
+            self::assertTrue($decision->isDenied(), "key {$key}");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
+    }
+
+    /** F-469: every tier-gated capability answers `unavailable` on an unreadable tier. */
+    public function testAnUnreadableTierIsUnavailableForEveryTierGatedCapability(): void
+    {
+        foreach ([
+            CapabilityCatalog::CREATE_COMMUNITY      => 'veteran',
+            CapabilityCatalog::RECEIVE_COMMUNITY     => 'veteran',
+            CapabilityCatalog::POST_RANKED_HALL_FEED => 'journeyman',
+            CapabilityCatalog::LIST_AS_MENTOR        => 'veteran',
+        ] as $key => $rank) {
+            $decision = $this->resolver(rank: $rank, tier: 'unknown')->can(7, $key);
+            self::assertTrue($decision->isDenied(), "key {$key}");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
     }
 
     public function testSuspendedMemberIsDeniedBothWriteActions(): void
@@ -409,6 +459,214 @@ final class CapabilityMatrixTest extends TestCase
             custody: ['owned' => 0, 'cap' => 2, 'last_event_ts' => null, 'cooldown_seconds' => 30 * self::DAY]
         )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
         self::assertTrue($never->isAllowed());
+    }
+
+    // ── F-503 — an unreadable owned count must REFUSE, not allow ─────
+
+    /**
+     * ⛔ Both keys that reach the custody gate grant a DURABLE write, so an
+     * owned count that could not be read must deny. `countOwnedUserGroups()`
+     * answered 0 for a failed read, which is "owns none" — the most
+     * permissive input a cap comparison can take — and what it admitted
+     * stayed granted after the fault cleared.
+     *
+     * Covers both CREATE and RECEIVE because they share
+     * `resolveCustodyAcquisition()`; if that ever stops being true, this
+     * loop is what notices.
+     */
+    public function testAnUnreadableOwnedCountDeniesEveryCapGatedWrite(): void
+    {
+        foreach ([CapabilityCatalog::CREATE_COMMUNITY, CapabilityCatalog::RECEIVE_COMMUNITY] as $key) {
+            $decision = $this->resolver(
+                rank: 'journeyman',
+                tier: 'neutral',
+                custodyUnavailable: true
+            )->can(7, $key);
+
+            self::assertFalse($decision->isAllowed(), "key {$key} was allowed on an unreadable count");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
+    }
+
+    /**
+     * ⭐⭐ DURING A COUNT FAULT, RECEIVERS MUST BE INDISTINGUISHABLE.
+     *
+     * The receive decision is evaluated FOR the receiver and reported to the
+     * GIVER, so every real sub-reason collapses to `receiver_ineligible`.
+     * `unavailable` does NOT collapse — it is retryable rather than a
+     * refusal — so with the count read AFTER the status gates, a count fault
+     * would hand the giver a status probe:
+     *
+     *   a suspended receiver  → `suspended`   (→ 403 receiver_ineligible)
+     *   an eligible receiver  → `unavailable` (→ 503)
+     *
+     * open for the length of the fault, and exactly what the v1.65 collapse
+     * exists to close. Reading the count first makes the reason independent
+     * of the receiver.
+     *
+     * ⚠ This asserts the two reasons are the SAME, not merely that each is
+     * `unavailable`. Sameness is the property a probe needs broken, and an
+     * assertion on one receiver alone would not notice the other diverging.
+     */
+    public function testDuringACountFaultEveryReceiverGetsTheSameReason(): void
+    {
+        $suspended = $this->resolver(
+            notSuspended: false,
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+        $eligible = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+        self::assertSame(
+            $eligible->reason,
+            $suspended->reason,
+            'a count fault lets the giver tell a suspended receiver from an eligible one'
+        );
+        self::assertSame('unavailable', $suspended->reason);
+        self::assertFalse($suspended->isAllowed());
+        self::assertFalse($eligible->isAllowed());
+    }
+
+    /**
+     * ⚠ And for every OTHER status gate too, not just suspension — which is
+     * the one a reader would check and stop at.
+     */
+    public function testTheSameHoldsForEveryStatusGateOnReceive(): void
+    {
+        $variants = [
+            'new member'    => ['rank' => null,         'tier' => 'neutral', 'rec' => false],
+            'below neutral' => ['rank' => 'journeyman', 'tier' => 'risky',   'rec' => false],
+            'in recovery'   => ['rank' => 'journeyman', 'tier' => 'neutral', 'rec' => true],
+        ];
+
+        foreach ($variants as $label => $v) {
+            $decision = $this->resolver(
+                rank: $v['rank'],
+                tier: $v['tier'],
+                inRecovery: $v['rec'],
+                custodyUnavailable: true
+            )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+            self::assertSame('unavailable', $decision->reason, "receiver status: {$label}");
+        }
+    }
+
+    /**
+     * ⭐⭐ F-469: THE SAME, DURING A TIER FAULT. An unreadable trust tier is
+     * `unavailable` too, so it is read up front on RECEIVE like the count.
+     * Read after the status gates, a suspended, New Member or in-recovery
+     * receiver would answer its own reason (→ 403 receiver_ineligible) while
+     * an eligible one answered `unavailable` (→ 503): the same probe.
+     *
+     * Asserts SAMENESS across every status variant, not only `unavailable`
+     * on each.
+     */
+    public function testDuringATierFaultEveryReceiverGetsTheSameReason(): void
+    {
+        $eligible = $this->resolver(rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+        self::assertSame('unavailable', $eligible->reason);
+        self::assertFalse($eligible->isAllowed());
+
+        $variants = [
+            'suspended'   => ['ok' => false, 'rank' => 'journeyman', 'rec' => false],
+            'new member'  => ['ok' => true,  'rank' => null,         'rec' => false],
+            'in recovery' => ['ok' => true,  'rank' => 'journeyman', 'rec' => true],
+        ];
+
+        foreach ($variants as $label => $v) {
+            $decision = $this->resolver(
+                notSuspended: $v['ok'],
+                rank: $v['rank'],
+                tier: 'unknown',
+                inRecovery: $v['rec']
+            )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+            self::assertSame(
+                $eligible->reason,
+                $decision->reason,
+                "a tier fault lets the giver tell a receiver who is {$label} from an eligible one"
+            );
+        }
+    }
+
+    /** F-469: and CREATE still keeps its documented order during a tier fault. */
+    public function testCreateKeepsItsDocumentedGateOrderDuringATierFault(): void
+    {
+        $decision = $this->resolver(notSuspended: false, rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertSame('suspended', $decision->reason, "create's documented gate order changed");
+    }
+
+    /**
+     * ⚠ THE SCOPE CONTROL: CREATE's order is UNCHANGED. Its reasons are the
+     * caller's own, there is no third party to disclose to, and the contract
+     * documents the sequence — so a suspended creator still reads
+     * `suspended`, not `unavailable`, even when the count cannot be read.
+     *
+     * Without this, moving the read for BOTH keys would look correct.
+     */
+    public function testCreateKeepsItsDocumentedGateOrder(): void
+    {
+        $decision = $this->resolver(
+            notSuspended: false,
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertSame('suspended', $decision->reason, "create's documented gate order changed");
+    }
+
+    /**
+     * ⭐ THE ANTI-VACUITY CONTROL. The member below is fully eligible — the
+     * ONLY difference from an allowed case is that the count could not be
+     * read. Without this, the test above would also pass for a gate that
+     * denied everyone, and "unknown" would look handled while actually
+     * being indistinguishable from any other denial.
+     */
+    public function testAnUnreadableCountIsNotTreatedAsUnderTheCap(): void
+    {
+        $allowed = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custody: ['owned' => 0, 'cap' => 5, 'last_event_ts' => null, 'cooldown_seconds' => 30 * self::DAY]
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+        self::assertTrue($allowed->isAllowed(), 'the control: this member is otherwise eligible');
+
+        $unknown = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertFalse($unknown->isAllowed(), '"could not count" was read as "under the cap"');
+        self::assertNotSame('cap_reached', $unknown->reason, 'and it is not a cap denial — it is an unknown');
+    }
+
+    /**
+     * ⚠ SCOPE CONTROL: relinquishing custody is NOT blocked by an
+     * unreadable count. The giver's gate has no cap check by design — the
+     * cooldown blocks ACQUIRING custody, never giving it away — so a
+     * fail-closed count must not strand someone's ability to hand a
+     * community over.
+     */
+    public function testTransferAwayIsUnaffectedByAnUnreadableCount(): void
+    {
+        $decision = $this->resolver(
+            rank: 'journeyman',
+            tier: 'neutral',
+            custodyUnavailable: true
+        )->can(7, CapabilityCatalog::TRANSFER_COMMUNITY);
+
+        self::assertTrue($decision->isAllowed(), 'an unreadable count must not block transfer-away');
     }
 
     // ── Rank Phase 7 — §21.2 transfer-away (the GIVER's gate) ────────

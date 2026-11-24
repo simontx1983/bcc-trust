@@ -18,4 +18,14 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class VoteEligibilityException extends \RuntimeException {}
+class VoteEligibilityException extends \RuntimeException
+{
+    /**
+     * F-391: the exception CODE of a refusal by a rate limit (the daily
+     * downvote cap, the general vote limit), as opposed to an eligibility
+     * rule. Callers answer it with bcc_rate_limited 429, not 403: the
+     * RateLimiter recorded the denial, so the REST Envelope adds the time
+     * left (Retry-After, retry_after_seconds).
+     */
+    public const RATE_LIMITED = 429;
+}

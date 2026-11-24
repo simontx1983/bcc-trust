@@ -7,7 +7,7 @@
  * Text Domain: bcc-trust
  * Domain Path: /languages
  * Requires at least: 5.8
- * Requires PHP: 8.1
+ * Requires PHP: 8.2
  * GitHub Plugin URI: https://github.com/simontx1983/bcc-trust
  * Primary Branch: main
  */
@@ -952,6 +952,11 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
     return $hooks;
 });
 
+// F-454: the caution/risky list reaching its ceiling with risky members
+// alone pages as P1 (bcc-core's DegradationAlerter reads this filter at
+// alert time); caution_list's own ceiling_reached stays P2.
+add_filter('bcc_degradation_p1_subsystems', [\BCC\Trust\Core\Repositories\ReputationRepository::class, 'withRiskyCeilingAsP1']);
+
 // V2 Phase 1b: dedupe-sweep cron handler. Bounded operationally —
 // see HeliusSeenSignaturesRepository for the cap + alarm rules.
 add_action('bcc_helius_dedupe_sweep', static function (): void {
@@ -1135,6 +1140,10 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
     // as the revoke sweep above: these two were scheduled only in
@@ -1286,6 +1295,15 @@ $bccClaimReverify = static function (): void {
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
 
+// Validator staff step-ups: purge rows that expired more than a day ago.
+add_action('bcc_validator_step_up_purge', static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\ValidatorStepUpService::purgeExpired();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] step-up purge failed', ['error' => $e->getMessage()]);
+    }
+});
+
 // V2: when PeepSo evicts a user from a group via mod action, record a
 // permanent opt-out so our reconcile sweep won't re-add a banned user.
 // Only writes opt-out for our holder groups; ignores others.
@@ -1367,10 +1385,25 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if (!$isGatedGroup) {
         return; // Neither a holder group nor a delegator community.
     }
+    // A rejoin block that cannot be recorded now is audited and retried
+    // (NftGroupGateService::recordEvictionRejoinBlock).
     \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
-        ->recordPermanentOptOut($userId, $groupId);
+        ->recordEvictionRejoinBlock($userId, $groupId);
 }, 10, 2);
+
+// The rejoin block's retry: one single event per attempt, scheduled by
+// recordEvictionRejoinBlock() itself, which also decides when to stop.
+add_action(
+    \BCC\Trust\Onchain\Services\NftGroupGateService::REJOIN_BLOCK_RETRY_HOOK,
+    static function ($userId, $groupId, $attempt): void {
+        \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->nftGroupGateService()
+            ->recordEvictionRejoinBlock((int) $userId, (int) $groupId, (int) $attempt);
+    },
+    10,
+    3
+);
 
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();
@@ -1658,10 +1691,16 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 
 // Security review 2026-11-18 (H2): members sign in at the app only.
 // wp-login.php / XML-RPC refuse member accounts, wp-admin sends members
-// away, and a member on a bcc route must be authenticated by the bearer
-// token (never a WordPress cookie or application password); see
+// away, admin-ajax and PeepSo's /peepsoajax/ refuse them (2026-11-19),
+// and a member on a bcc route must be authenticated by the bearer token
+// (never a WordPress cookie or application password); see
 // WordPressSignInGate.
 \BCC\Trust\Core\Security\WordPressSignInGate::register();
+
+// Security review 2026-11-19: WordPress's own front end on the cms host
+// serves no feeds (they 301 to the app), names no WordPress version and
+// links no feeds from its head; see WordPressFrontEndGate.
+\BCC\Trust\Core\Security\WordPressFrontEndGate::register();
 
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list
@@ -1670,10 +1709,10 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 \BCC\Trust\Core\Security\SuspendedWriteGate::register();
 
 // Security review 2026-11-18: non-admins may call BCC's own REST namespaces
-// only (signed out: also GET elsewhere, except /wp/v2/users*), and only
-// admins get application passwords. A member's bearer token reaches every
-// REST route, and core's let it change the account's password or email
-// around every BCC step-up; see RestRouteAllowlist.
+// only, reads included (signed out: also RestRouteAllowlist::EXEMPT_ROUTES,
+// none today), and only admins get application passwords. A member's bearer
+// token reaches every REST route, and core's let it change the account's
+// password or email around every BCC step-up; see RestRouteAllowlist.
 \BCC\Trust\Core\Security\RestRouteAllowlist::register();
 
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
@@ -1942,17 +1981,15 @@ add_action('plugins_loaded', function (): void {
         }
     }, 10, 3);
 
-    // User deletion: clean up wallet links, signals, claims, and the
-    // per-wallet on-chain data hung off them (NFT holdings + profile
-    // selections). NftHoldings resolves ownership by joining wallet_links,
-    // so it MUST run BEFORE WalletRepository::deleteForUser deletes those
-    // rows — otherwise the join finds nothing and holdings orphan.
+    // User deletion: the on-chain signals. NFT holdings, NFT selections,
+    // claims and wallet links are cleaned up by
+    // UserLifecycleService::onUserDelete(), in the order they need: holdings
+    // before the wallet links they join through, and each verified claim
+    // revoked through the audited path (its page released) before the claim
+    // rows are purged (F-521). They are not repeated here: a second, bare
+    // claim delete would depend on hook order to keep that guarantee.
     add_action('delete_user', function (int $userId): void {
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\SignalRepository::deleteForUser($userId);
-        \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
     }, 10, 1);
 
     // REST API.
@@ -2431,6 +2468,10 @@ function bcc_trust_activate() {
     // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
+    }
+    // Validator staff step-ups: daily bounded purge of expired rows.
+    if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

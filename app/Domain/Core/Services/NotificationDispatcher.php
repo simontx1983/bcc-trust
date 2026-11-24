@@ -44,6 +44,9 @@
  *   - Dedup is structural: MentionExtractor::extractUserIds returns
  *     unique-by-first-occurrence ids, so three `@bob` tokens in one
  *     post produce exactly one bell row for Bob.
+ *   - Across posts (F-415): at most one mention bell per (mentioner,
+ *     mentionee) per 5 minutes, across posts, comments and quotes; later
+ *     mentions in the window fold into it, and push still counts them.
  *
  * Primary-Hall post dispatch (V2 retention slice, locked 2026-05-11):
  *   - dispatchPrimaryHallPostFor + onPostInPrimaryHall fan out
@@ -105,10 +108,18 @@ if (!defined('ABSPATH')) {
 
 final class NotificationDispatcher
 {
+    /**
+     * @param \Closure(int, int): bool $canViewActivity may this member
+     *        (2nd argument) open this activity's permalink (1st)? The
+     *        permalink's own gate, FeedRankingService::canView(); a mention
+     *        or primary-Hall bell is owed only on a yes
+     *        (recipientCanOpen()). May throw when the read did not run.
+     */
     public function __construct(
         private readonly PageOwnerResolver $pageOwnerResolver,
         private readonly PushDispatcher $pushDispatcher,
         private readonly CommentRepository $commentRepository,
+        private readonly \Closure $canViewActivity,
     ) {
     }
 
@@ -202,7 +213,7 @@ final class NotificationDispatcher
                     : sprintf('@%s reviewed your page.', $actorHandle);
             }
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $authorId,
                 $ownerId,
                 $message,
@@ -216,9 +227,10 @@ final class NotificationDispatcher
             // to call unconditionally — bell + push toggles are
             // independent surfaces.
             $this->pushDispatcher->enqueue($ownerId, 'review', [
-                'actor_handle' => $actorHandle,
-                'page_id'      => $pageId,
-                'page_name'    => $pageName,
+                'actor_handle'    => $actorHandle,
+                'page_id'         => $pageId,
+                'page_name'       => $pageName,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] review dispatch failed', [
@@ -246,14 +258,16 @@ final class NotificationDispatcher
             return;
         }
         try {
-            $actorHandle = self::resolveHandle($replierId);
-            if (MemberSelfPageService::isSelfPage($pageId)) {
-                $message = sprintf('@%s replied to your review.', $actorHandle);
+            // F-578: on a card page the reply can stand as the page's own
+            // response, so its bell speaks as the page and names no one
+            // (NotificationViewService::speaksAsPage(), which the bell list
+            // and the digest also follow). The replier stays the row's sender,
+            // so PeepSo's block suppression and the bell list's blocked-actor
+            // filter still apply; the readers never show them.
+            if (NotificationViewService::speaksAsPage(NotificationType::REVIEW_REPLY, $pageId)) {
+                $message = NotificationViewService::pageVoiceReplyMessage($pageId);
             } else {
-                $pageName = self::resolvePageName($pageId);
-                $message  = $pageName !== ''
-                    ? sprintf('@%s replied to your review of %s.', $actorHandle, $pageName)
-                    : sprintf('@%s replied to your review.', $actorHandle);
+                $message = sprintf('@%s replied to your review.', self::resolveHandle($replierId));
             }
 
             $this->dispatch(
@@ -700,6 +714,14 @@ final class NotificationDispatcher
      * to the originating write. Per-mentionee failures are already
      * caught inside onMentioned.
      *
+     * ⚠ AUDIENCE (bug finder, 2026-11-18). MentionPolicy checks only WHO
+     * may be mentioned, never whether they can see the post. A mentionee is
+     * therefore notified only when the permalink the bell links to ($actId:
+     * the post, or for a comment its parent post) would show it to them
+     * (recipientCanOpen()). Anyone else is dropped SILENTLY: the author is
+     * never told why, as in the DM recipient picker.
+     * Rationale: F-413 (private tracker).
+     *
      * @param int    $authorId   user_id of the post/comment author
      * @param int    $postId     wp_post.ID of the post containing the body
      *                           (used as `external_id` in the bell row)
@@ -740,6 +762,11 @@ final class NotificationDispatcher
                 return;
             }
             foreach ($allowed as $mentioneeId) {
+                // Self-mentions are skipped in onMentioned(); skipping them
+                // here as well saves a permalink check per post.
+                if ($mentioneeId === $authorId || !$this->recipientCanOpen($actId, $mentioneeId, 'mention')) {
+                    continue;
+                }
                 $this->onMentioned($authorId, $mentioneeId, $postId, $actId, $isComment);
             }
         } catch (\Throwable $e) {
@@ -753,10 +780,68 @@ final class NotificationDispatcher
     }
 
     /**
+     * May $recipientId open the permalink a bell would link to? The
+     * permalink's own gate (GET /feed/{id}), so a bell about a post (a
+     * mention, a post in the member's primary Hall) only goes to someone
+     * the link would show it to. Asked per recipient with an explicit
+     * viewer id, so it holds in the async fan-out (no current user there).
+     *
+     * Fails CLOSED: with no act id there is no permalink to show, and a
+     * read that did not run is not a yes. A dropped bell is the cheap
+     * mistake. Rationale: F-413, F-414 (private tracker).
+     *
+     * @param string $bell the bell kind, for the log line only
+     */
+    private function recipientCanOpen(int $actId, int $recipientId, string $bell): bool
+    {
+        if ($actId <= 0) {
+            return false;
+        }
+        try {
+            return ($this->canViewActivity)($actId, $recipientId) === true;
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] ' . $bell . ' audience check failed; no bell', [
+                'act_id'       => $actId,
+                'recipient_id' => $recipientId,
+                'error'        => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
+    /**
+     * F-415: one mention bell per (mentioner, mentionee) per 5 minutes.
+     *
+     * The same window as the hall-post and comment-received bells and the
+     * push debounce, so every mention push sits on at least one mention
+     * bell. It bounds a flood (quotes are unlimited, and the write throttles
+     * alone allowed hundreds of bells an hour from one member to another) to
+     * 12 an hour, while repeat mentions in one conversation fold into the
+     * bell the member already has. A slow flood beyond that is what blocking
+     * is for (MentionPolicy drops a blocked pair).
+     */
+    private const MENTION_BELL_WINDOW_SECS = 300;
+
+    /**
+     * The window's key: mentioner and mentionee only. No post id and no
+     * kind, so a new post, comment or quote cannot reopen it.
+     */
+    private static function mentionBellWindowKey(int $authorId, int $mentioneeId): string
+    {
+        return sprintf('bcc_mention_bell_%d_%d', $authorId, $mentioneeId);
+    }
+
+    /**
      * Dispatch a single mention bell + push. Mirrors onReactionAdded
      * shape — sync write, self-skip, per-recipient error log. The
      * shared dispatch() helper applies the bell pref gate; the push
      * dispatcher self-gates on the push pref + 5-min debounce.
+     *
+     * The bell goes through the F-415 mention window
+     * (MENTION_BELL_WINDOW_SECS); the push does not. A read of the window
+     * that fails reads as an open window, so a first mention is never left
+     * without its bell (claimBellWindow()); a bell write that fails releases
+     * the window it claimed.
      *
      * Marked public so it can be exercised by unit tests; the
      * orchestrator above is the canonical entry point in production.
@@ -783,23 +868,39 @@ final class NotificationDispatcher
                 ? sprintf('@%s mentioned you in a comment.', $actorHandle)
                 : sprintf('@%s mentioned you in a post.', $actorHandle);
 
-            $this->dispatch(
-                $authorId,
-                $mentioneeId,
-                $message,
-                NotificationType::MENTION,
-                $postId,
-                $actId
-            );
+            // F-415: at most one mention bell per (mentioner, mentionee) per
+            // window, whatever carried the mention (post, comment or quote).
+            // A later mention in the window folds into the bell already
+            // written; the push below still counts it.
+            $windowKey = self::mentionBellWindowKey($authorId, $mentioneeId);
+            $bellId    = 0;
+            if (self::claimBellWindow($windowKey, self::MENTION_BELL_WINDOW_SECS)) {
+                $bellId = $this->writeBell(
+                    $authorId,
+                    $mentioneeId,
+                    $message,
+                    NotificationType::MENTION,
+                    $postId,
+                    $actId
+                );
+                if ($bellId === self::BELL_WRITE_FAILED) {
+                    // The bell this window was claimed for was never written:
+                    // release it, or the next mention would fold into nothing.
+                    delete_transient($windowKey);
+                }
+            }
 
-            // Parallel push enqueue — debounced to one push per
-            // (recipient, 'mention') per 5 min, count-aggregated.
+            // Parallel push enqueue for EVERY mention, folded ones included —
+            // debounced to one push per (recipient, 'mention') per 5 min,
+            // count-aggregated, so the count stays true. Only mentions that
+            // passed the audience gate get here (dispatchMentionsFor()).
             // PushDispatcher::enqueue self-gates on push prefs.
             $this->pushDispatcher->enqueue($mentioneeId, 'mention', [
-                'actor_handle' => $actorHandle,
-                'post_id'      => $postId,
-                'act_id'       => $actId,
-                'is_comment'   => $isComment,
+                'actor_handle'    => $actorHandle,
+                'post_id'         => $postId,
+                'act_id'          => $actId,
+                'is_comment'      => $isComment,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] mention dispatch failed', [
@@ -907,6 +1008,11 @@ final class NotificationDispatcher
      * Push: always enqueued (PushDispatcher self-debounces on its own
      * 5-min (recipient, eventType) window and self-gates on push prefs).
      *
+     * Audience: neither the bell nor the push goes to a recipient who
+     * could not open the post they link to (recipientCanOpen(), the
+     * permalink's own gate; fails closed). Checked before the bell window
+     * is claimed. Rationale: F-414 (private tracker).
+     *
      * Marked public so it can be exercised by unit tests; the
      * orchestrator above is the canonical entry point in production.
      */
@@ -928,6 +1034,12 @@ final class NotificationDispatcher
             // duplicated by dispatch()'s $toUserId !== $fromUserId check.
             return;
         }
+        // Only someone who could open the post gets its bell and push.
+        // Asked BEFORE the bell window is claimed, so a post they may not
+        // open never uses up their window for the Hall.
+        if (!$this->recipientCanOpen($actId, $recipientId, 'hall-post')) {
+            return;
+        }
         try {
             $transientKey = sprintf(
                 'bcc_hall_post_notified_%d_%d',
@@ -935,18 +1047,13 @@ final class NotificationDispatcher
                 $groupId
             );
 
-            $coalesced = get_transient($transientKey) !== false;
-            if (!$coalesced) {
-                // Set the gate BEFORE the dispatch so a second concurrent
-                // post for the same (recipient, group) sees the lock
-                // even if the bell write is still in flight.
-                set_transient($transientKey, 1, self::HALL_POST_BELL_WINDOW_SECS);
-
+            $bellId = 0;
+            if (self::claimBellWindow($transientKey, self::HALL_POST_BELL_WINDOW_SECS)) {
                 $message = $hallName !== ''
                     ? sprintf('@%s posted in %s.', $authorHandle, $hallName)
                     : sprintf('@%s posted in your Hall.', $authorHandle);
 
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $authorId,
                     $recipientId,
                     $message,
@@ -962,11 +1069,12 @@ final class NotificationDispatcher
             // on the same 5-min window so a user sees at most one bell +
             // one push per Hall per window.
             $this->pushDispatcher->enqueue($recipientId, 'hall_post', [
-                'actor_handle' => $authorHandle,
-                'group_id'     => $groupId,
-                'hall_name'    => $hallName,
-                'hall_slug'    => $hallSlug,
-                'act_id'       => $actId,
+                'actor_handle'    => $authorHandle,
+                'group_id'        => $groupId,
+                'hall_name'       => $hallName,
+                'hall_slug'       => $hallSlug,
+                'act_id'          => $actId,
+                'notification_id' => $bellId,
             ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] hall-post dispatch failed', [
@@ -1156,14 +1264,9 @@ final class NotificationDispatcher
             $parentPostId
         );
 
-        $coalesced = get_transient($transientKey) !== false;
-        if (!$coalesced) {
-            // Set the gate BEFORE the dispatch so a second concurrent
-            // comment for the same (recipient, post) sees the lock
-            // even if the bell write is still in flight.
-            set_transient($transientKey, 1, self::COMMENT_RECEIVED_BELL_WINDOW_SECS);
-
-            $this->dispatch(
+        $bellId = 0;
+        if (self::claimBellWindow($transientKey, self::COMMENT_RECEIVED_BELL_WINDOW_SECS)) {
+            $bellId = $this->writeBell(
                 $commenterId,
                 $recipientId,
                 $message,
@@ -1178,9 +1281,10 @@ final class NotificationDispatcher
         // aggregation; both align on the same 5-min window so a user
         // sees at most one bell + one push per post per window.
         $payload = [
-            'actor_handle' => $actorHandle,
-            'post_id'      => $parentPostId,
-            'act_id'       => $parentActId,
+            'actor_handle'    => $actorHandle,
+            'post_id'         => $parentPostId,
+            'act_id'          => $parentActId,
+            'notification_id' => $bellId,
         ];
         if ($isReply) {
             // PushPayload::forCommentReceived branches its copy on this.
@@ -1243,8 +1347,9 @@ final class NotificationDispatcher
                 ? 'attestation_vouch_received'
                 : 'attestation_stand_behind_received';
 
+            $bellId = 0;
             if ($this->attestationBellOpen('created', $attestorId, $targetOwnerId, $kind)) {
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $attestorId,
                     $targetOwnerId,
                     $message,
@@ -1262,6 +1367,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-created dispatch failed', [
@@ -1284,22 +1390,18 @@ final class NotificationDispatcher
      * time ("vouched for you", "revoked their vouch", "vouched for you", …).
      * Push already self-debounces (PushDispatcher, 5 min); the bell did not.
      *
-     * Same shape as the hall-post and comment-received bell gates: a
-     * transient set BEFORE the write, so a concurrent toggle sees it. Keyed
-     * per EVENT, so a storm leaves at most one "vouched" and one "revoked"
-     * bell per attestor→recipient pair and kind per day, while a genuine
-     * first vouch and a genuine revoke still each notify. The profile, not
-     * the bell, is the source of truth for the current state.
+     * The same gate as the hall-post and comment-received bells
+     * (claimBellWindow()). Keyed per EVENT, so a storm leaves at most one
+     * "vouched" and one "revoked" bell per attestor→recipient pair and kind
+     * per day, while a genuine first vouch and a genuine revoke still each
+     * notify. The profile, not the bell, is the source of truth for the
+     * current state.
      */
     private function attestationBellOpen(string $event, int $attestorId, int $recipientId, string $kind): bool
     {
         $key = sprintf('bcc_attest_bell_%s_%s_%d_%d', $event, $kind, $attestorId, $recipientId);
-        if (get_transient($key) !== false) {
-            return false;
-        }
-        set_transient($key, 1, self::ATTESTATION_BELL_WINDOW_SECS);
 
-        return true;
+        return self::claimBellWindow($key, self::ATTESTATION_BELL_WINDOW_SECS);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1335,8 +1437,9 @@ final class NotificationDispatcher
                 ? sprintf('@%s is no longer backing you.', $actorHandle)
                 : sprintf('@%s revoked their vouch.', $actorHandle);
 
+            $bellId = 0;
             if ($this->attestationBellOpen('revoked', $attestorId, $targetOwnerId, $kind)) {
-                $this->dispatch(
+                $bellId = $this->writeBell(
                     $attestorId,
                     $targetOwnerId,
                     $message,
@@ -1352,6 +1455,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-revoked dispatch failed', [
@@ -1394,7 +1498,7 @@ final class NotificationDispatcher
                 ? sprintf('@%s reaffirmed backing you.', $actorHandle)
                 : sprintf('@%s reaffirmed their vouch.', $actorHandle);
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $attestorId,
                 $targetOwnerId,
                 $message,
@@ -1409,6 +1513,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
+                'notification_id' => $bellId,
             ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-reaffirmed dispatch failed', [
@@ -1488,7 +1593,7 @@ final class NotificationDispatcher
                 return;
             }
 
-            $this->dispatch(
+            $bellId = $this->writeBell(
                 $senderId,
                 $targetOwnerId,
                 $message,
@@ -1503,9 +1608,10 @@ final class NotificationDispatcher
             // (last_notified_at), the recipient sees at most one
             // push per state-transition.
             $this->pushDispatcher->enqueue($targetOwnerId, 'divergence_state_warning', [
-                'new_state'    => $newState,
-                'target_kind'  => $targetKind,
-                'target_id'    => $targetId,
+                'new_state'       => $newState,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'notification_id' => $bellId,
             ]);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] divergence-state-warning dispatch failed', [
@@ -1590,7 +1696,7 @@ final class NotificationDispatcher
             $delivered = [];
             foreach ($pending as $userId) {
                 try {
-                    $this->dispatch(
+                    $bellId = $this->writeBell(
                         $senderId,
                         $userId,
                         $message,
@@ -1621,6 +1727,7 @@ final class NotificationDispatcher
                         'collection_id'    => $collectionId,
                         'chain_id'         => $chainId,
                         'contract_address' => $contract,
+                        'notification_id'  => $bellId,
                     ]);
                 } catch (\Throwable $e) {
                     Logger::warning('[NotificationDispatcher] holder-community-live push enqueue failed', [
@@ -1956,6 +2063,34 @@ final class NotificationDispatcher
     // Shared write path
     // ──────────────────────────────────────────────────────────────────
 
+    /**
+     * The one bell-coalescing gate: claim the window $key for $windowSecs
+     * and say whether this caller got it (true = write the bell; false =
+     * one was already written in this window). The hall-post,
+     * comment-received, F-78 attestation and F-415 mention bells all go
+     * through it.
+     *
+     * The window is set BEFORE the caller's bell write, so a concurrent
+     * event for the same key sees it even while that write is in flight.
+     * A read that fails returns false from get_transient(), the same as no
+     * window, so a broken cache errs toward the bell, never away from it.
+     */
+    private static function claimBellWindow(string $key, int $windowSecs): bool
+    {
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, $windowSecs);
+
+        return true;
+    }
+
+    /**
+     * Write one bell row. False ONLY when the write was attempted and
+     * failed, so a caller holding a bell window can release it
+     * (onMentioned()); a recipient who turned this bell off is true,
+     * because nothing was owed. Callers that hold no window ignore it.
+     */
     private function dispatch(
         int $fromUserId,
         int $toUserId,
@@ -1963,14 +2098,35 @@ final class NotificationDispatcher
         string $type,
         int $externalId,
         int $actId
-    ): void {
+    ): bool {
+        return $this->writeBell($fromUserId, $toUserId, $message, $type, $externalId, $actId) !== self::BELL_WRITE_FAILED;
+    }
+
+    /** writeBell(): the write was attempted and failed. */
+    private const BELL_WRITE_FAILED = -1;
+
+    /**
+     * dispatch(), answering WHICH bell row was written (F-516): the row id
+     * (> 0); 0 when nothing was owed or PeepSo suppressed it (the bell is
+     * off for this recipient, opt-out, block); BELL_WRITE_FAILED when the
+     * write failed. A push enqueued for the same event carries the id as
+     * `notification_id`, so opening the push can mark this row read.
+     */
+    private function writeBell(
+        int $fromUserId,
+        int $toUserId,
+        string $message,
+        string $type,
+        int $externalId,
+        int $actId
+    ): int {
         // §I1 — per-event bell preference. When the recipient has
         // disabled this event type, drop the write before it touches
         // peepso_notifications. The originating action still completes
         // (per §A3 dispatchers don't break their producers); we just
         // skip the side-effect.
         if (!NotificationPrefs::isBellEnabled($toUserId, $type)) {
-            return;
+            return 0;
         }
 
         $result = PeepSoNotificationWriter::addNotification(
@@ -1990,7 +2146,7 @@ final class NotificationDispatcher
                 'type'         => $type,
                 'reason'       => $result['reason'] ?? 'unknown',
             ]);
-            return;
+            return self::BELL_WRITE_FAILED;
         }
 
         // Invalidate the recipient's /me/badges cache so the next poll
@@ -2000,9 +2156,12 @@ final class NotificationDispatcher
         // this bump; the 15s TTL is the safety net for that case.
         // Skipped when PeepSo silently suppressed the write
         // (notification_id === 0 for opt-out / blocked).
-        if (($result['notification_id'] ?? 0) > 0) {
+        $notificationId = (int) ($result['notification_id'] ?? 0);
+        if ($notificationId > 0) {
             BadgesService::bumpForUser($toUserId);
         }
+
+        return max(0, $notificationId);
     }
 
     // ──────────────────────────────────────────────────────────────────

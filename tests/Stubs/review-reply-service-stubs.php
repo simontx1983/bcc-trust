@@ -114,6 +114,15 @@ namespace {
         function wp_update_post(array $post, bool $wpError = false): int
         {
             $id = (int) $post['ID'];
+            // F-361 — the superglobals AT the write. The guard restores
+            // them in a `finally`, so a check after the call sees the
+            // original whether the pin ran or not.
+            $GLOBALS['__bcc_pin_at_write'][] = [
+                'fn'   => 'wp_update_post',
+                'get'  => $_GET,
+                'post' => $_POST,
+            ];
+
             ReplyWorld::$postContent[$id] = (string) $post['post_content'];
             ReplyWorld::eachReply(static function (array $r) use ($id, $post): array {
                 if ($r['post_id'] === $id) {
@@ -149,6 +158,18 @@ namespace BCC\Core\Permissions {
             public static function is_not_suspended(?int $userId, bool $allowAdminBypass = true): bool
             {
                 return !isset(\ReplyWorld::$suspended[(int) $userId]);
+            }
+
+            /** ProfileAccess::viewerIsExemptFromVisibility(): nobody here is a site admin. */
+            public static function is_admin(): bool
+            {
+                return false;
+            }
+
+            /** ProfileAccess::hiddenOnlyByProfileLevel(): tri-state, from the same set. */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                return isset(\ReplyWorld::$suspended[(int) $userId]);
             }
         }
     }

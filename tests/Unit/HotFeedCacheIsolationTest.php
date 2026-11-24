@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Unit;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Trust\Core\Services\Feed\FeedRankingService;
+use BCC\Trust\Tests\Support\CoreSibling;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -60,8 +62,8 @@ final class HotFeedCacheIsolationTest extends TestCase
     {
         parent::setUp();
         \BccHotFeedCacheStore::reset();
-        PeepSoBlockRepository::$blocking  = [];
-        PeepSoBlockRepository::$readFails = false;
+        PeepSoBlockRepository::reset();
+        require_once CoreSibling::require('src/Contracts/ActivityReadFailedException.php');
     }
 
     // ── the property ────────────────────────────────────────────────
@@ -125,21 +127,60 @@ final class HotFeedCacheIsolationTest extends TestCase
 
     /**
      * ⚠ ANTI-VACUITY: a `getHotFeed()` that filtered nothing would pass the
-     * cache assertions above. With the read FAILING, the fail-closed rule
-     * must still apply on this surface too.
+     * cache assertions above. With the block table UNREADABLE, the signed-in
+     * read must not answer at all.
+     *
+     * F-455: the viewer's block lists are read before the page, so an
+     * unreadable table is the route's 503 (ActivityReadFailedException),
+     * whatever the page holds. It used to be `items: []` with a 200.
      */
-    public function testAnUnreadableBlockTableStillFailsClosedHere(): void
+    public function testAnUnreadableBlockTableAnswersUnavailableHere(): void
     {
         PeepSoBlockRepository::$readFails = true;
         $this->seedCache();
 
-        self::assertSame([], self::getHotFeed(self::VIEWER)['items']);
+        try {
+            self::getHotFeed(self::VIEWER);
+            self::fail('an unreadable block table must not answer a page');
+        } catch (ActivityReadFailedException) {
+            // the route's 503
+        }
 
         self::assertSame(
             [self::BLOCKED, self::OTHER],
             self::authorIds(self::cachedPayload()['items']),
-            'and failing closed must not empty the shared cache either'
+            'and failing must not empty the shared cache either'
         );
+    }
+
+    /**
+     * F-455, the row-dependent half: the block lists were read, then the
+     * exact check over this page's authors failed. That check runs only when
+     * the page HAS posts, so it keeps the fail-closed EMPTY page (never a
+     * 503), and never the unfiltered page.
+     */
+    public function testAFailedExactCheckAfterTheProbeStillFailsClosedHere(): void
+    {
+        PeepSoBlockRepository::$blocking        = [[self::VIEWER, self::BLOCKED]];
+        PeepSoBlockRepository::$exactCheckFails = true;
+        $this->seedCache();
+
+        self::assertSame([], self::getHotFeed(self::VIEWER)['items'], 'empty, never the unfiltered page');
+
+        self::assertSame(
+            [self::BLOCKED, self::OTHER],
+            self::authorIds(self::cachedPayload()['items']),
+            'and the shared cache is untouched'
+        );
+    }
+
+    /** The anonymous reader reads no block lists, so an outage cannot fail it. */
+    public function testTheAnonymousReaderIsNotFailedByAnUnreadableBlockTable(): void
+    {
+        PeepSoBlockRepository::$readFails = true;
+        $this->seedCache();
+
+        self::assertSame([self::BLOCKED, self::OTHER], self::authorIds(self::getHotFeed(0)['items']));
     }
 
     /**

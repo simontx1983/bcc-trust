@@ -241,11 +241,28 @@ final class MyGroupsEndpoint
         // the canonical threshold (25/50/75); reputation is fetched
         // via the same ReputationRepository the rest of the trust engine
         // already uses so there's a single source of truth for the score.
-        $trustMin = (int) get_post_meta($groupId, '_bcc_trust_gate_min', true);
-        if ($trustMin > 0) {
-            $viewerScore = (int) round(
-                Plugin::instance()->reputationRepository()->getScore($userId)
+        // F-463: read through ProbesReads, never get_post_meta(); a minimum
+        // that cannot be read refuses the join (retryable) before any write.
+        $trustMin = self::trustGateMin($groupId);
+        if ($trustMin === null) {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We couldn\'t check this community\'s requirements. Please try again.',
+                503
             );
+        }
+        if ($trustMin > 0) {
+            // F-469: a score that could not be read refuses the join
+            // (retryable) before any write, never the neutral 50.
+            $score = Plugin::instance()->reputationRepository()->getScoreOrUnknown($userId);
+            if ($score === null) {
+                return ApiResponse::error(
+                    'bcc_unavailable',
+                    'We couldn\'t check your reputation just now. Please try again.',
+                    503
+                );
+            }
+            $viewerScore = (int) round($score);
             if ($viewerScore < $trustMin) {
                 return ApiResponse::error(
                     'bcc_permission_denied',
@@ -452,12 +469,7 @@ final class MyGroupsEndpoint
         // deny reason rides in error.data.reason for the frontend.
         $decision = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
         if (!$decision->isAllowed()) {
-            return ApiResponse::error(
-                'bcc_forbidden',
-                self::createDenyMessage($decision->reason),
-                403,
-                ['reason' => $decision->reason]
-            );
+            return self::createDenyResponse($decision->reason);
         }
 
         $name         = trim((string) $request->get_param('name'));
@@ -572,12 +584,11 @@ final class MyGroupsEndpoint
             // collapse on the transfer path.
             $recheck = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
             if (!$recheck->isAllowed()) {
-                return ApiResponse::error(
-                    'bcc_forbidden',
-                    self::createDenyMessage($recheck->reason),
-                    403,
-                    ['reason' => $recheck->reason]
-                );
+                // ⚠ The SAME helper as the pre-lock check above. These two
+                // sites answered the same gate with duplicated response
+                // code, and a reason handled in one but not the other would
+                // be invisible from the route's happy path.
+                return self::createDenyResponse($recheck->reason);
             }
 
             $groupId = \BCC\Core\PeepSo\PeepSoGroupWriter::createPlainGroup(
@@ -701,6 +712,11 @@ final class MyGroupsEndpoint
                 // Advisory-lock contention on the receiver's custody
                 // critical section — retryable (§21.2 TOCTOU fail-closed).
                 'bcc_conflict'       => 409,
+                // ⚠ A read the service could not TRUST (F-503) — also
+                // retryable. Without this entry it would fall to the
+                // `default` below and answer 400, which tells the client
+                // its request was malformed when nothing was wrong with it.
+                'bcc_unavailable'    => 503,
                 'bcc_internal_error' => 500,
                 default              => 400,
             };
@@ -719,6 +735,44 @@ final class MyGroupsEndpoint
      * no cadence pressure, no nudges. The stable machine reason is in
      * error.data.reason; this is the human sentence beside it.
      */
+    /**
+     * The create gate's refusal, as a response.
+     *
+     * ⚠⚠ `unavailable` is RETRYABLE and must not be a 403. It means the
+     * ownership count (F-503) or, since F-469, the trust tier could not be
+     * READ, not that the member is ineligible — a 403 tells them to stop trying, and the generic copy
+     * ("You can't create a community right now.") reads as a permanent no
+     * for what is a transient server fault. Everything else here IS a
+     * property of their account and stays a 403 with its stable
+     * `error.data.reason`.
+     *
+     * ⚠ Used by BOTH create denial sites — the pre-lock gate and the
+     * authoritative recheck inside the lock. They answer the same gate, so
+     * a reason handled in one and not the other would be a half-fix that
+     * the happy path cannot reveal.
+     *
+     * Same §F-438 / §F-462 convention as the other retryable refusals:
+     * `bcc_unavailable` + 503, so the frontend can offer a retry.
+     */
+    private static function createDenyResponse(string $reason): WP_REST_Response
+    {
+        if ($reason === 'unavailable') {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We couldn\'t check whether you can create a community just now. Please try again.',
+                503,
+                ['reason' => $reason]
+            );
+        }
+
+        return ApiResponse::error(
+            'bcc_forbidden',
+            self::createDenyMessage($reason),
+            403,
+            ['reason' => $reason]
+        );
+    }
+
     private static function createDenyMessage(string $reason): string
     {
         return match ($reason) {
@@ -730,6 +784,36 @@ final class MyGroupsEndpoint
             'cooldown_active' => 'A 30-day cooldown follows creating, receiving, or transferring a community. Yours is still active.',
             default           => 'You can\'t create a community right now.',
         };
+    }
+
+    /**
+     * The group's trust-score minimum for the plain join (F-463), read
+     * through bcc-core's PostMetaRepository: through ProbesReads, never
+     * get_post_meta(); a read that cannot be trusted answers null, and the
+     * join refuses.
+     *
+     *   - no row (or only empty rows) is 0: no minimum, a real answer;
+     *   - duplicate rows: the HIGHEST counts;
+     *   - a non-empty value that is not a number is unknown (null), never 0.
+     */
+    private static function trustGateMin(int $groupId): ?int
+    {
+        $rows = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown([$groupId], ['_bcc_trust_gate_min']);
+        if ($rows === null) {
+            return null;
+        }
+        $min = 0;
+        foreach ($rows[$groupId]['_bcc_trust_gate_min'] ?? [] as $value) {
+            $value = trim($value);
+            if ($value === '') {
+                continue;
+            }
+            if (!is_numeric($value)) {
+                return null;
+            }
+            $min = max($min, (int) $value);
+        }
+        return $min;
     }
 
     /**

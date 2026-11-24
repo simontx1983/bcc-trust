@@ -60,6 +60,87 @@ final class UserSyncRepository
         ];
     }
 
+    /** The one live hide-from-listings flag (PrivacySettings::HIDE_FROM_LISTING_META). */
+    public const LISTING_OPTOUT_KEY = 'peepso_is_hide_profile_from_user_listing';
+
+    /**
+     * The pre-F-257 opt-out the flag was folded from
+     * (PrivacySettings::LEGACY_DISCOVERY_OPTOUT_META). Nothing writes it, but
+     * the fold LEFT ITS ROWS IN PLACE, so it is read only until the fold is
+     * done; see listingOptOutSql().
+     */
+    public const LISTING_OPTOUT_LEGACY_KEY = 'bcc_privacy_discovery_optout';
+
+    /** Every stored value that means "opted out" (compared case-insensitively by the column collation). */
+    public const LISTING_OPTOUT_TRUTHY = ['1', 'true', 'on', 'yes'];
+
+    /**
+     * F-518 / F-519 — the ONE SQL fragment that leaves listing opt-outs out
+     * of a member listing. Shared on purpose: the app sitemap's public index
+     * (PublicIndexRepository) and the member directory / search
+     * (PrivacySettings::filterPeepSoUserQuery) must agree on who opted out.
+     *
+     *     $where .= ' AND ' . UserSyncRepository::listingOptOutSql(
+     *         "{$wpdb->users}.ID",
+     *         PrivacySettings::legacyOptOutStillRead()
+     *     );
+     *
+     * TRUE when the member has NO row, on a key it reads, holding a truthy
+     * value. Any truthy row excludes, so a member with both a '0' and a '1'
+     * row stays out (the direction that cannot leak).
+     *
+     * WHY THE TRUTHY SET, not just '1'. The writers, verified in code:
+     *   - PeepSo's own preferences form saves the client's value RAW
+     *     (peepso/classes/profilepreferencesajax.php, savepreference:
+     *     `$this->_input->raw('value')`), so the hide key can hold any string;
+     *   - BCC's writers store '1' / '0' (MyProfilePrefsEndpoint, the profile
+     *     prefs write; PrivacySettings::writePartial, /me/privacy's
+     *     `discovery_optout`);
+     *   - the fold migration (includes/database/fold-discovery-optout.php)
+     *     writes '1', and reads the legacy key as this same set.
+     * Excluding too many is the safe direction for a privacy setting.
+     *
+     * ⚠⚠ THE LEGACY KEY ONLY WHILE THE FOLD IS NOT DONE (`$withLegacy`).
+     * fold_discovery_optout_v1 copied every legacy opt-out into the flag but
+     * LEFT THE LEGACY ROWS IN PLACE, and after the fold the settings toggle
+     * writes the flag alone. So a member who opted out the old way and later
+     * turned listing back on holds flag '0' + legacy '1'. Reading the legacy
+     * key after the fold would hide them again, for good, and they could not
+     * undo it. Callers pass PrivacySettings::legacyOptOutStillRead(): true
+     * until the fold's done-marker reads as set (a missing or unreadable
+     * marker keeps the legacy key in, the fail-closed side). The bool is
+     * required, so no caller can forget the choice.
+     *
+     * Pure SQL: no admin exemption and no option read here. A caller that
+     * exempts admins (the directory) does so around this; the public index
+     * never exempts anyone. No `%` in the output, so it is safe inside
+     * prepare().
+     *
+     * @param string $userIdColumn a column reference such as `wp_users.ID`, never input
+     * @param bool   $withLegacy   also read the legacy opt-out key: PrivacySettings::legacyOptOutStillRead()
+     * @throws \InvalidArgumentException when `$userIdColumn` is not a column reference
+     */
+    public static function listingOptOutSql(string $userIdColumn, bool $withLegacy): string
+    {
+        if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $userIdColumn) !== 1) {
+            throw new \InvalidArgumentException('listingOptOutSql() takes a column reference such as wp_users.ID.');
+        }
+
+        global $wpdb;
+
+        // Constants of [a-z0-9_] only, so quoting them inline is safe.
+        $keyList = $withLegacy
+            ? [self::LISTING_OPTOUT_KEY, self::LISTING_OPTOUT_LEGACY_KEY]
+            : [self::LISTING_OPTOUT_KEY];
+        $keys   = "'" . implode("', '", $keyList) . "'";
+        $truthy = "'" . implode("', '", self::LISTING_OPTOUT_TRUTHY) . "'";
+
+        return "NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} bcc_optout"
+            . " WHERE bcc_optout.user_id = {$userIdColumn}"
+            . " AND bcc_optout.meta_key IN ({$keys})"
+            . " AND bcc_optout.meta_value IN ({$truthy}))";
+    }
+
     /**
      * Batch-fetch aggregate counts for a chunk of user IDs.
      *
@@ -154,6 +235,13 @@ final class UserSyncRepository
      * Users with no owned pages are absent from the map; callers
      * default to 0.
      *
+     * Only published, non-secret pages count: bcc-core's
+     * `PeepSoPageRepository::listablePageSql()`, the condition the typed
+     * counts beside it use, so the total and the per-type badges agree.
+     * Rationale: F-427 (private tracker). `batchFetchCounts()` and
+     * `fetchCountsForUser()` keep counting every owned page: they feed the
+     * internal user_info sync, not a member-facing count.
+     *
      * Empty `$userIds` short-circuits — no SQL.
      *
      * @param int[] $userIds Bounded by caller (directory `per_page`
@@ -183,6 +271,7 @@ final class UserSyncRepository
 
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $listable     = \BCC\Core\Repositories\PeepSoPageRepository::listablePageSql('pm.pm_page_id');
 
         // Prepared-statement style (vs the intval-coerce style in
         // batchFetchCounts above). New code defaults to prepare so the
@@ -190,11 +279,12 @@ final class UserSyncRepository
         /** @var list<array{user_id: string, c: string}> $rows */
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT pm_user_id AS user_id, COUNT(*) AS c
-                   FROM {$wpdb->prefix}peepso_page_members
-                  WHERE pm_user_id IN ({$placeholders})
-                    AND pm_user_status = 'member_owner'
-                  GROUP BY pm_user_id",
+                "SELECT pm.pm_user_id AS user_id, COUNT(*) AS c
+                   FROM {$wpdb->prefix}peepso_page_members pm
+                  WHERE pm.pm_user_id IN ({$placeholders})
+                    AND pm.pm_user_status = 'member_owner'
+                    AND {$listable}
+                  GROUP BY pm.pm_user_id",
                 ...$idList
             ),
             ARRAY_A

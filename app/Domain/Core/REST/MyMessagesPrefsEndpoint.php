@@ -23,15 +23,20 @@
  * user_meta keys, read by `peepso-messages/classes/chatmodel.php`.
  *
  * - `peepso_chat_enabled` = "1" enables chat; missing meta defaults to
- *   enabled (chatmodel.php bootstraps the row to "1" on first read).
- *   Storing "0" is the OFF signal.
+ *   enabled. Storing "0" is the OFF signal.
  * - `peepso_chat_friends_only` = "1" restricts incoming chats to
  *   confirmed PeepSo friends; "0" allows anyone. MISSING meta does NOT
  *   mean "0": chatmodel.php falls back to the site option
- *   `messages_friends_only`, which PeepSo defaults to 1. Reads MUST go
- *   through PeepSoChatModel (or mirror its chain) — a hardcoded false
- *   default here once made the settings UI show OFF while the
- *   MessagesService send gate enforced friends-only.
+ *   `messages_friends_only`, which PeepSo defaults to 1. Reads MUST mirror
+ *   PeepSoChatModel's chain — a hardcoded false default here once made the
+ *   settings UI show OFF while the MessagesService send gate enforced
+ *   friends-only.
+ *
+ * ⚠⚠ H6: reads go through PeepSoChatPrefs, the SAME reader as the
+ * MessagesService gates, and never through PeepSoChatModel::chat_enabled().
+ * That one bootstraps a missing row by writing "1", and a failed meta read
+ * also looks missing; this endpoint never writes on a read. A read that
+ * fails is a retryable `bcc_unavailable` 503, never a default.
  *
  * Auth: required. Self-only — no admin override surface.
  *
@@ -46,6 +51,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PeepSoChatPrefs;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -95,9 +101,7 @@ final class MyMessagesPrefsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $resp = ApiResponse::ok(self::readAll($userId));
-        $resp->header('Cache-Control', 'no-store');
-        return $resp;
+        return self::respondWith($userId);
     }
 
     /**
@@ -148,56 +152,36 @@ final class MyMessagesPrefsEndpoint
             );
         }
 
-        $resp = ApiResponse::ok(self::readAll($userId));
-        $resp->header('Cache-Control', 'no-store');
-        return $resp;
+        // Fresh: the echo must be the stored values, not a memo of the read
+        // before this write (the memo is also dropped on the write's hook).
+        return self::respondWith($userId, true);
     }
 
     /**
-     * Read both flags exactly as the send gate will enforce them.
+     * Both flags exactly as the send gate will enforce them: PeepSoChatPrefs
+     * is the one reader behind this endpoint AND the MessagesService gates,
+     * with PeepSoChatModel's default chains (chat_enabled: missing is "on";
+     * chat_friends_only: missing is the `messages_friends_only` site
+     * option, PeepSo default 1). So what this endpoint reports is what
+     * sends hit.
      *
-     * PeepSoChatModel is the single source of truth — it owns the
-     * missing-meta default chains (chat_enabled bootstraps to "1";
-     * chat_friends_only falls back to the `messages_friends_only`
-     * site option, PeepSo default 1). MessagesService gates read the
-     * same model, so what this endpoint reports is what sends hit.
-     * The class_exists fallbacks mirror those chains for contexts
-     * where peepso-messages hasn't registered its autoload dir
-     * (WP-CLI; peepso_init doesn't fire there).
-     *
-     * @return array{chat_enabled: bool, chat_friends_only: bool}
+     * H6: a read that fails is a retryable 503, never a default. For the
+     * PATCH, the write has already run; the member retries and the same
+     * values are written again.
      */
-    private static function readAll(int $userId): array
+    private static function respondWith(int $userId, bool $fresh = false): WP_REST_Response
     {
-        return [
-            'chat_enabled'      => self::chatEnabled($userId),
-            'chat_friends_only' => self::chatFriendsOnly($userId),
-        ];
-    }
+        $prefs = PeepSoChatPrefs::forUser($userId, $fresh);
+        if ($prefs === null) {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'Could not read your messaging preferences. Please try again.',
+                503
+            );
+        }
 
-    private static function chatEnabled(int $userId): bool
-    {
-        if (class_exists('PeepSoChatModel')) {
-            return (bool) \PeepSoChatModel::chat_enabled($userId);
-        }
-        $raw = get_user_meta($userId, 'peepso_chat_enabled', true);
-        if (!is_string($raw) || $raw === '') {
-            return true;
-        }
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
-    }
-
-    private static function chatFriendsOnly(int $userId): bool
-    {
-        if (class_exists('PeepSoChatModel')) {
-            return (bool) \PeepSoChatModel::chat_friends_only($userId);
-        }
-        $raw = get_user_meta($userId, 'peepso_chat_friends_only', true);
-        if (!is_string($raw) || $raw === '') {
-            return class_exists('PeepSo')
-                ? (int) \PeepSo::get_option('messages_friends_only', 1) === 1
-                : true;
-        }
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        $resp = ApiResponse::ok($prefs);
+        $resp->header('Cache-Control', 'no-store');
+        return $resp;
     }
 }

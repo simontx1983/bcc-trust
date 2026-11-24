@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Tests\Stubs\CommentDeleteFakes;
+use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -43,6 +44,8 @@ final class CommentExistenceOracleTest extends TestCase
     private const PARENT_POST  = 555;
     private const GROUP_ID     = 4231;
     private const MISSING_ACT  = 999;
+    private const NOTICE_ACT   = 205205;
+    private const NOTICE_POST  = 5001;
 
     private const NOT_FOUND_POST    = ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
     private const NOT_FOUND_COMMENT = ['error' => 'bcc_not_found', 'message' => 'Comment not found.'];
@@ -50,7 +53,9 @@ final class CommentExistenceOracleTest extends TestCase
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/comment-delete-stubs.php';
+        require_once dirname(__DIR__) . '/Stubs/announcement-page-access-stub.php';
         CommentDeleteFakes::reset();
+        $GLOBALS['__bcc_apa'] = ['hidden' => [], 'calls' => []];
 
         // A group-tagged parent post the viewer is NOT a member of.
         CommentDeleteFakes::$activities[self::PARENT_ACT] = (object) [
@@ -91,6 +96,61 @@ final class CommentExistenceOracleTest extends TestCase
         $class->getProperty('commentRepo')->setValue($service, $repo ?? new CommentRepository());
 
         return $service;
+    }
+
+    // ── a SECRET page's announcement ─────────────────────────────────
+
+    /**
+     * A secret page's notice is gone from a stranger's feeds and permalink,
+     * so its thread is too: the missing id's 404, before any other gate.
+     */
+    public function testAHiddenNoticesThreadListsExactlyLikeAMissingPost(): void
+    {
+        $this->seedNotice();
+        $GLOBALS['__bcc_apa']['hidden'] = [self::NOTICE_ACT];
+        $service = self::service([self::NOTICE_ACT]);
+
+        $missing = $service->listByFeedId('feed_' . self::MISSING_ACT, self::VIEWER, 'oldest', null, 20);
+        $hidden  = $service->listByFeedId('feed_' . self::NOTICE_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertSame(self::NOT_FOUND_POST, $hidden);
+        self::assertSame($missing, $hidden);
+        self::assertSame([self::NOTICE_ACT . ':' . self::VIEWER], $GLOBALS['__bcc_apa']['calls']);
+    }
+
+    public function testANoticeTheViewerMaySeeGetsPastThePageCheck(): void
+    {
+        $this->seedNotice();
+
+        $result = self::service([self::NOTICE_ACT])
+            ->listByFeedId('feed_' . self::NOTICE_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertNotSame(self::NOT_FOUND_POST, $result);
+    }
+
+    public function testCommentingOnAHiddenNoticeIsTheMissingPosts404(): void
+    {
+        $this->seedNotice();
+        $GLOBALS['__bcc_apa']['hidden'] = [self::NOTICE_ACT];
+        // Past the page check the post's own audience refuses too, and that
+        // refusal is the 403 a VISIBLE post keeps — so a create path that
+        // skipped the page check would answer 403 here, not the 404.
+        CommentDeleteFakes::$f02Hidden = [self::NOTICE_ACT];
+
+        $result = self::service([self::NOTICE_ACT])->createComment('feed_' . self::NOTICE_ACT, self::VIEWER, 'hello');
+
+        self::assertSame(self::NOT_FOUND_POST, $result);
+        self::assertSame([self::NOTICE_ACT . ':' . self::VIEWER], $GLOBALS['__bcc_apa']['calls'], 'asked for the author');
+    }
+
+    private function seedNotice(): void
+    {
+        CommentDeleteFakes::$activities[self::NOTICE_ACT] = (object) [
+            'act_id'          => self::NOTICE_ACT,
+            'act_external_id' => self::NOTICE_POST,
+            'act_module_id'   => 205,
+            'act_status'      => 'publish',
+        ];
     }
 
     // ── GET /posts/:feed_id/comments ─────────────────────────────────
@@ -165,6 +225,92 @@ final class CommentExistenceOracleTest extends TestCase
             ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
             $live
         );
+    }
+
+    // ── F-461: the comment gate reads the group from the database ────
+    //
+    // Below, get_post_meta() says "no group"
+    // while the database says the post is GROUP_ID's. The gate must follow
+    // the database.
+
+    private function putThePostInTheGroupInTheDatabase(): void
+    {
+        unset(CommentDeleteFakes::$postMeta[self::PARENT_POST]);
+        CommentDeleteFakes::wpdb()->dbRows[self::PARENT_POST] = [
+            PostGroupFactsWpdb::row('peepso_group_id', (string) self::GROUP_ID),
+            PostGroupFactsWpdb::row('_bcc_post_visibility', 'members_only'),
+        ];
+    }
+
+    public function testANonMemberCannotReadAThreadTheDatabasePutsInAGroup(): void
+    {
+        $this->putThePostInTheGroupInTheDatabase();
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertSame(['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'], $result);
+        self::assertSame([], CommentDeleteFakes::$listReads, 'the thread was never read');
+    }
+
+    /**
+     * What createComment() touches after the gate (comment-permission-stubs:
+     * PeepSo's permission check allows, the Throttle records and DENIES), so a
+     * create that gets past the gate ends at bcc_rate_limited, before any write.
+     */
+    private static function loadCreateSeatbelt(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/comment-permission-stubs.php';
+        $GLOBALS['__bcc_cpr'] = ['perm' => true, 'perm_calls' => [], 'throttle_calls' => []];
+    }
+
+    public function testANonMemberCannotCommentWhereTheDatabasePutsTheThreadInAGroup(): void
+    {
+        self::loadCreateSeatbelt();
+        $this->putThePostInTheGroupInTheDatabase();
+
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
+            self::service([self::PARENT_ACT])->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello')
+        );
+        self::assertSame([], $GLOBALS['__bcc_cpr']['throttle_calls'], 'refused by the gate, before the throttle');
+    }
+
+    /** ⭐ CONTROL: the same database row with the viewer a member reads the thread. */
+    public function testAMemberStillReadsTheThreadTheDatabaseSaysIsTheirGroups(): void
+    {
+        $this->putThePostInTheGroupInTheDatabase();
+        CommentDeleteFakes::$memberships[self::VIEWER][self::GROUP_ID] = 'member';
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertTrue($result['ok'] ?? false);
+        self::assertSame([self::PARENT_POST], CommentDeleteFakes::$listReads);
+    }
+
+    /** Unreadable group facts close the thread, even an ordinary post's (which would otherwise list). */
+    public function testUnreadableGroupFactsCloseTheThread(): void
+    {
+        self::loadCreateSeatbelt();
+        unset(CommentDeleteFakes::$postMeta[self::PARENT_POST]); // an ordinary post
+        self::assertTrue(
+            self::service([self::PARENT_ACT])->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20)['ok'] ?? false,
+            'control: an ordinary visible post lists'
+        );
+        CommentDeleteFakes::$listReads = [];
+
+        CommentDeleteFakes::wpdb()->failRead = true;
+
+        $result = self::service([self::PARENT_ACT])
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+        self::assertArrayHasKey('error', $result);
+        self::assertSame([], CommentDeleteFakes::$listReads, 'the thread was never read');
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
+            self::service([self::PARENT_ACT])->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello')
+        );
+        self::assertSame([], $GLOBALS['__bcc_cpr']['throttle_calls'], 'refused by the gate, before the throttle');
     }
 
     // ── DELETE /posts/:feed_id/comments/:comment_id ──────────────────

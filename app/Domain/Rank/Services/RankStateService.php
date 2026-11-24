@@ -203,7 +203,16 @@ class RankStateService
      */
     private function findingsBlock(int $userId): array
     {
-        $rows = $this->findings->getActiveForUser($userId);
+        // F-465: the read now throws on failure (the promotion engine must
+        // never take "no findings" for an answer). This block only DISPLAYS
+        // the member's own findings and writes nothing, so a failed read
+        // shows the list empty this time (logged by the repository) rather
+        // than failing the whole progression.
+        try {
+            $rows = $this->findings->getActiveForUser($userId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            $rows = [];
+        }
 
         $since = gmdate('Y-m-d H:i:s', time() - (self::REVERSED_VISIBLE_DAYS * 86400));
         foreach ($this->findings->getRecentlyReversedForUser($userId, $since) as $reversed) {

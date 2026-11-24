@@ -32,8 +32,45 @@ require_once __DIR__ . '/../vendor/autoload.php';
 // F-94: the single resolver for files in the bcc-core checkout beside this
 // plugin — fails in CI, skips locally. No autoload-dev, so required here.
 require_once __DIR__ . '/Support/CoreSibling.php';
+
+// F-461: the two bcc-core files PostGroupFactsRepository needs, on demand:
+// the ProbesReads trait it reads through and GroupSyndicationGate, which owns
+// the privacy-at-post meta key it selects. Every group gate (reports,
+// comments, reactions, stoke, helpful-mark) reads through that repository, so
+// dozens of suites load it. Resolved through CoreSibling, so a missing sibling
+// FAILS the test in CI and SKIPS it locally, exactly like a per-test require.
+// Narrow on purpose: only these two (both self-contained, and stubbed by no
+// suite); every other bcc-core file is still required explicitly.
+spl_autoload_register(static function (string $class): void {
+    $files = [
+        'BCC\\Core\\Repositories\\ProbesReads'  => 'src/Repositories/ProbesReads.php',
+        'BCC\\Core\\Feed\\GroupSyndicationGate' => 'src/Feed/GroupSyndicationGate.php',
+    ];
+    if (isset($files[$class])) {
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require($files[$class]);
+    }
+});
+
+require_once __DIR__ . '/Support/PostGroupFactsWpdb.php';
 require_once __DIR__ . '/Support/GateOrder.php';
 require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
+
+// F-460 / F-463: group privacy comes from bcc-core's PeepSoGroupPrivacy, and
+// a group's kind, trust weighting and trust minimum from its
+// PostMetaRepository. This unit suite does not autoload bcc-core, so doubles
+// answer from each test's meta stubs (or explicit answers); see the files.
+// An autoloader, not a declaration: a suite that wants core's REAL class
+// requires it through CoreSibling before first use and gets it. The
+// integration suite loads the real classes.
+spl_autoload_register(static function (string $class): void {
+    $doubles = [
+        'BCC\\Core\\Repositories\\PeepSoGroupPrivacy' => '/Stubs/core-group-privacy-double.php',
+        'BCC\\Core\\Repositories\\PostMetaRepository' => '/Stubs/core-post-meta-double.php',
+    ];
+    if (isset($doubles[$class])) {
+        require_once __DIR__ . $doubles[$class];
+    }
+});
 
 // Namespace-scoped WP shims for CronService's schedule self-healing, plus the
 // bcc-core collaborators it calls by fully-qualified name.
@@ -45,6 +82,18 @@ require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
 // load order is not a contract. The defaults match what those suites already
 // assume, so this makes the harness deterministic without changing behaviour.
 require_once __DIR__ . '/Stubs/cron-schedule-stubs.php';
+
+// PrivacySettings reads through bcc-core's UserMetaRepository, which
+// queries `$wpdb` directly, and unit suites drive privacy flags with
+// get_user_meta() shims. So every unit process can autoload a double that
+// reads through those same shims (see the file). An autoloader, not a
+// declaration: a suite that wants core's real class requires it through
+// CoreSibling before first use and gets it.
+spl_autoload_register(static function (string $class): void {
+    if ($class === 'BCC\\Core\\Repositories\\UserMetaRepository') {
+        require_once __DIR__ . '/Stubs/user-meta-repository-double.php';
+    }
+});
 
 // Global `wp_json_encode`, declared here for the same load-order reason as
 // the shims above — and with WordPress's real signature.

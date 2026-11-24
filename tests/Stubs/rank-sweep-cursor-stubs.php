@@ -33,6 +33,9 @@ namespace {
 
         public static bool $writeFails = false;
 
+        /** F-469: the reputation tier reads answer "could not be read". */
+        public static bool $tierReadFails = false;
+
         public static int $purges = 0;
 
         /** @var list<string> */
@@ -46,6 +49,7 @@ namespace {
             self::$poison       = [];
             self::$recorded     = [];
             self::$writeFails   = false;
+            self::$tierReadFails = false;
             self::$purges       = 0;
             self::$logs         = [];
         }
@@ -117,6 +121,12 @@ namespace BCC\Trust\Rank\Tests\Fakes {
             return true;
         }
 
+        public function recordDay(int $userId, string $day, int $tierOrd): bool
+        {
+            \RankSweepWorld::$recorded[$day][] = $userId;
+            return true;
+        }
+
         public function purgeOlderThan(string $beforeDay, int $limit): int|false
         {
             \RankSweepWorld::$purges++;
@@ -142,6 +152,22 @@ namespace BCC\Trust\Rank\Tests\Fakes {
         public function getTiersForUsers(array $userIds): array
         {
             return [];
+        }
+
+        public function getTiersForUsersOrUnknown(array $userIds): ?array
+        {
+            return \RankSweepWorld::$tierReadFails ? null : [];
+        }
+
+        public function getTierOrUnknown(int $userId): ?string
+        {
+            return \RankSweepWorld::$tierReadFails ? null : 'neutral';
+        }
+
+        /** The lenient reader answers its neutral default: a writer must never consult it. */
+        public function getTier(int $userId): string
+        {
+            return 'neutral';
         }
     }
 }

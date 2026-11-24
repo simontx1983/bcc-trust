@@ -95,7 +95,7 @@ final class AnnouncementViewServiceTest extends TestCase
     /** @return array<string, mixed> */
     private static function goodMember(): array
     {
-        return ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => true];
+        return ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => true, 'standing_known' => true];
     }
 
     // ── 1. THE assertion — MUST-NOT-HAPPEN #0 ───────────────────────────

@@ -12,6 +12,17 @@
  * token are present (same-origin admin tooling). For headless Next.js
  * traffic there's no cookie, so the Bearer path always handles auth.
  *
+ * ⚠ REST REQUESTS ONLY (security review, 2026-11-19). The bearer is the
+ * app's credential for `/wp-json/…`, and nothing else. Before this it
+ * signed a member in on EVERY request type: cms HTML (a 404 page printed
+ * a peepso_nonce minted for them), admin-ajax and PeepSo's /peepsoajax/
+ * (which then answered for that member). {@see isRestRequestFor()}
+ * decides from the request alone, because REST_REQUEST is not defined
+ * yet when core first resolves the user (WP::init(), before
+ * parse_request). Anything it cannot place as a REST request through the
+ * front controller fails closed: the token is ignored, the request is
+ * signed out.
+ *
  * ────────────────────────────────────────────────────────────────────
  *  HEADER FORWARDING — PRODUCTION REQUIREMENT (read this)
  * ────────────────────────────────────────────────────────────────────
@@ -56,6 +67,20 @@ final class BearerAuth
     /** presentedTokenFailure() values. */
     public const TOKEN_EXPIRED = 'expired';
     public const TOKEN_INVALID = 'invalid';
+    /**
+     * F-462: the token's revocation state could not be read, so whether it
+     * still counts is unknown. The request is NOT authenticated, and is not
+     * served as anonymous either: refuseUnknownTokenState() answers 503.
+     * A 401 with a token code would make the app sign the member out
+     * (#673), so one database blip would sign everyone out.
+     */
+    public const TOKEN_UNAVAILABLE = 'unavailable';
+
+    /** The message of every F-462 503 `bcc_unavailable`. */
+    public const UNAVAILABLE_MESSAGE = 'Your session could not be checked just now. Please try again.';
+
+    /** First: a request whose token state is unknown reaches nothing. */
+    public const AUTH_ERRORS_PRIORITY = 1;
 
     /**
      * Why the bearer token PRESENTED with this request failed, if it did
@@ -87,6 +112,39 @@ final class BearerAuth
     public static function register(): void
     {
         add_filter('determine_current_user', [self::class, 'authenticateBearer'], 30);
+        add_filter('rest_authentication_errors', [self::class, 'refuseUnknownTokenState'], self::AUTH_ERRORS_PRIORITY);
+        add_filter('rest_send_nocache_headers', [self::class, 'noCacheWhenTokenStateUnknown']);
+        add_action('parse_request', [self::class, 'signOutBearerOutsideRest'], self::OUTSIDE_REST_PRIORITY);
+    }
+
+    /**
+     * After core's `rest_api_loaded` (parse_request, 10), which serves a REST
+     * request and exits. Anything that reaches 11 is not REST.
+     */
+    public const OUTSIDE_REST_PRIORITY = 11;
+
+    /** Percent-decoding rounds a request path may need before it is stable. */
+    private const MAX_DECODE_ROUNDS = 4;
+
+    /**
+     * `parse_request`, after core's REST dispatch: a backstop. A user the
+     * bearer signed in is still here only if this is NOT a REST request, so
+     * they are signed out for the rest of it. isRestRequestFor() is the
+     * primary guard; this runs later (after `init` and `wp_loaded`), and
+     * catches any request it let through that core did not route to REST.
+     *
+     * @param mixed $wp
+     */
+    public static function signOutBearerOutsideRest($wp = null): void
+    {
+        unset($wp);
+        if (self::$authenticatedUserId <= 0 || (defined('REST_REQUEST') && REST_REQUEST)) {
+            return;
+        }
+
+        Logger::warning('[bcc-trust] bearer sign-in dropped: not a REST request');
+        self::$authenticatedUserId = 0;
+        wp_set_current_user(0);
     }
 
     /**
@@ -123,6 +181,12 @@ final class BearerAuth
             return $userId;
         }
 
+        // Not a REST request: the bearer does not count here, whatever it
+        // carries. (See the class note.)
+        if (!self::isRestRequest()) {
+            return is_int($userId) ? $userId : false;
+        }
+
         $token = self::readBearerToken();
         if ($token === null) {
             // No bearer token — pass through whatever upstream filters decided.
@@ -138,9 +202,11 @@ final class BearerAuth
             // F-288: only a plain expiry is refreshable; anything else
             // (malformed, bad signature, revoked, signed out, superseded by
             // a refresh) is a dead token.
-            self::$presentedTokenFailure = $result['error'] === JwtToken::ERR_EXPIRED
-                ? self::TOKEN_EXPIRED
-                : self::TOKEN_INVALID;
+            self::$presentedTokenFailure = match ($result['error']) {
+                JwtToken::ERR_EXPIRED           => self::TOKEN_EXPIRED,
+                JwtToken::ERR_STATE_UNAVAILABLE => self::TOKEN_UNAVAILABLE,
+                default                         => self::TOKEN_INVALID,
+            };
             return false;
         }
 
@@ -163,6 +229,218 @@ final class BearerAuth
         self::$presentedTokenFailure = null;
         self::$authenticatedUserId   = $tokenUserId;
         return $tokenUserId;
+    }
+
+    /**
+     * `rest_authentication_errors`, first (F-462): a request whose bearer
+     * token could not be checked, because its revocation state could not be
+     * read, gets a 503 `bcc_unavailable` (try again). It is never served as
+     * signed out, and never told its token is invalid. An earlier filter's
+     * error stands; an earlier login did not involve the bearer.
+     *
+     * @param mixed $result
+     * @return mixed
+     */
+    public static function refuseUnknownTokenState($result)
+    {
+        if (self::$presentedTokenFailure !== self::TOKEN_UNAVAILABLE || is_wp_error($result)) {
+            return $result;
+        }
+
+        \BCC\Trust\Infrastructure\EdgeCache::noCache();
+
+        return new \WP_Error('bcc_unavailable', self::UNAVAILABLE_MESSAGE, ['status' => 503]);
+    }
+
+    /**
+     * The same 503 as a handler's response (F-462), for a route that finds
+     * the token state unknown after the door, or could not record a
+     * revocation: private, never stored, and varying by token.
+     */
+    public static function unavailableResponse(string $message = self::UNAVAILABLE_MESSAGE): \WP_REST_Response
+    {
+        $response = ApiResponse::error('bcc_unavailable', $message, 503);
+        $response->header('Cache-Control', 'private, no-store');
+        $response->header('Vary', 'Authorization');
+
+        return $response;
+    }
+
+    /**
+     * `rest_send_nocache_headers` (F-462): that 503 is private and never
+     * stored. Core sends no-cache headers only for a signed-in user, and
+     * this request is not one.
+     *
+     * @param mixed $send
+     * @return mixed
+     */
+    public static function noCacheWhenTokenStateUnknown($send)
+    {
+        return self::$presentedTokenFailure === self::TOKEN_UNAVAILABLE ? true : $send;
+    }
+
+    /**
+     * Is THIS request a REST request? Read from the request and WordPress's
+     * configuration; see {@see isRestRequestFor()}.
+     */
+    public static function isRestRequest(): bool
+    {
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '');
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        $pathInfo   = $_SERVER['PATH_INFO'] ?? '';
+        if (!is_string($pathInfo) || $pathInfo === '') {
+            $pathInfo = $_SERVER['ORIG_PATH_INFO'] ?? '';
+        }
+        $homePath   = wp_parse_url((string) home_url(), PHP_URL_PATH);
+
+        return self::isRestRequestFor(
+            is_string($scriptName) ? $scriptName : '',
+            is_string($requestUri) ? $requestUri : '',
+            is_string($homePath) ? $homePath : '',
+            (string) rest_get_url_prefix(),
+            is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST),
+            is_string($pathInfo) ? $pathInfo : 'set'
+        );
+    }
+
+    /**
+     * The REST-request rule, a pure function of its inputs. True only when
+     * ALL of these hold:
+     *
+     *   - the request ran the FRONT CONTROLLER: the script is `…/index.php`
+     *     and it is not an admin, ajax, cron or XML-RPC request. Only
+     *     index.php runs parse_request, so only there does a path become a
+     *     REST dispatch. admin-ajax.php, admin-post.php, wp-login.php,
+     *     wp-cron.php and xmlrpc.php never qualify, whatever they carry;
+     *   - there is no PATH_INFO (or ORIG_PATH_INFO);
+     *   - the request path is CANONICAL (canonicalPath()): no `.` or `..`
+     *     segment, no empty segment, no backslash, no control character, no
+     *     malformed escape, and no `/` that only appears once decoded, in the
+     *     raw path or after any of up to MAX_DECODE_ROUNDS percent-decodings.
+     *     Percent-encoded text otherwise stays allowed: some card slugs are
+     *     stored percent-encoded;
+     *   - the path, as WP::parse_request reads it (before `?`, slashes
+     *     trimmed, the home path taken off the front when it is there, as
+     *     core does), is the REST prefix itself or starts with the prefix and
+     *     a `/`, both raw and fully decoded. Those are core's two REST rewrite
+     *     rules (`^{prefix}/?$`, `^{prefix}/(.*)?`).
+     *
+     * Everything else is false, and that is the safe direction, because
+     * false only means the bearer is ignored:
+     *
+     *   - `?rest_route=` is not honoured (nothing BCC sends uses it);
+     *   - nor is `/index.php/{prefix}/…`, or any request with PATH_INFO;
+     *   - nor is a percent-encoded or differently-cased prefix.
+     *
+     * A literal `%` in a path (sent as `%25`) is never kept as itself: the
+     * next decoding round reads it as an escape. Followed by two hex digits
+     * it decodes on (`%2541` becomes `A`). Otherwise (`100%25-off`, or a
+     * trailing `%25`) it is a malformed escape, and the bearer is ignored.
+     *
+     * The app and its NextAuth server call `{BCC_API_URL}/wp-json/…` only.
+     *
+     * @param string $scriptName  SCRIPT_NAME (else PHP_SELF)
+     * @param string $requestUri  REQUEST_URI, raw
+     * @param string $homePath    home_url()'s path, '' at the root
+     * @param string $restPrefix  rest_get_url_prefix()
+     * @param bool   $otherEntry  an admin, ajax, cron or XML-RPC request
+     * @param string $pathInfo    PATH_INFO (else ORIG_PATH_INFO), '' when unset
+     */
+    public static function isRestRequestFor(string $scriptName, string $requestUri, string $homePath, string $restPrefix, bool $otherEntry, string $pathInfo): bool
+    {
+        if ($otherEntry || $pathInfo !== '' || !str_ends_with($scriptName, '/index.php')) {
+            return false;
+        }
+
+        $prefix = trim($restPrefix, '/');
+        if ($prefix === '' || $requestUri === '') {
+            return false;
+        }
+
+        $rawPath = explode('?', $requestUri, 2)[0];
+        $decoded = self::canonicalPath($rawPath);
+        if ($decoded === null) {
+            return false;
+        }
+
+        return self::startsWithRestPrefix($rawPath, $homePath, $prefix)
+            && self::startsWithRestPrefix($decoded, $homePath, $prefix);
+    }
+
+    /**
+     * The path fully percent-decoded, or null when it is not canonical: the
+     * raw path and every decoding round must be clean (isCleanPath()), a
+     * decoding may not add a `/`, and the path must stop changing within
+     * MAX_DECODE_ROUNDS decodings.
+     */
+    private static function canonicalPath(string $rawPath): ?string
+    {
+        $current = $rawPath;
+        for ($round = 0; ; $round++) {
+            if (!self::isCleanPath($current)) {
+                return null;
+            }
+            $next = rawurldecode($current);
+            if ($next === $current) {
+                return $current;
+            }
+            if ($round >= self::MAX_DECODE_ROUNDS) {
+                return null; // still changing after MAX_DECODE_ROUNDS decodings
+            }
+            if (substr_count($next, '/') !== substr_count($current, '/')) {
+                return null;
+            }
+            $current = $next;
+        }
+    }
+
+    /**
+     * No control character, no backslash, no malformed escape, and no `.`,
+     * `..` or empty segment (outer slashes aside, as core trims them).
+     */
+    private static function isCleanPath(string $path): bool
+    {
+        if (preg_match('/[\x00-\x1F\x7F]/', $path) === 1) {
+            return false;
+        }
+        if (str_contains($path, '\\')) {
+            return false;
+        }
+        if (preg_match('/%(?![0-9A-Fa-f]{2})/', $path) === 1) {
+            return false;
+        }
+
+        $trimmed = trim($path, '/');
+        if ($trimmed === '') {
+            return true;
+        }
+        foreach (explode('/', $trimmed) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Is $path (before `?`) the REST prefix, or under it, once the home path
+     * is taken off the front, as WP::parse_request reads it?
+     */
+    private static function startsWithRestPrefix(string $path, string $homePath, string $prefix): bool
+    {
+        $path = trim($path, '/');
+
+        $home = trim($homePath, '/');
+        if ($home !== '') {
+            if (strcasecmp($path, $home) === 0) {
+                $path = '';
+            } elseif (stripos($path, $home . '/') === 0) {
+                $path = trim(substr($path, strlen($home) + 1), '/');
+            }
+        }
+
+        return $path === $prefix || str_starts_with($path, $prefix . '/');
     }
 
     /**

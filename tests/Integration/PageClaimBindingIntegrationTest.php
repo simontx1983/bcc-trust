@@ -182,6 +182,67 @@ final class PageClaimBindingIntegrationTest extends TestCase
         $this->assertNoSideEffects($before);
     }
 
+    /**
+     * F-515: a validator BCC cannot prove an operator for (here: none on
+     * record) is refused BEFORE the wallet gate, with the card's code and
+     * hint, and nothing is written. Never "your wallet does not match".
+     */
+    public function testAnUnclaimableValidatorIsRefusedBeforeTheWalletGate(): void
+    {
+        global $wpdb;
+        $validator = $this->insertValidator(self::BYTES_A, $this->chainOne);
+        self::assertNotFalse($wpdb->update(
+            $wpdb->prefix . 'bcc_onchain_validators',
+            ['operator_address' => ''],
+            ['id' => $validator]
+        ), $wpdb->last_error);
+        $this->bindPlaceholder(self::PAGE_A, $validator);
+        $this->insertWallet(self::USER_ID, self::BYTES_A, $this->chainOne);
+
+        $before   = $this->snapshot();
+        $response = $this->claim(self::PAGE_A, 'validator', $validator);
+
+        self::assertSame(403, $response->get_status());
+        $error = $this->errorOf($response);
+        self::assertSame('bcc_forbidden', $error['code']);
+        self::assertSame(
+            ['reason' => 'not_claimable', 'unclaimable_reason_code' => 'operator_address_missing'],
+            $error['data'] ?? null
+        );
+        self::assertStringContainsString('no operator address on record', (string) $error['message']);
+        $this->assertNoSideEffects($before);
+    }
+
+    /**
+     * F-515: the card's single-page claim target reads the chain facts the
+     * claimability rule needs, on both binding paths.
+     */
+    public function testTheClaimTargetRowCarriesTheChainFacts(): void
+    {
+        global $wpdb;
+        $chain = $wpdb->get_row($wpdb->prepare(
+            "SELECT chain_type, name FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d",
+            $this->chainOne
+        ));
+        self::assertNotNull($chain);
+
+        // The placeholder binding.
+        $validatorA = $this->insertValidator(self::BYTES_A, $this->chainOne);
+        $this->bindPlaceholder(self::PAGE_A, $validatorA);
+        // The wallet-link binding.
+        $linkB      = $this->insertLinkWallet(self::OTHER_USER_ID, self::PAGE_B);
+        $validatorB = $this->insertValidator(self::BYTES_B, $this->chainOne, $linkB);
+
+        foreach ([[self::PAGE_A, $validatorA, self::BYTES_A], [self::PAGE_B, $validatorB, self::BYTES_B]] as [$pageId, $validatorId, $bytes]) {
+            $row = ValidatorRepository::findFirstByPageId($pageId);
+            self::assertNotNull($row, "page {$pageId}");
+            self::assertSame($validatorId, (int) $row->validator_id);
+            self::assertSame((string) $chain->chain_type, (string) $row->chain_type);
+            self::assertSame((string) $chain->name, (string) $row->chain_name);
+            self::assertSame($this->bech32('cosmosvaloper', $bytes), (string) $row->operator_address);
+        }
+    }
+
     // ── successful claims ───────────────────────────────────────────────
 
     public function testValidClaimWritesBothRowsAndFiresEachEventOnce(): void

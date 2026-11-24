@@ -79,6 +79,19 @@ final class CardReviewsEndpoint
         'user_profile',
     ];
 
+    /**
+     * The card kind (`CardViewService::getCard()`'s type) of each card
+     * target. `user_profile` has none: its replies are never shown as a
+     * page's.
+     *
+     * @var array<string, string>
+     */
+    private const CARD_KIND_OF_TARGET = [
+        'validator_card' => 'validator',
+        'project_card'   => 'project',
+        'creator_card'   => 'creator',
+    ];
+
     public static function register(): void
     {
         $instance = new self();
@@ -165,8 +178,13 @@ final class CardReviewsEndpoint
             $pageId = 0;
         }
 
+        // The card kind lets a reply whose author's profile is closed to this
+        // viewer show as the page's own response; a member's received
+        // reviews pass none.
+        $cardKind = self::CARD_KIND_OF_TARGET[$targetKind] ?? null;
+
         $data = (new CardReviewsService(Plugin::instance()->voteRepository()))
-            ->getReviews($pageId, $viewer, $page, $perPage);
+            ->getReviews($pageId, $viewer, $page, $perPage, $cardKind);
 
         $response = ApiResponse::ok($data);
         if ($viewer > 0) {

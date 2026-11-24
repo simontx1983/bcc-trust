@@ -42,6 +42,11 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Support\PageAccess;
+use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\PublicIdentity;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 
 if (!defined('ABSPATH')) {
@@ -223,29 +228,53 @@ class EndorsementService {
      * `page_id` mapping per the class docblock: card target_id passes
      * through; user_profile maps to the member self-page id.
      *
+     * `$viewerId` is who reads the list; null means the endorser themselves.
+     * For anyone else, a vouch on a SECRET page that viewer may not see is
+     * left out (F-528), as PageAccess decides for each page. It is left out
+     * IN SQL (F-571): the member's secret pages are read, the hidden ones
+     * found (PageAccess::hiddenAmong()), and the vouch read excludes them, so
+     * `$limit` returns a full list of what the viewer may see. Site admins
+     * see every page and skip the read. A member self-page is never secret.
+     * ⚠ PageAccess reads the admin exemption of the request's user, so
+     * `$viewerId` must be that user.
+     *
+     * A vouch for a member is titled with the name OTHERS see
+     * (PublicIdentity::visibleName(): "Hide my real name" shows '@handle'),
+     * read by this viewer.
+     *
      * @return list<array<string, mixed>>
+     * @throws RepositoryReadFailure when a read did not run (F-421), or the
+     *         member is over PageAccess::HIDDEN_LIST_CAP secret pages
      */
-    public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20): array {
+    public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20, ?int $viewerId = null): array {
         $endorserUserId = $endorserUserId ?? get_current_user_id();
 
         if (!$endorserUserId) {
             return [];
         }
+        $viewerId ??= $endorserUserId;
 
-        $rows = $this->attestationRepo->listActiveVouchesByAttestor($endorserUserId, $limit);
-        return $this->shapeGivenRows($rows, $endorserUserId);
+        // Rationale: F-528 / F-571 (private tracker).
+        $hiddenPageIds = $viewerId === $endorserUserId || ProfileAccess::viewerIsExemptFromVisibility()
+            ? []
+            : PageAccess::hiddenAmong($this->attestationRepo->findSecretPageIdsVouchedBy($endorserUserId), $viewerId);
+
+        $rows = $this->attestationRepo->listActiveVouchesByAttestor($endorserUserId, $limit, $hiddenPageIds);
+        return $this->shapeGivenRows($rows, $endorserUserId, $viewerId);
     }
 
     /**
      * Shape raw active-vouch attestation rows into the legacy raw-row
      * array shape (see getUserEndorsements). Title resolution:
      * card targets read the page post title (post cache primed in one
-     * batch); user_profile targets read the member display name.
+     * batch); user_profile targets read the member's name as $viewerId may
+     * see it (PublicIdentity::visibleName(), F-571): one batched user read
+     * and one batch of "Hide my real name" flags.
      *
      * @param list<object{id: int, target_kind: string, target_id: int, weight_at_time: float, context_note: ?string, created_at: string}> $rows
      * @return list<array<string, mixed>>
      */
-    private function shapeGivenRows(array $rows, int $endorserUserId): array {
+    private function shapeGivenRows(array $rows, int $endorserUserId, int $viewerId): array {
         if ($rows === []) {
             return [];
         }
@@ -253,21 +282,38 @@ class EndorsementService {
         // Batch-prime the WP post cache for card targets so the per-row
         // get_the_title calls below are cache hits (no N+1).
         $cardPageIds = [];
+        $memberIds   = [];
         foreach ($rows as $row) {
-            if ($row->target_kind !== 'user_profile' && $row->target_id > 0) {
+            if ($row->target_kind === 'user_profile') {
+                if ($row->target_id > 0) {
+                    $memberIds[$row->target_id] = $row->target_id;
+                }
+            } elseif ($row->target_id > 0) {
                 $cardPageIds[] = $row->target_id;
             }
         }
         if ($cardPageIds !== []) {
             _prime_post_caches($cardPageIds, false, false);
         }
+        $members = $memberIds === []
+            ? []
+            : \BCC\Trust\Core\Plugin::instance()->userMiniRepository()->getRowsByIds(array_values($memberIds));
+        PrivacySettings::prime(array_values($memberIds));
 
         $out = [];
         foreach ($rows as $row) {
             if ($row->target_kind === 'user_profile') {
                 $pageId = MemberSelfPageService::selfPageId($row->target_id);
-                $user   = get_userdata($row->target_id);
-                $title  = $user instanceof \WP_User ? (string) $user->display_name : null;
+                $member = $members[$row->target_id] ?? null;
+                $title  = $member !== null
+                    ? PublicIdentity::visibleName(
+                        $row->target_id,
+                        $member['display_name'],
+                        $member['user_login'],
+                        PublicIdentity::handle($row->target_id, $member['handle']),
+                        $viewerId
+                    )
+                    : null;
             } else {
                 $pageId = $row->target_id;
                 $title  = get_the_title($row->target_id);
@@ -432,10 +478,11 @@ class EndorsementService {
      *   - last_endorsement — newest active vouch created_at, or null.
      *
      * @return array<string, mixed>
+     * @throws RepositoryReadFailure when the vouch read did not run (F-421)
      */
     public function getUserEndorsementStats(int $userId): array {
         $rows   = $this->attestationRepo->listActiveVouchesByAttestor($userId, self::STATS_MAX_ROWS);
-        $shaped = $this->shapeGivenRows($rows, $userId);
+        $shaped = $this->shapeGivenRows($rows, $userId, $userId);
 
         $uniquePages = [];
         foreach (array_slice($shaped, 0, 10) as $e) {

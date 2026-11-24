@@ -3,10 +3,18 @@
  * Mirrors PeepSo's group privacy flag (is_open / is_closed / is_secret)
  * so callers reason about a single value instead of three booleans.
  *
+ * The value comes from bcc-core's `PeepSoGroupPrivacy` read (F-460): the
+ * STRICTEST of the group's `peepso_group_privacy` rows, read through
+ * ProbesReads rather than get_post_meta(). This enum only maps that answer,
+ * so every group gate in the domain gets the same rule as bcc-core's list
+ * predicate (`notSecretSql()`).
+ *
  * @package BCC\Trust\Core\ValueObjects
  */
 
 namespace BCC\Trust\Core\ValueObjects;
+
+use BCC\Core\Repositories\PeepSoGroupPrivacy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -18,17 +26,39 @@ enum PeepSoPrivacy: string {
     case Secret = 'secret';
 
     /**
-     * PeepSo stores privacy as `peepso_group_privacy` post meta with
-     * integer values 0/1/2 (PeepSoGroupPrivacy::PRIVACY_OPEN/CLOSED/SECRET).
-     * The `is_open` / `is_closed` / `is_secret` booleans are derived
-     * object properties on PeepSoGroup, not separate meta keys.
+     * This group's privacy, from bcc-core's probed read.
+     *
+     * ⚠ Read through ProbesReads, never get_post_meta() (F-460): a read that
+     * cannot be trusted answers null, and callers fail closed. This one call
+     * feeds GroupContextResolver, and through it every group gate.
+     *
+     * See fromStoredValue() for what each answer becomes.
      */
     public static function fromGroupPostId(int $groupId): self {
-        $value = get_post_meta($groupId, 'peepso_group_privacy', true);
-        return match ((int) $value) {
-            2       => self::Secret,
-            1       => self::Closed,
-            default => self::Open,
+        return self::fromStoredValue(PeepSoGroupPrivacy::privacyForGroup($groupId));
+    }
+
+    /**
+     * The enum for one answer of `PeepSoGroupPrivacy::privacyForGroup()` /
+     * `privacyForGroups()`.
+     *
+     *   2    → Secret
+     *   1    → Closed
+     *   0    → Open (also a group with no privacy row, deliberately; see
+     *          bcc-core's class docblock)
+     *   null → **Secret**: the read could not be trusted
+     *
+     * ⚠ UNKNOWN IS SECRET, the strictest answer, so an unreadable value is
+     * handled exactly like a secret group at every gate. Membership is read
+     * separately, so members are unaffected. An open group whose read fails
+     * is briefly treated as secret for everyone else; that is the intended
+     * trade.
+     */
+    public static function fromStoredValue(?int $value): self {
+        return match ($value) {
+            PeepSoGroupPrivacy::SECRET, null => self::Secret,
+            PeepSoGroupPrivacy::CLOSED       => self::Closed,
+            default                          => self::Open,
         };
     }
 }

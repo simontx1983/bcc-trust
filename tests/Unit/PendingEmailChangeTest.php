@@ -189,6 +189,21 @@ final class PendingEmailChangeTest extends TestCase
         self::assertIsString(self::googleSignIn(self::OLD)['token'] ?? null);
     }
 
+    /**
+     * F-458: an ordinary account must not move onto the reserved placeholder
+     * domain, where it would read as a wallet account with no inbox.
+     */
+    public function testTheReservedPlaceholderDomainIsRefusedAndNothingIsStaged(): void
+    {
+        [$status, $data] = self::patch('me@NoReply.BCC.Local');
+
+        self::assertSame(422, $status);
+        self::assertSame('Email address is not valid.', $data['error']['message'] ?? null);
+        self::assertSame(self::OLD, self::email(self::USER));
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail'], 'no code was mailed');
+        self::assertNotContains('account_email_change_requested', $GLOBALS['__bcc_ph']['audit']);
+    }
+
     public function testWrongPasswordStagesNothing(): void
     {
         [$status] = self::patch(self::NEW, 'wrong');

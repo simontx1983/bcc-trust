@@ -87,6 +87,57 @@ namespace BCC\Trust\Core\Tests\Unit {
         }
 
         /**
+         * F-560: the read model orders named validators FIRST under every
+         * sort: the unnamed key (a scalar subquery on the page's validator
+         * row), then the chosen sort, then the tiebreak.
+         */
+        public function testEveryReadModelSortPutsNamedValidatorsFirst(): void
+        {
+            foreach (['trust', '', 'endorsements', 'newest', 'followers', 'self_stake'] as $sort) {
+                $GLOBALS['wpdb']->results = [];
+                PageDiscoveryRepository::queryFromReadModel([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+                self::assertMatchesRegularExpression(
+                    "/ORDER BY COALESCE\(\(\s*SELECT CASE WHEN .+FROM wp_postmeta pm_named\s+INNER JOIN wp_bcc_onchain_validators v_named.+'_bcc_onchain_validator_id'\s+LIMIT 1\s*\), 0\) ASC, /s",
+                    self::mainSql(),
+                    "sort '{$sort}': the unnamed key comes first"
+                );
+            }
+        }
+
+        /**
+         * F-560, the posts-table fallback: its statement is DISTINCT, so the
+         * key is SELECTED as `is_unnamed` and the ORDER BY leads with it.
+         */
+        public function testEveryPostsTableSortPutsNamedValidatorsFirst(): void
+        {
+            foreach (['trust', '', 'endorsements', 'newest', 'followers'] as $sort) {
+                $GLOBALS['wpdb']->results = [];
+                PageDiscoveryRepository::queryFromPostsTable([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+                $sql = self::mainSql();
+                self::assertMatchesRegularExpression('/\), 0\) AS is_unnamed\s/', $sql, "sort '{$sort}': the key is selected");
+                self::assertMatchesRegularExpression('/ORDER BY is_unnamed ASC, /', $sql, "sort '{$sort}': and leads the ORDER BY");
+            }
+        }
+
+        /** F-560: no COUNT carries the key, so the total is exactly as before. */
+        public function testNoCountCarriesTheUnnamedKey(): void
+        {
+            $runs = [
+                'read model'               => static fn () => PageDiscoveryRepository::queryFromReadModel([], 'trust', false, '', 0.0, false, 0, 12, 2, ''),
+                'read model, chain filter' => static fn () => PageDiscoveryRepository::queryFromReadModel(['validator'], 'self_stake', false, '', 0.0, false, 0, 12, 2, '', false, 'solana', 'active', 1.0),
+                'posts table'              => static fn () => PageDiscoveryRepository::queryFromPostsTable(['validator'], 'trust', true, '', 0.0, false, 0, 12, 2, 'x'),
+            ];
+            foreach ($runs as $label => $run) {
+                $GLOBALS['wpdb']->results = [];
+                $run();
+                $counts = array_values(array_filter($GLOBALS['wpdb']->results, static fn (string $sql): bool => str_contains($sql, 'COUNT(')));
+                self::assertCount(1, $counts, $label);
+                self::assertStringNotContainsString('pm_named', $counts[0], "{$label}: the COUNT is untouched");
+                self::assertStringNotContainsString('is_unnamed', $counts[0], $label);
+            }
+        }
+
+        /**
          * SECRET pages: the COUNT and the paged SELECT of BOTH discovery
          * queries carry bcc-core's shared rule on the posts alias, for every
          * sort and with the validator and verified-only joins in play.
@@ -120,6 +171,107 @@ namespace BCC\Trust\Core\Tests\Unit {
                 foreach ($statements as $sql) {
                     self::assertSame(1, substr_count($sql, $rule), "{$label}: the shared rule, once");
                 }
+            }
+        }
+
+        // ── F-584: the status filter matches current chains only ─────────
+
+        /** @return list<string> the COUNT and the paged SELECT of the last run */
+        private static function discoveryStatements(): array
+        {
+            $statements = array_values(array_filter(
+                $GLOBALS['wpdb']->results,
+                static fn (string $sql): bool => str_contains($sql, 'peepso-page')
+            ));
+            self::assertCount(2, $statements, 'the COUNT and the paged SELECT');
+
+            return $statements;
+        }
+
+        /**
+         * A stored status counts only on a chain still answering: the COUNT
+         * and the paged SELECT both carry the allowlist next to the status.
+         */
+        public function testTheStatusFilterMatchesOnlyCurrentChains(): void
+        {
+            PageDiscoveryRepository::queryFromReadModel(['validator'], 'trust', false, '', 0.0, false, 0, 12, 1, '', false, '', 'active', null, [3, 5]);
+
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringContainsString("v_chain.status = 'active'", $sql);
+                self::assertStringContainsString('v_chain.chain_id IN (3,5)', $sql);
+                self::assertStringNotContainsString('1 = 0', $sql);
+            }
+        }
+
+        /** No current chain (or none passed): the status filter matches nothing. */
+        public function testWithNoCurrentChainTheStatusFilterMatchesNothing(): void
+        {
+            PageDiscoveryRepository::queryFromReadModel(['validator'], 'trust', false, '', 0.0, false, 0, 12, 1, '', false, '', 'jailed', null, []);
+
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringContainsString('1 = 0', $sql);
+                self::assertStringNotContainsString('v_chain.chain_id IN', $sql);
+            }
+        }
+
+        /** The allowlist is integers, positive, once each. */
+        public function testTheAllowlistIsPositiveIntegersOnce(): void
+        {
+            PageDiscoveryRepository::queryFromReadModel(['validator'], 'trust', false, '', 0.0, false, 0, 12, 1, '', false, '', 'inactive', null, ['3', 0, -1, 3, 8]);
+
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringContainsString('v_chain.chain_id IN (3,8)', $sql);
+            }
+        }
+
+        /** Without a status filter, no chain is excluded (the other axes are unchanged). */
+        public function testWithoutAStatusFilterNoChainIsExcluded(): void
+        {
+            PageDiscoveryRepository::queryFromReadModel(['validator'], 'self_stake', false, '', 0.0, false, 0, 12, 1, '', false, 'cosmos', '', 1.0, []);
+
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringNotContainsString('v_chain.chain_id IN', $sql);
+                self::assertStringNotContainsString('1 = 0', $sql);
+            }
+        }
+
+        /**
+         * End to end through PageDiscoveryService: the allowlist is the ACTIVE
+         * chains the real breaker has heard from within 72 hours.
+         */
+        public function testTheServiceAllowsOnlyActiveChainsStillAnswering(): void
+        {
+            require_once __DIR__ . '/../Stubs/breaker-real-stubs.php';
+            \BccBreakerStore::reset();
+            \BCC\Trust\Onchain\Support\ValidatorStatusProjection::reset();
+            \BccBreakerStore::$cache['bcc_chains:active_all'] = [
+                (object) ['id' => '3', 'slug' => 'cosmos', 'chain_type' => 'cosmos'],
+                (object) ['id' => '5', 'slug' => 'kujira', 'chain_type' => 'cosmos'],
+                (object) ['id' => '8', 'slug' => 'solana', 'chain_type' => 'solana'],
+                (object) ['id' => '9', 'slug' => 'osmosis', 'chain_type' => 'cosmos'],
+            ];
+            $window = \BCC\Trust\Onchain\Support\ValidatorStatusProjection::STALE_AFTER;
+            update_option('bcc_onchain_last_success_3', time() - 60, false);
+            update_option('bcc_onchain_last_success_5', time() - ($window + 1), false); // stale
+            update_option('bcc_onchain_last_success_8', time() - ($window - 1), false);
+            // 9: never heard from.
+            update_option('bcc_onchain_last_success_12', time() - 60, false); // answering, but not an active chain
+
+            $service = (new \ReflectionClass(\BCC\Trust\Core\Services\PageDiscoveryService::class))->newInstanceWithoutConstructor();
+            $query   = new \ReflectionMethod($service, 'executeReadModelQuery');
+            $query->setAccessible(true);
+            $query->invoke($service, ['validator'], 'trust', false, '', 0.0, false, 0, 12, 1, '', false, '', 'active', null);
+
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringContainsString("v_chain.status = 'active'", $sql);
+                self::assertStringContainsString('v_chain.chain_id IN (3,8)', $sql);
+            }
+
+            // No status filter: the service passes no allowlist and nothing is excluded.
+            $GLOBALS['wpdb']->results = [];
+            $query->invoke($service, ['validator'], 'trust', false, '', 0.0, false, 0, 12, 1, '', false, 'cosmos', '', null);
+            foreach (self::discoveryStatements() as $sql) {
+                self::assertStringNotContainsString('v_chain.chain_id IN', $sql);
             }
         }
     }

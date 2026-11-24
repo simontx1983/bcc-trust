@@ -1102,6 +1102,9 @@ class VoteRepository {
      * carries the long-form review body when present (reviews are the
      * §D2 long-form variant of votes — bare votes leave it empty).
      *
+     * @param list<int> $excludePageIds pages whose reviews this read leaves
+     *        out (F-528: the secret pages the viewer may not see); pass the
+     *        same list to {@see countReviewsByVoter()} so the total agrees
      * @return list<object{
      *   id: int|numeric-string,
      *   page_id: int|numeric-string,
@@ -1114,12 +1117,17 @@ class VoteRepository {
      *   page_type: string|null
      * }>
      */
-    public function findByVoterPaginated(int $voterId, int $limit, int $offset): array
+    public function findByVoterPaginated(int $voterId, int $limit, int $offset, array $excludePageIds = []): array
     {
         if ($voterId <= 0) {
             return [];
         }
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND v.page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -1136,12 +1144,10 @@ class VoteRepository {
                  LEFT JOIN {$wpdb->posts} p ON v.page_id = p.ID
                  WHERE v.voter_user_id = %d
                    AND v.status        = 1
-                   AND " . $this->hiddenReviewExclusion('v') . "
+                   AND " . $this->hiddenReviewExclusion('v') . $notIn . "
                  ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
-                $voterId,
-                $limit,
-                $offset
+                ...[$voterId, ...$exclude, $limit, $offset]
             )
         );
 
@@ -1250,19 +1256,74 @@ class VoteRepository {
      * feeds vote weight, quests and profile stats, where whether a hidden
      * review should still count is an open product question (scoring is
      * out of F-55's scope).
+     *
+     * @param list<int> $excludePageIds as {@see findByVoterPaginated()}
      */
-    public function countReviewsByVoter(int $voterId): int
+    public function countReviewsByVoter(int $voterId, array $excludePageIds = []): int
     {
         if ($voterId <= 0) {
             return 0;
         }
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND v.page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
+
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table} v
              WHERE v.voter_user_id = %d
                AND v.status        = 1
-               AND " . $this->hiddenReviewExclusion('v'),
-            $voterId
+               AND " . $this->hiddenReviewExclusion('v') . $notIn,
+            ...[$voterId, ...$exclude]
+        ));
+    }
+
+    /**
+     * The SECRET pages this member has an active review of, each once
+     * (F-528). bcc-core's shared rule decides what is secret
+     * (PeepSoPagePrivacy::notSecretSql()), so this agrees with
+     * PageAccess. A member self-page has no post and is never returned.
+     *
+     * The member's Reviews list passes these through
+     * PageAccess::hiddenAmong() for a viewer other than the member, and
+     * leaves the ones that viewer may not see out of its rows and total.
+     * Only secret pages are read, so the list stays small for every member.
+     *
+     * ⚠ FAILS CLOSED: a read that did not run, or a member with more than
+     * PageAccess::HIDDEN_LIST_CAP secret pages, THROWS, and the list
+     * answers 503. An empty answer would show every review.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public function findSecretPageIdsReviewedBy(int $voterId): array
+    {
+        if ($voterId <= 0) {
+            return [];
+        }
+        global $wpdb;
+
+        $notSecret = \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('v.page_id');
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT DISTINCT v.page_id
+               FROM {$this->table} v
+              WHERE v.voter_user_id = %d
+                AND v.status        = 1
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            $voterId,
+            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
+        ), __FUNCTION__, true);
+
+        if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $voterId);
+        }
+
+        return self::positiveIds(array_map(
+            static fn (object $row): int => (int) ($row->page_id ?? 0),
+            $rows
         ));
     }
 
@@ -1286,6 +1347,14 @@ class VoteRepository {
      *   illegal-mix-of-collations error on MySQL 8.
      * - Without PeepSo's activities table there are no review activities
      *   to hide, and the join would error, so the predicate is a no-op.
+     *   ⚠ ONLY when a table is CONFIRMED missing. When the existence probe
+     *   cannot be trusted, the exclusion is still emitted, so no read or
+     *   recalc built on it counts a hidden review on an unknown. The
+     *   statement itself then proves the tables: exact when they exist.
+     *   When they really are missing it fails, and each read's own failure
+     *   handling takes over: the recalc's runRead() throws before anything
+     *   is saved, and an edge recalc throws before it writes.
+     *   Rationale: M7 (private tracker).
      *
      * PUBLIC so the scoring follow-up (a moderation-hidden review stops
      * counting toward scores and tallies while hidden; user decision) can
@@ -1300,8 +1369,9 @@ class VoteRepository {
         global $wpdb;
         $activities = $wpdb->prefix . 'peepso_activities';
         $hidden     = \BCC\Trust\Core\Database\TableRegistry::hiddenActivities();
-        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)
-            || !\BCC\Trust\Core\Database\TableRegistry::exists($hidden)) {
+        // `=== false`, never `!`: null (unknown) must keep the exclusion.
+        if (\BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($activities) === false
+            || \BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($hidden) === false) {
             return '1 = 1';
         }
 
@@ -1331,7 +1401,8 @@ class VoteRepository {
      * vote has since been removed still warrants a recalculation of its page.
      *
      * @return array{page_id: int, voter_id: int}|null
-     * @throws RepositoryException on database failure
+     * @throws RepositoryException when prepare() produced no statement
+     * @throws RepositoryReadFailure when the lookup did not run
      */
     public function findReviewVoteByActivity(int $actId): ?array
     {
@@ -1340,7 +1411,10 @@ class VoteRepository {
         }
         global $wpdb;
         $activities = $wpdb->prefix . 'peepso_activities';
-        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)) {
+        // Only a CONFIRMED missing table means "not a review". An unknown
+        // probe runs the lookup, so a hide still finds its page; a missing
+        // table then errors and throws below. Rationale: M7 (private tracker).
+        if (\BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($activities) === false) {
             return null;
         }
 
@@ -1364,28 +1438,40 @@ class VoteRepository {
             throw new RepositoryException('VoteRepository::findReviewVoteByActivity: wpdb::prepare() produced no statement');
         }
 
-        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string}|null $row */
-        $row = $wpdb->get_row($sql);
-        if ($wpdb->last_error !== '') {
-            throw new RepositoryException('VoteRepository::findReviewVoteByActivity failed: ' . $wpdb->last_error);
-        }
-        if (!is_object($row)) {
+        // The answer picks the page to recalculate, so it must be this query's:
+        // runRead() throws on a read that did not run, the pre-flush() bail
+        // included, rather than handing back an earlier query's row.
+        $rows = self::runRead($sql, __FUNCTION__, true);
+        if (!isset($rows[0])) {
             return null;
         }
+        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string} $row */
+        $row = $rows[0];
+
         return ['page_id' => (int) $row->page_id, 'voter_id' => (int) $row->voter_user_id];
     }
 
     /**
      * Count total active votes by voter.
+     *
+     * @param list<int> $excludePageIds pages whose votes this count leaves
+     *        out (F-571: on the member's profile, the SECRET pages the viewer
+     *        may not see, so the chip agrees with the Reviews list); none by
+     *        default, for weight, quests and stats
      */
-    public function countByVoter( int $voterId ): int {
+    public function countByVoter( int $voterId, array $excludePageIds = [] ): int {
         global $wpdb;
+
+        $exclude = self::positiveIds($excludePageIds);
+        $notIn   = $exclude === []
+            ? ''
+            : ' AND page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table}
              WHERE voter_user_id = %d
-               AND status        = 1",
-            $voterId
+               AND status        = 1" . $notIn,
+            ...[$voterId, ...$exclude]
         ) );
     }
 

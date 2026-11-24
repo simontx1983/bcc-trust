@@ -616,11 +616,15 @@ final class AnnouncementsEndpointTest extends TestCase
      *   - nothing exists to purge it with — no generation counter, no
      *     surrogate key, no hook on archive, pin or the switch.
      *
-     * ⚠ Claim revocation is NOT one of those costs, and the difference is
-     * what the `Vary` assertions encode: the public reads carry no
-     * viewer-dependent field, so revocation cannot change them, while
+     * ⚠ Claim revocation is NOT one of those costs: the public reads carry
+     * no viewer-dependent field, so revocation cannot change them, while
      * detail and the owner list carry `capabilities` and therefore must
      * vary on the credential.
+     *
+     * ⚠ All four now vary on the credential. Since the secret-page rule the
+     * two public reads answer a SECRET page with an empty page for a viewer
+     * the page does not admit and with the list for a member, so they vary
+     * by viewer too (still `no-store`, still no TTL).
      */
     public function testCacheHeadersMatchViewerDependence(): void
     {
@@ -642,9 +646,9 @@ final class AnnouncementsEndpointTest extends TestCase
             'detail and the owner list are private and uncacheable'
         );
         self::assertSame(
-            2,
+            4,
             substr_count($code, "'Vary', 'Authorization, Cookie'"),
-            'exactly the two viewer-dependent reads vary on the credential'
+            'every read varies on the credential: detail and the owner list for capabilities, the public two for secret pages'
         );
     }
 

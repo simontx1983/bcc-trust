@@ -157,6 +157,24 @@ final class ValidatorGroupGateTest extends TestCase
         self::assertSame([[self::USER_ID, self::GROUP_ID]], $GLOBALS['__bcc_valgate_fixture']['cleared'], 'success clears the opt-out');
     }
 
+    /**
+     * H7: the delegator join door reads the shared opt-out map through the
+     * TRUSTED read too. Unreadable is the transient 503, before any
+     * delegation lookup, and nothing is written or cleared.
+     */
+    public function testAnUnreadableOptOutMapIs503NotAJoin(): void
+    {
+        $GLOBALS['__bcc_valgate_fixture']['opted_out'] = 'unreadable';
+        $GLOBALS['__bcc_valgate_fixture']['verdict']   = DelegationVerdict::eligible(1.0, 25.0);
+
+        $result = $this->service()->joinIfEligible(self::USER_ID, self::GROUP_ID);
+
+        self::assertFalse($result->success);
+        self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, $result->code);
+        self::assertNoMembershipWritten();
+        self::assertSame([], $GLOBALS['__bcc_valgate_fixture']['cleared']);
+    }
+
     public function testAVoluntaryOptOutStillRequiresEligibility(): void
     {
         $GLOBALS['__bcc_valgate_fixture']['opted_out'] = 'voluntary';

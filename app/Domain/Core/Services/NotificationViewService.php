@@ -193,7 +193,13 @@ final class NotificationViewService
         $actorIds = [];
         foreach ($rows as $row) {
             $fid = isset($row->not_from_user_id) ? (int) $row->not_from_user_id : 0;
-            if ($fid > 0) {
+            // F-578: a row that speaks as a page shows no person, so its
+            // sender is not read at all.
+            $asPage = self::speaksAsPage(
+                isset($row->not_type) && is_string($row->not_type) ? $row->not_type : '',
+                isset($row->not_external_id) ? (int) $row->not_external_id : 0
+            );
+            if ($fid > 0 && !$asPage) {
                 $actorIds[$fid] = true;
             }
         }
@@ -204,7 +210,8 @@ final class NotificationViewService
             update_meta_cache('user', $ids);          // primes bcc_handle reads
             $avatarById = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($ids);
             foreach ($ids as $id) {
-                $actorsById[$id] = self::resolveActor($id, $avatarById[$id] ?? '');
+                // The recipient is the viewer: their own name stays theirs (F-513).
+                $actorsById[$id] = self::resolveActor($id, $avatarById[$id] ?? '', $userId);
             }
         }
 
@@ -290,8 +297,18 @@ final class NotificationViewService
             return null;
         }
 
-        $actor = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
-        $link  = self::resolveLink($type, $externalId, $actId, $actor['handle']);
+        $recipientId = isset($row->not_user_id) ? (int) $row->not_user_id : 0;
+        // F-578: a reply on a card page's review speaks as the PAGE: no
+        // person as its actor, and the text re-rendered in the page's voice
+        // (which also covers rows written before, in the "@handle …" form).
+        $asPage  = self::speaksAsPage($type, $externalId);
+        $actor   = $asPage
+            ? self::resolveActor(0, '', $recipientId)
+            : ($actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '', $recipientId));
+        $link    = self::resolveLink($type, $externalId, $actId, $actor['handle']);
+        $message = $asPage
+            ? self::pageVoiceReplyMessage($externalId)
+            : self::withCurrentActorHandle($message, $actor['handle']);
 
         if ($type === NotificationType::DELEGATOR_GROUP_REMOVED && isset($removalNotices[$externalId])) {
             $message = $removalNotices[$externalId]['message'];
@@ -313,12 +330,86 @@ final class NotificationViewService
         ];
     }
 
+    /** The most a rendered message holds: PeepSo's column width, which it cuts stored messages to. */
+    public const MESSAGE_MAX_LENGTH = 200;
+
     /**
+     * F-578: does this bell speak as a PAGE rather than a person? A review
+     * reply on a card page's review: on that page's Reviews tab the reply
+     * can stand as the page's own response, so its bell names the page and
+     * shows no person (no actor, no @handle), on the bell list and in the
+     * digest alike. Decided by the target alone: the reviewer is not the
+     * request's user when the bell is written, so a per-viewer profile check
+     * cannot be asked there. A reply on a member's own profile review still
+     * names the member, who is the subject. Rationale: F-578 (private
+     * tracker).
+     */
+    public static function speaksAsPage(string $type, int $externalId): bool
+    {
+        return $type === NotificationType::REVIEW_REPLY
+            && $externalId > 0
+            && !\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($externalId);
+    }
+
+    /**
+     * F-578: the page-voice text of a review-reply bell: "{page} replied to
+     * your review.", or a neutral line when the page has no title. The
+     * dispatcher writes it and the readers re-render it, so the stored row
+     * and the shown text agree, old rows included.
+     */
+    public static function pageVoiceReplyMessage(int $pageId): string
+    {
+        $page = $pageId > 0 ? get_post($pageId) : null;
+        $name = $page instanceof \WP_Post ? trim((string) $page->post_title) : '';
+
+        return $name !== '' ? sprintf('%s replied to your review.', $name) : 'Your review got a reply.';
+    }
+
+    /**
+     * F-412: name a message's actor by their CURRENT @handle.
+     *
+     * NotificationDispatcher writes the actor's handle into the stored text
+     * ("@handle reacted to your post."). After a handle change, the bell
+     * showed that old handle beside `actor.handle`, which is resolved now, and
+     * the digest mailed it. Either way, the old and new handles were linked
+     * for every member who saw the row. A rename retires the old handle
+     * precisely so the two are not tied together publicly.
+     *
+     * Every dispatcher message that starts with "@" starts with its
+     * from-user's handle; system messages (rank, welcome, claims, disputes,
+     * announcements) never start with "@". So only a leading "@token" is
+     * replaced, and only when the actor's current handle is known. An actor
+     * that no longer resolves keeps the stored text.
+     *
+     * The result is cut to MESSAGE_MAX_LENGTH as PeepSo cuts the stored one,
+     * since a longer new handle can push a full-length message past it.
+     */
+    public static function withCurrentActorHandle(string $message, string $actorHandle): string
+    {
+        if ($actorHandle === '' || preg_match('/^@\S+/u', $message, $m) !== 1) {
+            return $message;
+        }
+        $rendered = '@' . $actorHandle . substr($message, strlen($m[0]));
+
+        return mb_strlen($rendered, 'UTF-8') > self::MESSAGE_MAX_LENGTH
+            ? mb_substr($rendered, 0, self::MESSAGE_MAX_LENGTH, 'UTF-8')
+            : $rendered;
+    }
+
+    /** The current public @handle the bell shows for $userId ('' when the account no longer resolves). */
+    public static function actorHandle(int $userId): string
+    {
+        return self::resolveActor($userId, '')['handle'];
+    }
+
+    /**
+     * @param int    $viewerId  Who reads the bell (the recipient): a member sees
+     *                          their own real name; others see the §K2 mask.
      * @param string $avatarUrl Pre-resolved (bulk) avatar; '' lets callers
      *                          on the single-actor path pass empty.
      * @return array{id: int, handle: string, display_name: string, avatar_url: string}
      */
-    private static function resolveActor(int $userId, string $avatarUrl): array
+    private static function resolveActor(int $userId, string $avatarUrl, int $viewerId = 0): array
     {
         if ($userId <= 0) {
             return [
@@ -337,7 +428,7 @@ final class NotificationViewService
                 'avatar_url'   => '',
             ];
         }
-        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user, $viewerId);
         $handle      = $identity['handle'];
         $displayName = $identity['display_name'];
 

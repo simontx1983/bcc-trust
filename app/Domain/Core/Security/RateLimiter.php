@@ -19,6 +19,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\RateLimitRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
@@ -124,18 +125,35 @@ class RateLimiter {
      * Install (or clear) a fake clock, so a test can place a request at a
      * chosen offset inside a window instead of sleeping.
      *
-     * ⚠ SCOPE: only slidingWindowCheck() honours this. The other two clock
-     * reads — allow()'s denial-audit path (time() at :321) and resetIn()
-     * (time() at :480) — still call time() directly, because those lines sit
-     * inside hunks owned by open PRs #611 and #614 and editing them here
-     * would conflict. Unifying the three reads is a follow-up. Until then do
-     * NOT drive this clock through allow() or resetIn() and expect their
-     * bucket index to agree with the one computed here.
+     * ⚠ SCOPE: slidingWindowCheck() and retryAfterByKey() honour this.
+     * allow()'s denial-audit path and the `at` of a recorded denial still
+     * call time() directly, so do NOT expect the audit's bucket index to
+     * agree with the one computed here under a fake clock.
      *
      * @param (\Closure(): int)|null $clock
      */
     public static function setClockForTesting(?\Closure $clock): void {
         self::$clock = $clock;
+    }
+
+    /**
+     * F-391: the last DENY allow() returned in this request, as
+     * {limit, window, at, retry_after}: the same shape bcc-core's
+     * Throttle::lastDenial() records (F-289). Only denials are recorded, so a
+     * request no limit refused has null. `retry_after` is the seconds from
+     * `at` until a retry would pass every bucket allow() checks, at least 1.
+     *
+     * @var array{limit: int, window: int, at: int, retry_after: int}|null
+     */
+    private static ?array $lastDenial = null;
+
+    /**
+     * Read by the REST Envelope to put the time left on a rate-limit 429.
+     *
+     * @return array{limit: int, window: int, at: int, retry_after: int}|null
+     */
+    public static function lastDenial(): ?array {
+        return self::$lastDenial;
     }
 
     /**
@@ -439,13 +457,34 @@ class RateLimiter {
             $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window, true);
             $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window, true);
             $allowed = $allowedByUser && $allowedByIp;
-            $slidingKey = $allowedByUser ? $ipKey : $userKey;
+            $slidingKey   = $allowedByUser ? $ipKey : $userKey;
+            $slidingLimit = $allowedByUser ? $ipLimit : $adjustedLimit;
+            // A retry has to pass BOTH buckets, so its wait is the longer one.
+            $retryBuckets = [[$userKey, $adjustedLimit], [$ipKey, $ipLimit]];
         } else {
             // Normalize IP to /24 (IPv4) or /48 (IPv6) subnet to bound
             // key cardinality and prevent DB growth from rotating IPs.
             $subnet = self::normalizeIpToSubnet($ip);
-            $slidingKey = "{$action}_anon_{$subnet}";
+            $slidingKey   = "{$action}_anon_{$subnet}";
+            $slidingLimit = $adjustedLimit;
+            $retryBuckets = [[$slidingKey, $adjustedLimit]];
             $allowed = self::slidingWindowCheck($slidingKey, $adjustedLimit, $window, true);
+        }
+
+        if (!$allowed) {
+            // F-391: record the refusal for the Envelope, which puts the time
+            // left on the 429 (Retry-After, X-RateLimit-*, retry_after_seconds)
+            // exactly as it does for a bcc-core Throttle denial (F-289).
+            $retryAfter = 0;
+            foreach ($retryBuckets as [$bucketKey, $bucketLimit]) {
+                $retryAfter = max($retryAfter, self::retryAfterByKey($bucketKey, $bucketLimit, $window));
+            }
+            self::$lastDenial = [
+                'limit'       => $slidingLimit,
+                'window'      => $window,
+                'at'          => time(),
+                'retry_after' => max(1, $retryAfter),
+            ];
         }
 
         // Log excessive abuse when denied.
@@ -475,6 +514,12 @@ class RateLimiter {
      * Get adjusted limit based on user trust level using config thresholds.
      * User info is cached in the object cache for 5 minutes to avoid a DB
      * query on every single rate-limit check.
+     *
+     * F-469 (L1): only an answer the read actually gave is cached. A failed
+     * read used to come back from getByUserId() as null, the same as "no
+     * row", and that null was cached here for the full 5 minutes. Now it is
+     * read through getByUserIdOrThrow() and NOT cached: this call gets the
+     * base limit (no adjustment either way), and the next call reads again.
      */
     private static function getAdjustedLimit(int $userId, int $baseLimit, string $action): int {
         if (!$userId) {
@@ -484,7 +529,11 @@ class RateLimiter {
         $cacheKey = 'rl_userinfo_' . $userId;
         $userInfo = wp_cache_get($cacheKey, 'bcc_trust_rl');
         if ($userInfo === false) {
-            $userInfo = self::$userInfoRepo->getByUserId($userId);
+            try {
+                $userInfo = self::$userInfoRepo->getByUserIdOrThrow($userId);
+            } catch (RepositoryException) {
+                return $baseLimit; // logged by the repository; not cached
+            }
             wp_cache_set($cacheKey, $userInfo, 'bcc_trust_rl', 300);
         }
 
@@ -569,76 +618,17 @@ class RateLimiter {
      */
     public static function enforce(string $action, ?int $limit = null, ?int $window = null): void {
         if (!self::allow($action, $limit, $window)) {
-            // Pass the caller's window through: an ad-hoc action such as
-            // `downvote_daily` (24h) is not in getLimits(), and resetIn()'s
-            // fallback DEFAULT_WINDOW (60s) indexes the wrong bucket (F-153).
-            $resetIn = self::resetIn($action, $window);
+            // F-391: the wait is the time left, the same number the 429's
+            // Retry-After carries. allow() records it on every deny. The old
+            // resetIn() read the bucket's EXPIRY instead, which is a window
+            // or more away whatever the count (F-153 had fixed only the
+            // window it indexed).
+            $wait = self::$lastDenial['retry_after'] ?? 1;
             throw new \Exception(
-                sprintf('Too many requests. Please wait %d seconds.', $resetIn),
+                sprintf('Too many requests. Please wait %d seconds.', $wait),
                 429
             );
         }
-    }
-
-    /**
-     * Get reset time in seconds.
-     *
-     * MUST reconstruct the exact key format that allow() writes (the bucketed
-     * sliding-window key with `_b{bucket}` suffix) — the earlier form hashed
-     * an un-bucketed key, so the lookup ALWAYS missed and resetIn() always
-     * returned 0. That silently broke every Retry-After / "wait N seconds"
-     * message and hid the `count > adjustedLimit * 2` abuse-detection branch
-     * in allow() which reads the same bucketed key.
-     *
-     * @param int|null $window The window the caller passed to allow()/enforce().
-     *                         Null resolves it from getLimits() (DEFAULT_WINDOW
-     *                         for unknown actions), mirroring allow()'s lookup.
-     */
-    public static function resetIn(string $action, ?int $window = null): int {
-        $userId = get_current_user_id();
-
-        // Resolve the action's window so the bucket index aligns with the
-        // writer.
-        if ($window === null) {
-            $config = self::getLimits()[$action] ?? [
-                'limit'  => self::DEFAULT_LIMIT,
-                'window' => self::DEFAULT_WINDOW,
-            ];
-            $window = (int) $config['window'];
-        }
-        $window = max(1, $window);
-
-        // Build the same sliding key allow() passes to slidingWindowCheck.
-        // Authenticated users check the per-user bucket (the IP bucket is
-        // coarser and typically wait-time-equivalent). Anonymous callers
-        // MUST go through normalizeIpToSubnet so this matches the
-        // writer's subnet key rather than the raw IP.
-        $slidingKey = $userId
-            ? "{$action}_u_{$userId}"
-            : "{$action}_anon_" . self::normalizeIpToSubnet(self::getIp());
-
-        // Check current bucket first; fall back to previous on the boundary.
-        // The stored "count|expires" value's expires is the bucket's own
-        // expiry (end of the CURRENT window + 1 window of slide overlap).
-        $now    = time();
-        $bucket = (int) floor($now / $window);
-
-        $curKey = '_transient_bcc_rl_' . md5($slidingKey . '_b' . $bucket);
-        $stored = RateLimitRepository::getBucketRaw($curKey);
-
-        if ($stored === null) {
-            $prevKey = '_transient_bcc_rl_' . md5($slidingKey . '_b' . ($bucket - 1));
-            $stored  = RateLimitRepository::getBucketRaw($prevKey);
-        }
-
-        if ($stored === null) {
-            return 0;
-        }
-
-        $parts     = explode('|', $stored, 2);
-        $expiresAt = (int) ($parts[1] ?? 0);
-
-        return max(0, $expiresAt - $now);
     }
 
     /**

@@ -19,10 +19,13 @@ if (!defined('ABSPATH')) {
  * exists() is the one non-getter: the shared table-existence check
  * behind the per-repository tableExists() methods, so the SHOW TABLES
  * probes that used to run per-request collapse into a warm object
- * cache read.
+ * cache read. existsOrUnknown() is the same check for callers that must
+ * tell a missing table from a probe that failed.
  */
 final class TableRegistry
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     private const EXISTS_CACHE_GROUP = 'bcc_tables';
     private const EXISTS_CACHE_TTL   = HOUR_IN_SECONDS;
 
@@ -44,8 +47,37 @@ final class TableRegistry
      * Diagnostic/repair surfaces (AdminDashboardRepository repair data,
      * RepairService, bcc_trust_verify_all_tables) intentionally do NOT
      * route through here — they must see ground truth.
+     *
+     * An UNKNOWN answer (see {@see existsOrUnknown()}) reads as false here,
+     * as a failed probe always did, but it is no longer memoised as
+     * "missing" for the rest of the request. A caller whose missing-table
+     * branch is the PERMISSIVE one must call existsOrUnknown() instead.
      */
     public static function exists(string $table): bool
+    {
+        return self::existsOrUnknown($table) === true;
+    }
+
+    /**
+     * The same check, able to answer "I could not tell".
+     *
+     *   true  — SHOW TABLES listed it. Memoised, and cached cross-request.
+     *   false — SHOW TABLES ran and did not list it. Memoised for the
+     *           request only, as before.
+     *   null  — the probe cannot be TRUSTED. Neither memoised nor cached,
+     *           so the next call asks again.
+     *
+     * ⚠⚠ A probe that did not run is NOT a missing table. A caller whose
+     * missing-table branch is the permissive one
+     * ({@see \BCC\Trust\Core\Repositories\VoteRepository::hiddenReviewExclusion()})
+     * keeps its strict branch on null. Rationale: M7 (private tracker).
+     *
+     * The probe runs through GuardsReadFailures::runRead(), the in-house
+     * probed read (query() compared `=== false`, then last_error, then
+     * last_result, which also catches wpdb's pre-flush() bail), and logs a
+     * failure at ERROR.
+     */
+    public static function existsOrUnknown(string $table): ?bool
     {
         if (isset(self::$existsMemo[$table])) {
             return self::$existsMemo[$table];
@@ -58,7 +90,21 @@ final class TableRegistry
         }
 
         global $wpdb;
-        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) === $table;
+        try {
+            $rows = self::runRead((string) $wpdb->prepare('SHOW TABLES LIKE %s', $table), __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
+
+        // Any row, not just the first: LIKE treats `_` as a wildcard, so
+        // more than one table can match the pattern.
+        $exists = false;
+        foreach ($rows as $row) {
+            if (in_array($table, get_object_vars($row), true)) {
+                $exists = true;
+                break;
+            }
+        }
 
         self::$existsMemo[$table] = $exists;
         if ($exists) {
@@ -305,6 +351,28 @@ final class TableRegistry
     {
         global $wpdb;
         return $wpdb->prefix . 'bcc_trust_community_ownership_log';
+    }
+
+    /**
+     * The hash-chained, append-only history of validator relationships
+     * (owner links, revokes, cancels, team changes). Written ONLY by
+     * ValidatorRelationshipLogRepository::append().
+     */
+    public static function validatorRelationshipLog(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_validator_relationship_log';
+    }
+
+    /**
+     * Short-lived, single-use staff re-confirmations for validator
+     * relationship changes. Read and written only by
+     * ValidatorStepUpRepository.
+     */
+    public static function validatorStepUps(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_validator_step_ups';
     }
 
     /**

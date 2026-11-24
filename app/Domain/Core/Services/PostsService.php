@@ -31,6 +31,7 @@ use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
+use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
@@ -38,6 +39,7 @@ use BCC\Trust\Core\ValueObjects\BlogCategory;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use Exception;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -634,6 +636,13 @@ final class PostsService
         $decision = \BCC\Trust\Core\Plugin::instance()
             ->capabilityResolver()
             ->can($authorId, 'write_review');
+        if ($decision->reason === 'unavailable') {
+            // F-469: the author's standing could not be read. Retryable.
+            return [
+                'error'   => 'bcc_unavailable',
+                'message' => 'Review could not be saved. Try again.',
+            ];
+        }
         if (!$decision->isAllowed()) {
             return [
                 'error'   => 'bcc_forbidden',
@@ -648,14 +657,13 @@ final class PostsService
             $result = $this->voteService->castPageVote($pageId, $voteType);
             $voteId = (int) ($result['vote_id'] ?? 0);
         } catch (\BCC\Trust\Core\Exceptions\VoteEligibilityException $e) {
-            // Eligibility/gate rejection with an operator-authored,
-            // user-safe message (rate limit / fraud / coordination) —
-            // safe to forward verbatim.
+            return self::reviewVoteRefusal($e);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            // F-469: a check the review depends on (the voter's standing)
+            // could not run. Retryable, and never a refusal.
             return [
-                'error'   => 'bcc_forbidden',
-                'message' => $e->getMessage() !== ''
-                    ? $e->getMessage()
-                    : 'Review could not be cast.',
+                'error'   => 'bcc_unavailable',
+                'message' => 'Review could not be saved. Try again.',
             ];
         } catch (Exception $e) {
             // Unexpected runtime failure — never forward the internal
@@ -693,6 +701,31 @@ final class PostsService
             'vote_id' => $voteId,
             'page_id' => $pageId,
             'grade'   => $grade,
+        ];
+    }
+
+    /**
+     * What a review refused by the vote gates answers. The message is
+     * operator-authored and user-safe (rate limit / fraud / coordination),
+     * so it is forwarded verbatim.
+     *
+     * F-391: a refusal by a rate limit (the daily downvote cap, the general
+     * vote limit) is bcc_rate_limited, which the endpoint answers 429. The
+     * RateLimiter recorded the denial, so the Envelope adds the time left.
+     * Every other refusal stays bcc_forbidden 403.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function reviewVoteRefusal(\BCC\Trust\Core\Exceptions\VoteEligibilityException $e): array
+    {
+        if ($e->getCode() === \BCC\Trust\Core\Exceptions\VoteEligibilityException::RATE_LIMITED) {
+            return ['error' => 'bcc_rate_limited', 'message' => $e->getMessage()];
+        }
+        return [
+            'error'   => 'bcc_forbidden',
+            'message' => $e->getMessage() !== ''
+                ? $e->getMessage()
+                : 'Review could not be cast.',
         ];
     }
 
@@ -833,7 +866,16 @@ final class PostsService
         }
 
         $postId  = (int) $activity->act_external_id;
-        $trashed = wp_trash_post($postId);
+        // ⚠⚠ F-361 — PINNED, AND A TRASH IS NOT EXEMPT. `wp_trash_post()`
+        // calls `wp_update_post()` in its own body, which calls
+        // `wp_insert_post()`, which fires the `wp_insert_post` action,
+        // where third-party listeners run. A trash LOOKS like a delete and
+        // is a post write, so it must stay inside `pinOnly`.
+        // Rationale: F-361 (private tracker).
+        $trashed = PeepSoAddPostGuard::pinOnly(
+            [], // deleting a post drives nothing through the request
+            static fn () => wp_trash_post($postId)
+        );
         if ($trashed === false || $trashed === null) {
             Logger::error('[PostsService] deletePost trash failed', [
                 'act_id'  => $actId,
@@ -1431,12 +1473,25 @@ final class PostsService
         // because the author's standing may have moved since.
         //
         // $groupId: null = field absent (unchanged). 0 = "no group".
-        $liveGroupId   = (int) get_post_meta($postId, 'peepso_group_id', true);
         $parkedGroupId = (int) get_post_meta($postId, self::BLOG_PENDING_GROUP_META, true);
         $isPublished   = (string) $post->post_status === 'publish';
 
         if ($groupId !== null) {
             if ($isPublished) {
+                // F-520: the post's live group is read through
+                // PostGroupFactsRepository, never get_post_meta(), and only
+                // here, where it decides something. A read that cannot be
+                // trusted refuses the edit, retryably, before anything is
+                // written.
+                $groupFacts = PostGroupFactsRepository::forPost($postId);
+                if ($groupFacts === null) {
+                    return [
+                        'error'   => 'bcc_unavailable',
+                        'message' => "We couldn't check this post's group just now. Please try again in a moment.",
+                    ];
+                }
+                $liveGroupId = (int) $groupFacts['group_raw'];
+
                 // Equal value is a no-op, not an edit — only a real change
                 // is refused, so a client that echoes the whole view-model
                 // back is not punished for including the field.
@@ -1700,7 +1755,21 @@ final class PostsService
         // change since the last revision). Retries on the same post
         // do NOT double-create revisions — WP handles idempotency.
         if (function_exists('wp_save_post_revision')) {
-            wp_save_post_revision($postId);
+            // ⚠ F-361 — A REVISION IS A POST INSERT.
+            // `wp_save_post_revision()` calls `_wp_put_post_revision()`
+            // (revision.php:99), which calls `wp_insert_post($post, true)`
+            // (revision.php:19) — so the `wp_insert_post` action fires on
+            // the REVISION row, where third-party listeners run. This write
+            // must stay inside `pinOnly`.
+            //
+            // ⚠⚠ PAIRED with the `wp_update_post` 36 lines below, which
+            // F-361's first pass pinned while leaving this one open.
+            // Pinning the update and not the revision covers the post and
+            // not its history. Rationale: F-361 (private tracker).
+            PeepSoAddPostGuard::pinOnly(
+                [], // a revision drives nothing through the request
+                static fn () => wp_save_post_revision($postId)
+            );
         }
 
         // ── wp_update_post (title / excerpt / content / status) ─────
@@ -1733,7 +1802,11 @@ final class PostsService
         // to bump the wp_post row. (Skipping the call also avoids a
         // no-op revision insert when only sidecar meta changes.)
         if (count($postUpdate) > 1) {
-            $result = wp_update_post($postUpdate, true);
+            // F-361 — pinned: this is the member's own edit request.
+            $result = PeepSoAddPostGuard::pinOnly(
+                [], // a blog edit drives nothing through the request
+                static fn () => wp_update_post($postUpdate, true)
+            );
             if (is_wp_error($result) || (int) $result <= 0) {
                 $errMsg = is_wp_error($result) ? $result->get_error_message() : 'wp_update_post returned non-positive id';
                 Logger::warning('[PostsService] updateBlog wp_update_post failed', [
@@ -2436,7 +2509,24 @@ final class PostsService
         // `peepso_groups_new_post` must fire exactly once per post, so
         // clear the sidecar and do nothing else. Without this guard an
         // unpublish/republish cycle would notify the group every time.
-        $alreadyAttached = (int) get_post_meta($postId, 'peepso_group_id', true);
+        //
+        // F-520: read through PostGroupFactsRepository, never
+        // get_post_meta(). A read that cannot be trusted can say neither
+        // "attached" (skip, and maybe leave a members-only post published
+        // with no group) nor "not attached" (attach, and maybe notify the
+        // group twice), so it takes the refusal path below: back to draft,
+        // sidecar kept, nothing notified.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
+            Logger::warning('[PostsService] parked blog group could not be read at publish; reverting to draft', [
+                'post_id'  => $postId,
+                'user_id'  => $authorId,
+                'group_id' => $parked,
+            ]);
+
+            return self::revertParkedPublish($postId);
+        }
+        $alreadyAttached = (int) $groupFacts['group_raw'];
         if ($alreadyAttached > 0) {
             delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
             delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
@@ -2479,23 +2569,7 @@ final class PostsService
                 'reason'   => $gateError['error'],
             ]);
 
-            // Re-entrancy: wp_update_post fires transition_post_status
-            // again and re-enters this method. The guard at the top returns
-            // immediately while this flag is set, so the revert cannot
-            // recurse. Cleared in a `finally` so an exception inside
-            // wp_update_post cannot wedge the flag ON and silently disable
-            // the gate for the rest of the request.
-            self::$revertingParkedBlog[$postId] = true;
-            try {
-                wp_update_post([
-                    'ID'          => $postId,
-                    'post_status' => 'draft',
-                ]);
-            } finally {
-                unset(self::$revertingParkedBlog[$postId]);
-            }
-
-            return self::PARKED_REVERTED;
+            return self::revertParkedPublish($postId);
         }
 
         // The single attach: stamps `peepso_group_id` + `_bcc_post_visibility`
@@ -2506,6 +2580,40 @@ final class PostsService
         delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
 
         return self::PARKED_ATTACHED;
+    }
+
+    /**
+     * Put a just-published parked blog back to draft, keeping its sidecar
+     * so the author's intent survives, and attaching nothing. The one
+     * refusal path of {@see attachParkedBlogGroup()}: a gate refusal, or a
+     * group read that cannot be trusted.
+     */
+    private static function revertParkedPublish(int $postId): string
+    {
+        // Re-entrancy: wp_update_post fires transition_post_status
+        // again and re-enters attachParkedBlogGroup(). The guard at its top
+        // returns immediately while this flag is set, so the revert cannot
+        // recurse. Cleared in a `finally` so an exception inside
+        // wp_update_post cannot wedge the flag ON and silently disable
+        // the gate for the rest of the request.
+        self::$revertingParkedBlog[$postId] = true;
+        try {
+            // F-361 — pinned INSIDE the reverting flag, so the flag's
+            // try/finally still owns the gate and the pin owns only the
+            // write. Reached during a member's request, so the request
+            // is theirs.
+            PeepSoAddPostGuard::pinOnly(
+                [],
+                static fn () => wp_update_post([
+                    'ID'          => $postId,
+                    'post_status' => 'draft',
+                ])
+            );
+        } finally {
+            unset(self::$revertingParkedBlog[$postId]);
+        }
+
+        return self::PARKED_REVERTED;
     }
 
     /**
@@ -2654,6 +2762,13 @@ final class PostsService
             $decision = Plugin::instance()
                 ->capabilityResolver()
                 ->can($authorId, 'post_ranked_hall_feed');
+            if ($decision->reason === 'unavailable') {
+                // F-469: the author's standing could not be read. Retryable.
+                return [
+                    'error'   => 'bcc_unavailable',
+                    'message' => 'Post could not be saved. Try again.',
+                ];
+            }
             if (!$decision->isAllowed()) {
                 return [
                     'error'   => 'bcc_forbidden',

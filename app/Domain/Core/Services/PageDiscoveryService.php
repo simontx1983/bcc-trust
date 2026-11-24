@@ -87,9 +87,17 @@ class PageDiscoveryService {
         // Validator-only axes (status / min self-stake / self-stake sort)
         // are served by the read-model path only — same as the chain
         // filter, which the legacy fallback does not implement either.
-        $result = $this->canUseReadModel()
+        $usesReadModel = $this->canUseReadModel();
+        $result = $usesReadModel
             ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake)
             : $this->executeQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
+
+        // Whether these results actually reflect `chain_slug` (F-439). The
+        // chain filter exists on the read-model path only; the legacy
+        // fallback ignores it. A caller that tells someone "validators on
+        // Cosmos first" reads this instead of assuming. Cached with the
+        // result, so a hit reports the path that filled it.
+        $result['chain_applied'] = $chain_slug !== '' && $usesReadModel;
 
         /** @var int $ttl Filterable cache TTL. */
         $ttl = (int) apply_filters('bcc_discovery_cache_ttl', self::DEFAULT_TTL);
@@ -146,9 +154,20 @@ class PageDiscoveryService {
         string $status = '',
         ?float $min_self_stake = null
     ): array {
+        // F-584: the `status` filter matches only validators on a chain that
+        // is still answering (any other reads `unknown`). Active chains only:
+        // a deactivated chain is not indexed, so its statuses are frozen.
+        $statusChainIds = $status !== ''
+            ? \BCC\Trust\Onchain\Support\ValidatorStatusProjection::currentAmong(array_map(
+                static fn (object $chain): int => (int) $chain->id,
+                \BCC\Trust\Onchain\Repositories\ChainRepository::getActive()
+            ))
+            : [];
+
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake,
+            $statusChainIds
         );
 
         $rows = $result['rows'];

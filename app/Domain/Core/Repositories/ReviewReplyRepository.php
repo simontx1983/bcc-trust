@@ -103,7 +103,10 @@ final class ReviewReplyRepository
 
         $activities = $wpdb->prefix . 'peepso_activities';
         $hidden     = TableRegistry::hiddenActivities();
-        $hasHidden  = TableRegistry::exists($hidden);
+        // Only a CONFIRMED missing table drops the EXISTS: an unknown probe
+        // keeps it, so a reply's moderation flag is never read as "not
+        // hidden" on an unknown. Rationale: L7 (private tracker).
+        $hasHidden  = TableRegistry::existsOrUnknown($hidden) !== false;
         $moduleId   = PeepSoActivityWriter::getNumericId(self::MODULE_NAME);
         if ($moduleId === null) {
             return [];

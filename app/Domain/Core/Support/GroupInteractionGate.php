@@ -20,12 +20,16 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type PostGroupFacts from PostGroupFactsRepository
+ */
 final class GroupInteractionGate
 {
     /** wp_posts.post_type of a PeepSo comment's own post row. */
@@ -63,11 +67,18 @@ final class GroupInteractionGate
             return self::notFound();
         }
 
-        if (!self::audienceAllows($userId, $actId, $postId)) {
+        // F-461: the post's group facts, read ONCE for the audience and the
+        // membership gates below. Unreadable reads as not found.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
             return self::notFound();
         }
 
-        return self::checkPost($userId, $postId);
+        if (!self::audienceAllows($userId, $actId, $postId, $groupFacts)) {
+            return self::notFound();
+        }
+
+        return self::checkPost($userId, $postId, self::NOT_FOUND_POST, $groupFacts);
     }
 
     /**
@@ -97,6 +108,13 @@ final class GroupInteractionGate
             return $notFound;
         }
 
+        // F-461: the PARENT post's group facts, read once for both gates
+        // below. Unreadable reads as an unknown comment.
+        $groupFacts = PostGroupFactsRepository::forPost($parentPostId);
+        if ($groupFacts === null) {
+            return $notFound;
+        }
+
         // §F-02 — the PARENT post's audience. A comment carries none of its
         // own, and the meta is already in hand here, so this needs no
         // second read. ⚠ `parent_act_id` of 0 means the parent post has no
@@ -108,13 +126,14 @@ final class GroupInteractionGate
             && !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
                 $userId,
                 $parentActId,
-                $parentPostId
+                $parentPostId,
+                $groupFacts
             )
         ) {
             return $notFound;
         }
 
-        return self::checkPost($userId, $parentPostId, self::NOT_FOUND_COMMENT);
+        return self::checkPost($userId, $parentPostId, self::NOT_FOUND_COMMENT, $groupFacts);
     }
 
     private const NOT_FOUND_COMMENT = 'Comment not found.';
@@ -232,8 +251,10 @@ final class GroupInteractionGate
      * ⚠ Costs one extra indexed read by act id on these write paths. That
      * is the price of asking bcc-core's predicate instead of restating it;
      * restating it is what §11 forbids and what drifts.
+     *
+     * @phpstan-param PostGroupFacts $groupFacts `$postId`'s facts, as check() read them
      */
-    private static function audienceAllows(int $userId, int $actId, int $postId): bool
+    private static function audienceAllows(int $userId, int $actId, int $postId, array $groupFacts): bool
     {
         $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
         if ($comment !== null) {
@@ -245,14 +266,16 @@ final class GroupInteractionGate
             return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
                 $userId,
                 $parentActId,
-                $postId
+                $postId,
+                $groupFacts
             );
         }
 
         return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
             $userId,
             $actId,
-            $postId
+            $postId,
+            $groupFacts
         );
     }
 
@@ -280,14 +303,31 @@ final class GroupInteractionGate
      * $notFoundMessage is the caller's OWN unknown-id message, so the bodies
      * match exactly. The comment routes say "Comment not found." for an
      * unknown comment, so they pass that.
+     *
+     * ⚠⚠ F-461: "is this a group post" is read through
+     * {@see PostGroupFactsRepository}, never get_post_meta(): a read that
+     * cannot be trusted answers the caller's own not-found.
+     *
+     * @param array<string, mixed>|null $groupFacts `$postId`'s facts when
+     *        the caller already read them; null reads them here.
+     * @phpstan-param PostGroupFacts|null $groupFacts
      */
-    public static function checkPost(int $userId, int $postId, string $notFoundMessage = self::NOT_FOUND_POST): ?WP_REST_Response
-    {
+    public static function checkPost(
+        int $userId,
+        int $postId,
+        string $notFoundMessage = self::NOT_FOUND_POST,
+        ?array $groupFacts = null
+    ): ?WP_REST_Response {
         if ($postId <= 0) {
             return null;
         }
 
-        $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
+        $groupFacts ??= PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
+            return self::notFound($notFoundMessage);
+        }
+
+        $groupId = (int) $groupFacts['group_raw'];
         if ($groupId <= 0) {
             // Not a group-scoped post — no membership gate (PeepSo's own
             // block-by-author rules still apply downstream).

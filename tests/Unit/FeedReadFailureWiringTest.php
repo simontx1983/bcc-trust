@@ -11,7 +11,10 @@ use PHPUnit\Framework\TestCase;
  * into 503 `bcc_unavailable`, never an empty page or a 404.
  *
  * Plugin::feedRankingService() builds bcc-core's ActivityFeedService to THROW
- * ActivityReadFailedException on a failed read. That is only safe if every
+ * ActivityReadFailedException on a failed read. The profile Blog tab
+ * (BlogService) and the cold-start panel's `recent_action` line
+ * (FeedColdStartService) read bcc-core's repository directly and pass the
+ * same flag. That is only safe if every
  * caller catches it: an uncaught exception in a REST callback is a PHP fatal
  * (a 500, and WordPress's recovery-mode email to the admin). So this pins:
  *
@@ -23,6 +26,11 @@ use PHPUnit\Framework\TestCase;
  * ⚠ This proves the code SAYS it. That it DOES it, against a real database
  * and the real bcc-core read, is PagePostsIntegrationTest's F-275 section.
  *
+ * F-438: the ranking service's `viewerExclusions()` probe counts as a feed
+ * read too. It throws the same exception, and a route calls it on its own
+ * before a lookup (the shortcode permalink), so a route that probes without
+ * the catch would be the same 500.
+ *
  * Not REST, so not here: CronService::warmHotFeed() already catches
  * \Throwable around the warm, and the failed build throws before its cache
  * write (HotFeed tests).
@@ -31,18 +39,24 @@ final class FeedReadFailureWiringTest extends TestCase
 {
     /** file (under app/Domain/Core/REST) => methods that read a feed */
     private const GUARDED = [
-        'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'respondWithFeedItem'],
+        'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'feedItemByShortcode', 'respondWithFeedItem'],
         'GroupsDetailEndpoint.php'  => ['feed'],
         'PagesEndpoint.php'         => ['feed'],
         // F-346: the repost/quote routes re-gate the ROOT per viewer through
         // the permalink's own seam, so they read a feed too.
         'RepostEndpoint.php'        => ['viewerCanReadRoot'],
-        'UsersEndpoint.php'         => ['activity'],
+        'UsersEndpoint.php'         => ['blog', 'activity'],
         'FeedColdStartEndpoint.php' => ['handle'],
     ];
 
-    /** A feed read: the ranking service's getters, or the cold-start panel. */
-    private const CALL = '/(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*get\w*\s*\(/';
+    /**
+     * A feed read: the ranking service's getters and its viewerExclusions()
+     * probe (F-438), the cold-start panel, or the profile Blog tab. Only
+     * `getUserBlog` on the blog service: its other getter (`getBlogForEdit`,
+     * the editor's single-draft read) does not read the activity stream and
+     * does not throw.
+     */
+    private const CALL = '/(?:(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*(?:get\w*|viewerExclusions)|blogService\(\)\s*->\s*getUserBlog)\s*\(/';
 
     /**
      * `try { … } catch (ActivityReadFailedException) { … }`, capturing both
@@ -107,6 +121,26 @@ final class FeedReadFailureWiringTest extends TestCase
         $body = '{ try { $p = Plugin::instance()->feedRankingService()->getFeed($v, $s); } catch (ActivityReadFailedException) { return ApiResponse::ok([\'items\' => []]); } }';
 
         self::assertCount(1, self::unguardedCalls($body));
+    }
+
+    /** The Blog tab's read is a feed read; the editor's draft read is not. */
+    public function testTheMatcherSeesTheBlogTabReadButNotTheDraftRead(): void
+    {
+        $tab   = '{ $p = Plugin::instance()->blogService()->getUserBlog($u, $v, $c, $l); return ApiResponse::ok($p); }';
+        $draft = '{ $r = Plugin::instance()->blogService()->getBlogForEdit($id, $v); return ApiResponse::ok($r); }';
+
+        self::assertCount(1, self::unguardedCalls($tab));
+        self::assertSame([], self::unguardedCalls($draft));
+    }
+
+    /** F-438: the exclusion probe is a feed read, and needs the same guard. */
+    public function testTheMatcherSeesTheExclusionProbe(): void
+    {
+        $bare    = '{ $x = Plugin::instance()->feedRankingService()->viewerExclusions($v); return ApiResponse::ok([]); }';
+        $guarded = '{ try { $x = Plugin::instance()->feedRankingService()->viewerExclusions($v); } catch (ActivityReadFailedException) { return FeedUnavailable::response(); } return ApiResponse::ok([]); }';
+
+        self::assertCount(1, self::unguardedCalls($bare));
+        self::assertSame([], self::unguardedCalls($guarded));
     }
 
     public function testTheMatcherAcceptsTheGuard(): void

@@ -85,6 +85,9 @@ final class MemberSummaryPrefetcher
         if ($userIds !== []) {
             cache_users($userIds);
             update_meta_cache('user', $userIds);
+            // The §K2 privacy flags are read from their own guarded copy,
+            // not the meta cache; one batch for the page.
+            PrivacySettings::prime($userIds);
         }
 
         $solidId = ReactionTypeRegistry::solidId();

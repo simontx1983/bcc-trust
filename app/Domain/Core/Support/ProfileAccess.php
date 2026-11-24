@@ -329,9 +329,88 @@ final class ProfileAccess
             return false;
         }
 
+        return self::profileLevelAdmitsOrUnknown($ownerId) === true;
+    }
+
+    /**
+     * Of $ownerIds, the members the CURRENT viewer may not see ONLY because
+     * of the level they chose for their profile ("Members only", "Only
+     * me"): who a page-attributed review reply stands in for (on the page's
+     * Reviews tab, such a reply is shown as the page's response).
+     *
+     * Every other reason a list drops a member must be ruled out by a read
+     * that ran, or the member is left out:
+     *   - a block in either direction (one batched read);
+     *   - suspension (the same suspensionState() canViewProfile() asks);
+     *   - a PeepSo role that lists never show (banned, unvalidated).
+     * The viewer themselves and site admins see every profile, so they are
+     * never returned.
+     *
+     * ⚠ CURRENT VIEWER ONLY, as canViewProfile().
+     *
+     * @param list<int> $ownerIds
+     * @return list<int> in input order, each once
+     */
+    public static function hiddenOnlyByProfileLevel(array $ownerIds): array
+    {
+        if (!class_exists('\\PeepSoUser') || !class_exists('\\BCC\\Core\\Permissions\\Permissions')) {
+            return [];
+        }
+        $viewerId = (int) get_current_user_id();
+
+        $ids = [];
+        foreach ($ownerIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0 && $id !== $viewerId) {
+                $ids[$id] = $id;
+            }
+        }
+        if ($ids === [] || self::viewerIsExemptFromVisibility()) {
+            return [];
+        }
+
+        $blocked = $viewerId > 0
+            ? \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, array_values($ids))
+            : [];
+        if ($blocked === null) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($ids as $id) {
+            if (isset($blocked[$id])) {
+                continue;
+            }
+            // false = known NOT suspended; true (suspended) and null
+            // (unreadable) both leave the member out.
+            if (\BCC\Core\Permissions\Permissions::suspensionState($id) !== false) {
+                continue;
+            }
+            // (string): PeepSo answers '' for a row it cannot read, and a
+            // non-string must count as unreadable too.
+            $role = (string) \PeepSoUser::get_instance($id)->get_user_role();
+            if (in_array($role, ['', 'ban', 'register', 'verified'], true)) {
+                continue;
+            }
+            if (self::profileLevelAdmitsOrUnknown($id) === false) {
+                $out[] = $id;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Does $ownerId's PROFILE LEVEL admit the current viewer? Null when the
+     * level cannot be read. canViewProfile()'s privacy rung, on its own.
+     */
+    private static function profileLevelAdmitsOrUnknown(int $ownerId): ?bool
+    {
+        if (!class_exists('\\PeepSoUser')) {
+            return null;
+        }
         $acc = \PeepSoUser::get_instance($ownerId)->get_profile_accessibility();
         if (!is_numeric($acc)) {
-            return false;
+            return null;
         }
 
         // Snapped to a canonical rung first — see
@@ -528,16 +607,21 @@ final class ProfileAccess
      * invisible until peepso-friends is installed; and installing it
      * would retroactively WIDEN the posts already written at level 30.
      *
-     * ⚠ The exemption reads the CURRENT user, not `$viewerId`. Every
-     * caller is a request path whose `$viewerId` came from the same
-     * place, so they agree — but a caller that passes a viewer id it did
-     * not get from the request would gate for one identity and exempt on
-     * another. A globally cached, viewer-independent payload must not
-     * call this at all; it passes `true` directly.
+     * ⚠ By default the exemption reads the CURRENT user, not `$viewerId`.
+     * A request path's `$viewerId` came from the same place, so they agree.
+     * A caller asking about a viewer who is NOT the request's user MUST pass
+     * that viewer's own exemption as `$viewerIsExempt`
+     * ({@see userIsExemptFromVisibility()}), or it gates for one identity
+     * and exempts on another. `FeedRankingService::canView()` is that
+     * caller: it asks about a mentionee during the AUTHOR's request, and an
+     * admin author must not read a member's audience unenforced. A globally
+     * cached, viewer-independent payload must not call this at all; it
+     * passes `true` directly.
      *
+     * @param bool|null $viewerIsExempt the viewer's exemption; null = the current user's
      * @return array{0: list<int>|null, 1: bool} [friend ids or null, enforce]
      */
-    public static function postVisibilityArgs(int $viewerId): array
+    public static function postVisibilityArgs(int $viewerId, ?bool $viewerIsExempt = null): array
     {
         $friendIds = $viewerId > 0
             ? PeepSoFriendGate::viewerFriendIdList($viewerId)
@@ -545,8 +629,19 @@ final class ProfileAccess
 
         return [
             $friendIds === [] ? null : $friendIds,
-            !self::viewerIsExemptFromVisibility(),
+            !($viewerIsExempt ?? self::viewerIsExemptFromVisibility()),
         ];
+    }
+
+    /**
+     * Is $userId exempt from §F-02 visibility filtering? The same rule as
+     * {@see viewerIsExemptFromVisibility()} (`manage_options`), asked about
+     * a given user instead of the request's. For a caller whose viewer is
+     * not the request's user; see {@see postVisibilityArgs()}.
+     */
+    public static function userIsExemptFromVisibility(int $userId): bool
+    {
+        return $userId > 0 && user_can($userId, 'manage_options');
     }
 
     /**

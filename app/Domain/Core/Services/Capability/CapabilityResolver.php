@@ -72,7 +72,14 @@ class CapabilityResolver
                 // dispute-vote live gate (DisputeVoteService) additionally
                 // enforces §18 party exclusion + fraud hard-block per
                 // dispute — this key answers the feature-level question.
-                return $this->writeReviewGate($userId)
+                // F-469: a standing that could not be read is `unavailable`
+                // (the F-503 convention callers answer with 503), never
+                // feature_gate.
+                $gate = $this->writeReviewGate($userId);
+                if ($gate === null) {
+                    return CapabilityDecision::denied('unavailable', 'feature_access');
+                }
+                return $gate
                     ? CapabilityDecision::allowed('feature_access')
                     : CapabilityDecision::denied('feature_gate', 'feature_access');
 
@@ -90,12 +97,39 @@ class CapabilityResolver
                 return CapabilityDecision::unknown('deferred_to_live_gate', 'live_gate');
 
             case CapabilityCatalog::CREATE_COMMUNITY:
-            case CapabilityCatalog::RECEIVE_COMMUNITY:
-                // §21.2 — create and receive share the full custody gate
-                // (rank/tier/recovery + cap + cooldown). Transfer-away is
-                // deliberately looser (below): the cooldown blocks
-                // ACQUIRING custody, never relinquishing it.
+                // §21.2 — the full custody gate (rank/tier/recovery + cap +
+                // cooldown). Transfer-away is deliberately looser (below):
+                // the cooldown blocks ACQUIRING custody, never
+                // relinquishing it.
                 return $this->resolveCustodyAcquisition($userId);
+
+            case CapabilityCatalog::RECEIVE_COMMUNITY:
+                // ⚠⚠ THE SAME GATE, BUT THE COUNT IS READ FIRST — and the
+                // reason is disclosure, not ordering taste.
+                //
+                // This decision is evaluated FOR the receiver and reported
+                // to the GIVER, who must never learn the receiver's status;
+                // every real sub-reason therefore collapses to the single
+                // generic `receiver_ineligible`. But `unavailable` does NOT
+                // collapse, because it is retryable rather than a refusal.
+                // So with the count read AFTER the status gates, a count
+                // fault would show the giver:
+                //
+                //   403 receiver_ineligible — receiver fails a status gate
+                //   503 unavailable         — receiver passes all of them
+                //
+                // which is exactly the status probe the collapse exists to
+                // close, open for the length of the fault. Reading the
+                // count FIRST makes `unavailable` independent of the
+                // receiver: during a fault every receiver gets the same
+                // 503, whatever their status. (F-469: the trust TIER is read
+                // up front for the same reason, since it too can answer
+                // `unavailable`.)
+                //
+                // ⚠ Create keeps its own order, which the contract
+                // documents as the gate sequence. There is no third party
+                // to disclose to there — the reasons are the caller's own.
+                return $this->resolveCustodyAcquisition($userId, countBeforeStatusGates: true);
 
             case CapabilityCatalog::TRANSFER_COMMUNITY:
                 return $this->resolveTransferCommunity($userId);
@@ -133,8 +167,33 @@ class CapabilityResolver
      * AND under the per-rank ownership cap AND outside the 30-day
      * global custody cooldown.
      */
-    private function resolveCustodyAcquisition(int $userId): CapabilityDecision
-    {
+    private function resolveCustodyAcquisition(
+        int $userId,
+        bool $countBeforeStatusGates = false
+    ): CapabilityDecision {
+        // ⚠⚠ RECEIVE reads the count HERE, before any status gate, so that
+        // `unavailable` cannot depend on the receiver — see the
+        // RECEIVE_COMMUNITY case in can() for why that matters. The default
+        // is false, so CREATE's order is unchanged and every other caller
+        // keeps the documented sequence.
+        $custody = null;
+        $tierOk  = null;
+        if ($countBeforeStatusGates) {
+            $custody = $this->custodyState($userId);
+            if ($custody === null) {
+                return CapabilityDecision::denied('unavailable', 'community_custody');
+            }
+            // F-469: the TIER too, for the same reason. An unreadable tier is
+            // `unavailable`, and read after the status gates it would again
+            // depend on the receiver (a suspended or New Member receiver
+            // answers its own reason first). Read here, the value is reused
+            // at the documented position below.
+            $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+            if ($tierOk === null) {
+                return CapabilityDecision::denied('unavailable', 'community_custody');
+            }
+        }
+
         if (!$this->notSuspended($userId)) {
             return CapabilityDecision::denied('suspended', 'community_custody');
         }
@@ -145,14 +204,37 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'apprentice')) {
             return CapabilityDecision::denied('new_member', 'community_custody');
         }
-        if (!$this->tierAtLeast($userId, 'neutral')) {
+        // F-469: an unreadable tier is `unavailable` (503), not below_neutral.
+        // Already read above on RECEIVE; CREATE reads it here, in order.
+        $tierOk ??= $this->tierAtLeastOrUnknown($userId, 'neutral');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'community_custody');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_neutral', 'community_custody');
         }
         if ($this->inRecovery($userId)) {
             return CapabilityDecision::denied('in_recovery', 'community_custody');
         }
 
-        $custody = $this->custodyState($userId);
+        // Already read above when the caller asked for it; otherwise read
+        // here, in the documented position.
+        $custody ??= $this->custodyState($userId);
+
+        // ⛔ FAIL CLOSED ON AN UNREADABLE COUNT, and before the comparison.
+        // This gate decides a DURABLE write: both keys that reach here —
+        // CREATE_COMMUNITY and RECEIVE_COMMUNITY — grant custody of a
+        // community, and what it admits stays granted after the fault
+        // clears. "We could not count" is not "under the cap".
+        //
+        // ⚠ Deliberately a DENY and not an `unknown()` decision: callers
+        // treat unknown as deferred-to-a-live-gate (see the
+        // `deferred_to_live_gate` branch in can()), and there is no live
+        // gate behind this one to defer to.
+        if ($custody === null) {
+            return CapabilityDecision::denied('unavailable', 'community_custody');
+        }
+
         if ($custody['owned'] >= $custody['cap']) {
             return CapabilityDecision::denied('cap_reached', 'community_custody');
         }
@@ -202,7 +284,11 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'journeyman')) {
             return CapabilityDecision::denied('below_journeyman', 'ranked_hall');
         }
-        if (!$this->tierAtLeast($userId, 'neutral')) {
+        $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'ranked_hall');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_neutral', 'ranked_hall');
         }
         if ($this->inRecovery($userId)) {
@@ -230,7 +316,11 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'veteran')) {
             return CapabilityDecision::denied('below_veteran', 'mentor_listing');
         }
-        if (!$this->tierAtLeast($userId, 'trusted')) {
+        $tierOk = $this->tierAtLeastOrUnknown($userId, 'trusted');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'mentor_listing');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_trusted', 'mentor_listing');
         }
         if ($this->inRecovery($userId)) {
@@ -312,14 +402,21 @@ class CapabilityResolver
      * (§20.1). Replaced the legacy Level-2 FeatureAccessService gate at
      * the atomic cutover.
      */
-    protected function writeReviewGate(int $userId): bool
+    protected function writeReviewGate(int $userId): ?bool
     {
         // Rank-presence (Apprentice+, New Members excluded) AND tier
         // Neutral+, composed from the shared credibility atoms.
         // Deliberately no suspension / fraud / recovery gate here — that
         // asymmetry (enforced instead at the REST layer, §20.1) is
         // unchanged by the atom consolidation.
-        return $this->hasRankState($userId) && $this->tierAtLeast($userId, 'neutral');
+        //
+        // F-469: NULL when the tier could not be read (can() answers
+        // `unavailable`). A New Member is refused before the tier is read.
+        if (!$this->hasRankState($userId)) {
+            return false;
+        }
+
+        return $this->tierAtLeastOrUnknown($userId, 'neutral');
     }
 
     /** @throws AttestationException when ineligible */
@@ -350,9 +447,13 @@ class CapabilityResolver
      * (resolveCustodyAcquisition / cooldownActive) so the matrix test
      * exercises the real math against faked facts.
      *
-     * @return array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}
+     * ⚠ NULL means the owned-group count could not be READ (F-503). It is
+     * not "owns none" and not "no cap" — the caller must refuse rather than
+     * compare against a number it does not have.
+     *
+     * @return array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null
      */
-    protected function custodyState(int $userId): array
+    protected function custodyState(int $userId): ?array
     {
         $plugin = \BCC\Trust\Core\Plugin::instance();
         $config = $plugin->rankScoringConfig();
@@ -373,8 +474,25 @@ class CapabilityResolver
             $lastTs = $parsed === false ? null : $parsed;
         }
 
+        // ⚠⚠ THE STRICT TWIN, and the difference is the whole point.
+        // `countOwnedUserGroups()` returns `int`, and `get_var()` answers
+        // null for a read that did not run — which `(int)` turns into 0.
+        // A cap comparison then reads a failed read as "owns none", the
+        // most permissive answer available, and admits a write that stays
+        // granted after the fault clears.
+        //
+        // `countOwnedUserGroupsOrFail()` answers null instead, and null
+        // travels out of here as null so the CALLER refuses. "Unknown" must
+        // never be collapsed into a number here — a 0 substituted at this
+        // layer would be indistinguishable from a real count by the time it
+        // reached the comparison.
+        $owned = \BCC\Core\Repositories\PeepSoGroupRepository::countOwnedUserGroupsOrFail($userId);
+        if ($owned === null) {
+            return null;
+        }
+
         return [
-            'owned'            => \BCC\Core\Repositories\PeepSoGroupRepository::countOwnedUserGroups($userId),
+            'owned'            => $owned,
             'cap'              => $cap,
             'last_event_ts'    => $lastTs,
             'cooldown_seconds' => $config->communityCooldownDays * 86400,

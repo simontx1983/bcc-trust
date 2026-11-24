@@ -20,6 +20,7 @@ use BCC\Trust\Onchain\Services\ValidatorGroupProvisioningService;
 use BCC\Trust\Onchain\Services\ValidatorGroupRevokeService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Trust\Onchain\Support\ValidatorStatusProjection;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
@@ -93,6 +94,16 @@ final class DelegatorGroupIntegrationTest extends TestCase
         $GLOBALS['__bcc_hooks']          = [];
         $GLOBALS['__bcc_posts']          = [];
         $GLOBALS['__bcc_usermeta']       = [];
+        // The §K2 privacy flags are read from the real wp_usermeta (created
+        // by the bootstrap), never through the stub above. Start this suite's
+        // members from "nothing hidden" whatever an earlier suite left.
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->usermeta} WHERE user_id BETWEEN %d AND %d AND meta_key LIKE %s",
+            self::OPERATOR,
+            self::WELL_STAKED,
+            $wpdb->esc_like('bcc_privacy_') . '%'
+        ));
         $GLOBALS['__bcc_lcd']            = [];
         $GLOBALS['__bcc_lcd_calls']      = [];
         $GLOBALS['__bcc_group_creates']  = [];
@@ -1069,6 +1080,28 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertNotNull($stats);
         self::assertNotSame('', (string) $stats['chain_name']);
         self::assertSame($rows[$validatorId]->chain_name, $stats['chain_name']);
+    }
+
+    /**
+     * F-584, on real MySQL: the group detail shows the stored status while
+     * BCC has heard from the validator's chain within 72 hours, and
+     * `unknown` once it has not.
+     */
+    public function testTheGroupDetailStatusReadsUnknownOnceTheChainStopsAnswering(): void
+    {
+        global $wpdb;
+        $validatorId = $this->seedClaimedPage();
+        self::assertSame(1, $wpdb->update($wpdb->prefix . 'bcc_onchain_validators', ['status' => 'active'], ['id' => $validatorId]));
+        $rows = ValidatorRepository::findCommunityStatsByIds([$validatorId]);
+        self::assertSame($this->cosmosChain, $rows[$validatorId]->chain_id);
+
+        update_option('bcc_onchain_last_success_' . $this->cosmosChain, time() - 60, false);
+        ValidatorStatusProjection::reset();
+        self::assertSame('active', ValidatorGroupsEndpoint::composeValidatorStats($rows[$validatorId], 1.0)['status'] ?? null);
+
+        update_option('bcc_onchain_last_success_' . $this->cosmosChain, time() - ValidatorStatusProjection::STALE_AFTER - 1, false);
+        ValidatorStatusProjection::reset();
+        self::assertSame('unknown', ValidatorGroupsEndpoint::composeValidatorStats($rows[$validatorId], 1.0)['status'] ?? null);
     }
 
     public function testTheGroupDetailHintNamesTheCurrentMinimumWhenKnown(): void

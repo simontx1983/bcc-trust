@@ -21,6 +21,8 @@ namespace BCC\Trust\Core\Repositories;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -28,6 +30,8 @@ if (!defined('ABSPATH')) {
 
 final class PostShortcodeRepository
 {
+    use GuardsReadFailures;
+
     /** Shortcode length — locked; the resolver route regex ({8}) and the
      *  frontend route both encode it. */
     public const LENGTH = 8;
@@ -149,6 +153,18 @@ final class PostShortcodeRepository
      * default collation — a case-variant URL resolves to the same
      * post, which is the forgiving (and safe) behavior since case
      * variants can never belong to different rows.
+     *
+     * ⚠ F-438: A LOOKUP THAT DID NOT RUN THROWS, never null. Null is "no
+     * such code", which the endpoint answers 404 ("this post does not
+     * exist"); `get_var()` used to give the same null on a failed query.
+     * The endpoint answers the throw with its retryable 503. The same holds
+     * for the table check before it: a SHOW TABLES that failed is not "no
+     * table". That half needed the three-state
+     * {@see TableRegistry::existsOrUnknown()} to be true — `exists()`
+     * reports an unreadable table as missing, and a pre-flush bail leaves
+     * no error string behind for a guard to find.
+     *
+     * @throws RepositoryReadFailure when the lookup, or the table check before it, did not run
      */
     public function resolveActId(string $shortId): ?int
     {
@@ -158,14 +174,43 @@ final class PostShortcodeRepository
 
         global $wpdb;
         $table = TableRegistry::postShortcodes();
-        if (!TableRegistry::exists($table)) {
-            return null;
+
+        // ⚠⚠ existsOrUnknown(), NOT exists(), and no `last_error` check.
+        //
+        // `exists()` is `existsOrUnknown() === true`, and
+        // existsOrUnknown() CATCHES RepositoryReadFailure and answers
+        // null. So a SHOW TABLES that did not run arrived here as
+        // "no such table" — and the guard that was meant to catch that
+        // inspects `last_error`, which a pre-flush bail never sets:
+        // wpdb::query() returns false above flush(), records no error,
+        // and leaves the previous query's rows in last_result.
+        //
+        // The endpoint answered that null as 404, "this post does not
+        // exist", for a database that was merely unreadable. Asking for
+        // the three-state answer is the only way to tell the two apart,
+        // because there is no error string to read.
+        $tableExists = TableRegistry::existsOrUnknown($table);
+        if ($tableExists === null) {
+            throw new RepositoryReadFailure(
+                static::class,
+                __FUNCTION__ . ': table check',
+                'the table-existence probe did not run'
+            );
+        }
+        if ($tableExists === false) {
+            return null; // Genuinely no table, so there is no such code.
         }
 
-        $actId = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT act_id FROM {$table} WHERE short_id = %s LIMIT 1",
             $shortId
-        ));
+        );
+        if (!is_string($sql)) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'prepare() returned no query');
+        }
+
+        $rows  = self::runRead($sql, __FUNCTION__, true);
+        $actId = isset($rows[0]) && is_object($rows[0]) ? ($rows[0]->act_id ?? null) : null;
 
         return is_numeric($actId) && (int) $actId > 0 ? (int) $actId : null;
     }

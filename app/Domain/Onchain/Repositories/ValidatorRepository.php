@@ -140,7 +140,8 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     voting_power_rank: string|null,
  *     chain_slug: string,
- *     chain_type: string
+ *     chain_type: string,
+ *     chain_name: string
  * }
  *
  * @phpstan-type ValidatorBulkExistingRow object{
@@ -153,7 +154,8 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     voting_power_rank: string|null,
  *     enrichment_attempts: string,
- *     fetched_at: string
+ *     fetched_at: string,
+ *     vote_account: string|null
  * }
  *
  * @phpstan-type ValidatorCountByChain object{
@@ -272,7 +274,7 @@ final class ValidatorRepository
      * Validator pages typically map 1:1 to a single validator row; the
      * LIMIT 1 in each path is defensive against transitional re-indexing.
      *
-     * @return object{validator_id: numeric-string, chain_slug: string}|null
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
      */
     public static function findFirstByPageId(int $pageId): ?object
     {
@@ -285,9 +287,10 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
-        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT v.id AS validator_id, c.slug AS chain_slug
+            "SELECT v.id AS validator_id, c.slug AS chain_slug,
+                    c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$table} v
                JOIN {$wallets} w ON w.id = v.wallet_link_id
                JOIN {$chains} c ON c.id = v.chain_id
@@ -303,9 +306,10 @@ final class ValidatorRepository
         // Fallback: placeholder pages minted by ValidatorPageMinter have
         // no wallet_link yet — the page<->validator binding lives in
         // post_meta until a real claim creates a wallet_link.
-        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT v.id AS validator_id, c.slug AS chain_slug
+            "SELECT v.id AS validator_id, c.slug AS chain_slug,
+                    c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$wpdb->postmeta} pm
                JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
                JOIN {$chains} c ON c.id = v.chain_id
@@ -768,7 +772,7 @@ final class ValidatorRepository
         $existingRows = $wpdb->get_results($wpdb->prepare(
             "SELECT id, operator_address, moniker, status, commission_rate,
                     total_stake, jailed_count, voting_power_rank,
-                    enrichment_attempts, fetched_at
+                    enrichment_attempts, fetched_at, vote_account
              FROM {$table}
              WHERE chain_id = %d
              LIMIT 10000",
@@ -801,6 +805,19 @@ final class ValidatorRepository
             $addr = $data['operator_address'];
             $prev = $existing[$addr] ?? null;
 
+            // F-550: only a fetcher that knows vote accounts (Solana) sends
+            // the key, and then its value is the truth, null included (an
+            // identity it can't trust clears a stored value). Without the
+            // key the column is left exactly as it is. Only the base58
+            // alphabet is accepted, so the SQL fragment built from it can
+            // carry no quote and no `%` into the prepare() below.
+            $ownsVote    = array_key_exists('vote_account', $data);
+            $voteAccount = $ownsVote && is_string($data['vote_account'])
+                && preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $data['vote_account']) === 1
+                ? $data['vote_account']
+                : null;
+            $sqlVoteNew  = $voteAccount !== null ? $wpdb->prepare('%s', $voteAccount) : 'NULL';
+
             if ($prev === null) {
                 // ── NEW ─────────────────────────────────────────────────
                 $jitterSec        = crc32($addr) & 0x3FFF;
@@ -822,8 +839,8 @@ final class ValidatorRepository
                     "INSERT INTO {$table}
                         (wallet_link_id, operator_address, chain_id, moniker, status,
                          commission_rate, total_stake, jailed_count,
-                         voting_power_rank, fetched_at, expires_at, next_enrichment_at)
-                     VALUES (NULL, %s, %d, %s, %s, {$sqlCommission}, {$sqlStake}, %d, %d, %s, %s, %s)",
+                         voting_power_rank, fetched_at, expires_at, next_enrichment_at, vote_account)
+                     VALUES (NULL, %s, %d, %s, %s, {$sqlCommission}, {$sqlStake}, %d, %d, %s, %s, %s, {$sqlVoteNew})",
                     $addr,
                     $chainId,
                     $data['moniker'] ?? null,
@@ -845,6 +862,7 @@ final class ValidatorRepository
                 || round((float) ($data['total_stake'] ?? 0), 6)     !== round((float) ($prev->total_stake ?? 0), 6)
                 || (int) ($data['jailed_count'] ?? 0)       !== (int) ($prev->jailed_count ?? 0)
                 || (int) ($data['voting_power_rank'] ?? 0)  !== (int) ($prev->voting_power_rank ?? 0)
+                || ($ownsVote && $voteAccount !== ($prev->vote_account ?? null))  // F-550, incl. the first backfill
                 || (int) ($prev->enrichment_attempts ?? 0)  > 0;  // reset stuck validators
 
             if (!$changed) {
@@ -877,6 +895,9 @@ final class ValidatorRepository
                 ? $wpdb->prepare('%d', (int) $data['voting_power_rank'])
                 : 'NULL';
 
+            // F-550: a fetcher that doesn't send vote_account keeps the stored one.
+            $sqlVoteKept = $ownsVote ? $sqlVoteNew : 'vote_account';
+
             $wpdb->query($wpdb->prepare(
                 "UPDATE {$table}
                  SET moniker             = %s,
@@ -885,6 +906,7 @@ final class ValidatorRepository
                      total_stake         = {$sqlStake},
                      jailed_count        = %d,
                      voting_power_rank   = {$sqlVotingRank},
+                     vote_account        = {$sqlVoteKept},
                      fetched_at          = %s,
                      expires_at          = %s,
                      enrichment_attempts = 0,
@@ -1070,7 +1092,7 @@ final class ValidatorRepository
             "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
                     v.status, v.commission_rate, v.total_stake, v.self_stake,
                     v.delegator_count, v.uptime_30d, v.jailed_count, v.voting_power_rank,
-                    c.slug AS chain_slug, c.chain_type
+                    c.slug AS chain_slug, c.chain_type, c.name AS chain_name
              FROM {$table} v
              INNER JOIN {$chains} c ON c.id = v.chain_id
              WHERE v.id = %d",
@@ -1575,7 +1597,8 @@ final class ValidatorRepository
      *     jailed_count: string|null,
      *     fetched_at: string,
      *     chain_slug: string,
-     *     chain_name: string
+     *     chain_name: string,
+     *     chain_id: numeric-string
      * }|null
      */
     public static function findSignalsByPageId(int $pageId): ?object
@@ -1592,7 +1615,7 @@ final class ValidatorRepository
         $selectCols =
             "v.status, v.uptime_30d, v.commission_rate, v.voting_power_rank,
              v.total_stake, v.self_stake, v.delegator_count, v.jailed_count,
-             v.fetched_at, c.slug AS chain_slug, c.name AS chain_name";
+             v.fetched_at, c.slug AS chain_slug, c.name AS chain_name, v.chain_id";
 
         /**
          * @var object{
@@ -1606,7 +1629,8 @@ final class ValidatorRepository
          *     jailed_count: string|null,
          *     fetched_at: string,
          *     chain_slug: string,
-         *     chain_name: string
+         *     chain_name: string,
+         *     chain_id: numeric-string
          * }|null $row
          */
         $row = $wpdb->get_row($wpdb->prepare(
@@ -1636,7 +1660,8 @@ final class ValidatorRepository
          *     jailed_count: string|null,
          *     fetched_at: string,
          *     chain_slug: string,
-         *     chain_name: string
+         *     chain_name: string,
+         *     chain_id: numeric-string
          * }|null $row
          */
         $row = $wpdb->get_row($wpdb->prepare(
@@ -1881,6 +1906,7 @@ final class ValidatorRepository
      *     delegator_count: string|null,
      *     native_token: string|null,
      *     chain_name: string|null,
+     *     chain_id: int,
      *     page_slug: string|null,
      *     page_title: string|null
      * }>
@@ -1915,6 +1941,7 @@ final class ValidatorRepository
          *     delegator_count: string|null,
          *     native_token: string|null,
          *     chain_name: string|null,
+         *     chain_id: numeric-string,
          *     page_slug: string|null,
          *     page_title: string|null
          * }>|null $rows
@@ -1922,7 +1949,7 @@ final class ValidatorRepository
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id AS validator_id, v.moniker, v.status, v.commission_rate,
                     v.total_stake, v.delegator_count,
-                    c.native_token, c.name AS chain_name,
+                    c.native_token, c.name AS chain_name, v.chain_id,
                     COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug,
                     COALESCE(p_wallet.post_title, p_meta.post_title) AS page_title
                FROM {$table} v
@@ -1955,6 +1982,7 @@ final class ValidatorRepository
                     'delegator_count' => $row->delegator_count,
                     'native_token'    => $row->native_token,
                     'chain_name'      => $row->chain_name,
+                    'chain_id'        => (int) $row->chain_id,
                     'page_slug'       => $row->page_slug,
                     'page_title'      => $row->page_title,
                 ];

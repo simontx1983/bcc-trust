@@ -28,6 +28,7 @@
 namespace BCC\Trust\Core\Services\Reactions;
 
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -141,15 +142,22 @@ final class ReactionSeeder
                 continue;
             }
 
-            $postId = wp_insert_post([
-                'post_type'    => self::REACTION_CPT,
-                'post_title'   => $spec['title'],
-                'post_content' => $spec['content'],
-                // post_excerpt = icon filename, per PeepSoReactionsModel's read path
-                'post_excerpt' => $spec['icon'],
-                'post_status'  => 'publish',
-                'menu_order'   => self::BASE_ORDER + $i,
-            ], true);
+            // F-361 — wrapped for the INVARIANT, not for a live exposure:
+            // this runs at plugin ACTIVATION, so no member's request is in
+            // flight. Wrapping it anyway is what keeps the guard test
+            // mechanical and its allowlist empty.
+            $postId = PeepSoAddPostGuard::pinOnly(
+                [],
+                static fn () => wp_insert_post([
+                    'post_type'    => self::REACTION_CPT,
+                    'post_title'   => $spec['title'],
+                    'post_content' => $spec['content'],
+                    // post_excerpt = icon filename, per PeepSoReactionsModel's read path
+                    'post_excerpt' => $spec['icon'],
+                    'post_status'  => 'publish',
+                    'menu_order'   => self::BASE_ORDER + $i,
+                ], true)
+            );
 
             if (is_wp_error($postId) || !is_int($postId) || $postId <= 0) {
                 \BCC\Core\Log\Logger::error('[ReactionSeeder] failed to insert reaction', [

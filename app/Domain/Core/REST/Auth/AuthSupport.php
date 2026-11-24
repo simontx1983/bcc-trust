@@ -507,6 +507,12 @@ final class AuthSupport
      * tier-lookup failure — worst-case the chrome stamp shows on a user
      * who's technically not in good standing, which is recoverable on
      * next login.
+     *
+     * ⛔ DISPLAY ONLY (F-469, security's condition). The frontend uses this
+     * field for the footer stamp and nothing else. It must NEVER become an
+     * input to a server-side decision: not a trusted token claim, not a
+     * gate, not a filter. Anything that decides by standing reads
+     * ReputationRepository::getTierOrUnknown() and refuses on unknown.
      */
     public static function resolveInGoodStanding(int $userId): bool
     {
@@ -730,11 +736,44 @@ final class AuthSupport
     }
 
     /**
-     * H1: is $addressMac the address a verification of $userId would prove
-     * NOW? That is the wallet sign-up's pending address while user_email is
-     * still the wallet placeholder (applyPendingSignupEmail then moves it
-     * into user_email), and user_email in every other case, including a
-     * pending address left behind after user_email changed.
+     * H1: the address a verification of $userId would prove NOW: the wallet
+     * sign-up's pending address while user_email is still the wallet
+     * placeholder (applyPendingSignupEmail then moves it into user_email),
+     * and user_email in every other case, including a pending address left
+     * behind after user_email changed. '' when there is no such user.
+     *
+     * The ONE rule for which address a verification is about. Verify binds
+     * to it (isBoundToVerificationTarget) and resend mails only it
+     * (EmailVerificationController::resendVerification), so a resend never
+     * mails an address whose code verify would refuse.
+     */
+    public static function verificationAddress(int $userId): string
+    {
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User) {
+            return '';
+        }
+        $address = (string) $user->user_email;
+        $pending = PendingEmailService::pendingSignupEmail($userId);
+        if ($pending !== '' && AccountRecoveryService::isPlaceholderEmail($address)) {
+            $address = $pending;
+        }
+        return $address;
+    }
+
+    /**
+     * H1: is $email, case- and space-insensitively, the address a
+     * verification of $userId would prove now (verificationAddress)?
+     */
+    public static function isVerificationAddress(int $userId, string $email): bool
+    {
+        $target = self::verificationAddress($userId);
+        return $target !== '' && hash_equals(self::addressMac($target), self::addressMac($email));
+    }
+
+    /**
+     * H1: was $addressMac (stored with a code or link) the address a
+     * verification of $userId would prove now (verificationAddress)?
      *
      * A code or link proves only the inbox it was mailed to. Without this a
      * code or link mailed to one address could mark another verified once
@@ -747,15 +786,7 @@ final class AuthSupport
         if ($addressMac === '') {
             return false;
         }
-        $user = get_userdata($userId);
-        if (!$user instanceof \WP_User) {
-            return false;
-        }
-        $target  = (string) $user->user_email;
-        $pending = PendingEmailService::pendingSignupEmail($userId);
-        if ($pending !== '' && AccountRecoveryService::isPlaceholderEmail($target)) {
-            $target = $pending;
-        }
+        $target = self::verificationAddress($userId);
         return $target !== '' && hash_equals(self::addressMac($target), $addressMac);
     }
 
@@ -817,7 +848,20 @@ final class AuthSupport
         self::storeOtpForUser($userId, $otpCode, $email);
         self::storeVerifyToken($verifyToken, $userId, $email);
 
-        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+        // F-410: the link carries the TOKEN ONLY — never the address.
+        //
+        // The token is self-identifying (it encodes the user id), and
+        // EmailVerificationController::verifyEmail() takes the token path
+        // BEFORE it reads `email`, so nothing server-side needed the
+        // address here; it was there to pre-fill the OTP form.
+        //
+        // ⚠ A verification link leaks further than the inbox it was sent
+        // to: it is forwarded, pasted into support chats, and lands in
+        // proxy and referrer logs. Carrying the address made every one of
+        // those a disclosure of who the account belongs to, on top of the
+        // token. Dropping it costs only the pre-fill, which the frontend
+        // handles by asking.
+        $verifyPath = '/verify-email?token=' . rawurlencode($verifyToken);
         AuthMailer::sendVerificationEmail(
             $userId,
             $email,

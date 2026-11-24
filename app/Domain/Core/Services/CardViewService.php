@@ -39,6 +39,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
 use BCC\Trust\Onchain\Services\DelegatorGroupView;
+use BCC\Trust\Onchain\Services\ValidatorClaimSupport;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
@@ -51,10 +52,12 @@ use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\ValidatorStatusProjection;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -509,7 +512,7 @@ final class CardViewService
                 // F-301: whether THIS viewer may claim the page. The claim
                 // CTA rendered on claim_target alone, so a suspended member
                 // was offered a claim the write always refuses (F-109).
-                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget !== null),
+                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget),
             ],
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
@@ -1440,13 +1443,13 @@ final class CardViewService
 
     private static function isPageClaimed(int $pageId): bool
     {
-        return ClaimRepository::getForEntity('page', $pageId) !== [];
+        return ClaimRepository::getForEntity('page', $pageId, PageClaimRolePolicy::OWNER_ROLES) !== [];
     }
 
     private static function viewerHasClaim(int $viewerId, int $pageId): bool
     {
         return self::claimRowIsVerified(
-            ClaimRepository::getUserClaim($viewerId, 'page', $pageId)
+            ClaimRepository::getUserClaim($viewerId, 'page', $pageId, PageClaimRolePolicy::OWNER_ROLES)
         );
     }
 
@@ -1480,8 +1483,14 @@ final class CardViewService
      * "first" is deterministic where the old LIMIT 1 was arbitrary
      * on multi-chain pages (benign tightening).
      *
+     * F-515: it also says whether the page CAN be claimed, and if not why
+     * (`claimable`, `unclaimable_reason_code`, `unclaimable_hint`), from
+     * {@see ValidatorClaimSupport}, the rule POST /pages/:id/claim refuses
+     * by. The block stays non-null for an unclaimable page, so the card can
+     * say why.
+     *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
-     * @return array{entity_type: string, entity_id: int, chain_slug: string}|null
+     * @return array{entity_type: string, entity_id: int, chain_slug: string, claimable: bool, unclaimable_reason_code: string|null, unclaimable_hint: string|null}|null
      */
     private static function resolveClaimTarget(string $kind, int $pageId, bool $isClaimed, ?array $validatorRows = null): ?array
     {
@@ -1494,10 +1503,19 @@ final class CardViewService
         if ($row === null) {
             return null;
         }
+        $support = ValidatorClaimSupport::assess(
+            (string) $row->chain_type,
+            (string) $row->chain_slug,
+            (string) $row->chain_name,
+            (string) $row->operator_address
+        );
         return [
-            'entity_type' => 'validator',
-            'entity_id'   => (int) $row->validator_id,
-            'chain_slug'  => (string) $row->chain_slug,
+            'entity_type'             => 'validator',
+            'entity_id'               => (int) $row->validator_id,
+            'chain_slug'              => (string) $row->chain_slug,
+            'claimable'               => $support['claimable'],
+            'unclaimable_reason_code' => $support['reason_code'],
+            'unclaimable_hint'        => $support['hint'],
         ];
     }
 
@@ -1552,7 +1570,8 @@ final class CardViewService
         $comm   = $row->commission_rate !== null ? (float) $row->commission_rate / 100.0 : null;
 
         return [
-            'status'            => (string) $row->status,
+            // F-584: `unknown` while the chain has stopped answering.
+            'status'            => ValidatorStatusProjection::effective((string) $row->status, (int) $row->chain_id),
             'uptime_30d'        => $uptime,
             'commission_rate'   => $comm,
             'voting_power_rank' => $row->voting_power_rank !== null ? (int) $row->voting_power_rank : null,
@@ -2356,12 +2375,21 @@ final class CardViewService
      * An UNKNOWN suspension state (null) is allowed: display only, the
      * write gate fails closed on its own.
      *
+     * F-515: a page that cannot be claimed at all (`claim_target.claimable`
+     * false) answers `not_claimable` with the same hint, checked FIRST: it
+     * is a fact about the page, whoever is asking, and the write refuses it
+     * the same way.
+     *
+     * @param array{claimable: bool, unclaimable_hint: string|null}|null $claimTarget
      * @return Permission
      */
-    private static function resolveCanClaim(int $viewerId, bool $hasClaimTarget): array
+    private static function resolveCanClaim(int $viewerId, ?array $claimTarget): array
     {
-        if (!$hasClaimTarget) {
+        if ($claimTarget === null) {
             return self::deny(null, 'not_applicable');
+        }
+        if (!$claimTarget['claimable']) {
+            return self::deny($claimTarget['unclaimable_hint'], 'not_claimable');
         }
         if ($viewerId <= 0) {
             return self::deny('Sign in to claim this page.', 'signin_required');
@@ -2446,6 +2474,10 @@ final class CardViewService
      * unlock hint states the requirement (same copy as the write path
      * in PostsService::createReview).
      *
+     * F-469: a standing that could not be read is not a missing
+     * requirement. It says so (the attestation entries' sentence), with
+     * the `unavailable` reason code, never the "keep your standing" hint.
+     *
      * @return Permission
      */
     private function writeReviewPermission(int $viewerId): array
@@ -2453,6 +2485,12 @@ final class CardViewService
         $decision = $this->capabilityResolver->can($viewerId, 'write_review');
         if ($decision->isAllowed()) {
             return self::allow();
+        }
+        if ($decision->reason === 'unavailable') {
+            return self::deny(
+                'Your standing could not be checked right now. Please try again.',
+                'unavailable'
+            );
         }
         return self::deny(
             'Become an Apprentice and keep your standing at Neutral or better to write reviews.',

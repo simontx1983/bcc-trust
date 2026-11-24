@@ -87,6 +87,11 @@ namespace BCC\Trust\Core\Tests\Unit {
     {
         protected function setUp(): void
         {
+            // Same reason as ActivityReplayGuardTest: the insert this suite
+            // inspects is wrapped in PeepSoAddPostGuard::pinOnly(), and the
+            // REAL guard is loaded so the wrapper is not papered over.
+            require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+
             $GLOBALS['bcc_test_insert_post_args']  = [];
             $GLOBALS['bcc_test_post_meta_writes'] = [];
             // Shared with ReviewBodyHydratorMemberTargetTest — see the stub.

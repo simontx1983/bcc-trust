@@ -37,6 +37,7 @@ final class AuthMailer
     private const WELCOME_FAILURE_EVENT            = 'welcome_email_send_failed';
     private const PASSWORD_RESET_FAILURE_EVENT     = 'password_reset_email_send_failed';
     private const TWO_FA_FAILURE_EVENT             = '2fa_email_send_failed';
+    private const STEP_UP_FAILURE_EVENT            = 'step_up_email_send_failed';
 
     /**
      * Path of the masthead logo within the WordPress uploads tree.
@@ -91,6 +92,11 @@ final class AuthMailer
      *   2. A one-shot button/link that auto-verifies on click.
      *
      * Both paths have independent TTLs (OTP: 15 min, link: 24 h).
+     *
+     * The mail names the account's @handle (F-294): several wallet sign-ups
+     * can hold one address pending, so its inbox can get a code for each,
+     * and the display name is whatever each sign-up chose. The handle is
+     * unique, so the inbox owner can tell which account a code confirms.
      * The merged design lets users on locked-down email clients (no
      * clickable links) still verify, while giving normal users the
      * lower-friction button path.
@@ -123,12 +129,13 @@ final class AuthMailer
 
         $siteName    = get_bloginfo('name') ?: 'BCC';
         $displayName = $user->display_name ?: $user->user_login;
+        $handle      = trim((string) get_user_meta($userId, HandleService::META_HANDLE, true));
         $subject     = sprintf('[%s] Verify your email address', $siteName);
 
         BccMailer::send(
             $to,
             $subject,
-            self::buildVerifyHtml($siteName, $displayName, $otpCode, $verifyUrl),
+            self::buildVerifyHtml($siteName, $displayName, $handle, $otpCode, $verifyUrl),
             self::VERIFY_EMAIL_FAILURE_EVENT
         );
     }
@@ -220,15 +227,21 @@ final class AuthMailer
      * Top accent stripe: BCC blue (#16b5e6).
      * OTP box: dark bg with blue border and blue digits.
      * Two paths: enter code in app OR click the button (24h link).
+     * Names the account's @handle when it has one ('' omits the line;
+     * every account that can finish verifying has a handle).
      */
     private static function buildVerifyHtml(
         string $siteName,
         string $displayName,
+        string $handle,
         string $otpCode,
         string $verifyUrl
     ): string {
         $safeSiteName    = htmlspecialchars($siteName,    ENT_QUOTES, 'UTF-8');
         $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
+        $accountLine     = $handle === '' ? '' : '<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#c9d1d9;">'
+            . 'This code confirms the email for <strong>@' . htmlspecialchars($handle, ENT_QUOTES, 'UTF-8') . '</strong>.'
+            . ' If that isn&rsquo;t your account, ignore this email.</p>';
         $safeOtp         = htmlspecialchars($otpCode,     ENT_QUOTES, 'UTF-8');
         $safeVerifyUrl   = htmlspecialchars($verifyUrl,   ENT_QUOTES, 'UTF-8');
         $logoUrl         = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
@@ -280,6 +293,7 @@ final class AuthMailer
                     Enter this code in the app to confirm your email and finish setting up your account.
                     The code is valid for&nbsp;15&nbsp;minutes.
                   </p>
+                  {$accountLine}
                   <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#c9d1d9;">
                     <strong>If you didn&rsquo;t create this account, ignore this email.</strong>
                     Don&rsquo;t enter the code or click the button &mdash; the address stays unverified unless you do.
@@ -839,6 +853,36 @@ HTML;
                 . '                    Don&rsquo;t enter the code &mdash; nothing changes unless you do.'
             ),
             self::VERIFY_EMAIL_FAILURE_EVENT
+        );
+    }
+
+    /**
+     * The one-time code a staff member types to confirm a validator
+     * relationship change (link, revoke or cancel an owner). The action is
+     * named so a code the recipient did not ask for is recognisable.
+     */
+    public static function sendValidatorStepUpCode(string $to, string $otpCode, string $actionLabel): void
+    {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $siteName   = get_bloginfo('name') ?: 'BCC';
+        $safeAction = htmlspecialchars($actionLabel, ENT_QUOTES, 'UTF-8');
+
+        BccMailer::send(
+            $to,
+            sprintf('[%s] Confirm a validator change', $siteName),
+            self::buildCodeOnlyOtpHtml(
+                $siteName,
+                $otpCode,
+                'Confirm a validator change',
+                "Enter this code in the admin tool to confirm: <strong>{$safeAction}</strong>.\n"
+                . '                    The code is valid for&nbsp;10&nbsp;minutes and works once.',
+                "<strong>If you didn&rsquo;t start this change, don&rsquo;t enter the code</strong> and tell\n"
+                . '                    another administrator: someone has your password.'
+            ),
+            self::STEP_UP_FAILURE_EVENT
         );
     }
 

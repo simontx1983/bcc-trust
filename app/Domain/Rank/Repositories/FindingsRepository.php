@@ -54,6 +54,8 @@ if (!defined('ABSPATH')) {
  */
 class FindingsRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Cache group for per-subject findings generation counters (§5). */
     private const CACHE_GROUP = 'bcc_rank_findings';
 
@@ -147,8 +149,12 @@ class FindingsRepository
      * Includes rows whose penalty/ceiling has expired — callers filter
      * expiry against gmdate('Y-m-d H:i:s') in PHP (UTC).
      *
+     * FAIL-CLOSED (F-465): a failed read THROWS, never "no findings":
+     * RankPromotionEngine persists rank decisions from it.
+     *
      * @return list<object>
      * @phpstan-return list<FindingRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
      */
     public function getActiveForUser(int $userId): array
     {
@@ -158,17 +164,17 @@ class FindingsRepository
 
         global $wpdb;
 
-        /** @var list<FindingRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        /** @var list<FindingRow> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE subject_user_id = %d AND status = 'active'
               ORDER BY id ASC
               LIMIT %d",
             $userId,
             self::MAX_ROWS_PER_SUBJECT
-        ));
+        ), __FUNCTION__, true);
 
-        return $rows ?: [];
+        return $rows;
     }
 
     /**

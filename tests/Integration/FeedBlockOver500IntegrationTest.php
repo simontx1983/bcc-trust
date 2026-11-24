@@ -241,13 +241,15 @@ final class FeedBlockOver500IntegrationTest extends TestCase
      */
     private static function filter(array $items): array
     {
-        $m = (new ReflectionClass(FeedRankingService::class))->getMethod('dropMutuallyBlockedAuthors');
+        // The exact block filter, as a page filter: NULL (an unreadable block
+        // table) empties the page, which is what every caller does with it.
+        $m = (new ReflectionClass(FeedRankingService::class))->getMethod('keepUnblockedOrNull');
         $m->setAccessible(true);
 
-        /** @var list<array<string, mixed>> $out */
+        /** @var list<array<string, mixed>>|null $out */
         $out = $m->invoke(null, $items, self::VIEWER);
 
-        return $out;
+        return $out ?? [];
     }
 
     /** @return array<string, mixed> */

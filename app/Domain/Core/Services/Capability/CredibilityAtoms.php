@@ -90,9 +90,23 @@ trait CredibilityAtoms
      */
     protected function tierAtLeast(int $userId, string $tierSlug): bool
     {
+        // F-469: a tier that could not be read is not "at least" anything.
+        return $this->tierAtLeastOrUnknown($userId, $tierSlug) === true;
+    }
+
+    /**
+     * F-469: tierAtLeast(), tri-state. NULL when the tier could not be read,
+     * so a gate can answer "unavailable" rather than "below the bar". A
+     * member with no reputation row is neutral, as before.
+     */
+    protected function tierAtLeastOrUnknown(int $userId, string $tierSlug): ?bool
+    {
         $plugin = \BCC\Trust\Core\Plugin::instance();
         $config = $plugin->rankScoringConfig();
-        $tier   = $plugin->reputationRepository()->getTier($userId);
+        $tier   = $plugin->reputationRepository()->getTierOrUnknown($userId);
+        if ($tier === null) {
+            return null;
+        }
 
         return $config->tierOrdFor($tier) >= $config->tierOrdFor($tierSlug);
     }

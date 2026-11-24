@@ -20,9 +20,58 @@ if (!defined('ABSPATH')) {
 final class PageDiscoveryRepository
 {
     /**
+     * F-560: a validator's moniker that is a PLACEHOLDER, not a name. On the
+     * `v_named` alias of unnamedValidatorSql(). It is one when it is:
+     *   - empty;
+     *   - the operator address itself; or
+     *   - the shortened address our own fetchers write when a chain gives no
+     *     name: SolanaFetcher and PolkadotFetcher `{first 6}...{last 4}`
+     *     (13 characters), ThorchainFetcher `{first 8}...{last 4}` (15).
+     * Every Solana validator is one today: nothing fetches Solana names.
+     * A fetcher that adds another placeholder shape must add it here.
+     */
+    private const UNNAMED_MONIKER_SQL = "(v_named.moniker IS NULL
+                OR TRIM(v_named.moniker) = ''
+                OR v_named.moniker = v_named.operator_address
+                OR (CHAR_LENGTH(v_named.moniker) IN (13, 15)
+                    AND LEFT(v_named.moniker, 6) = LEFT(v_named.operator_address, 6)
+                    AND RIGHT(v_named.moniker, 7) = CONCAT('...', RIGHT(v_named.operator_address, 4))))";
+
+    /**
+     * F-560: 1 for a page whose validator has no real name
+     * (UNNAMED_MONIKER_SQL), 0 for every other page: a named validator, and
+     * any page that is not a validator's.
+     *
+     * Both discovery lists order by it FIRST, so named validators lead under
+     * every sort. Without it, unnamed validators tied under every sort, and
+     * the `p.ID DESC` tiebreak handed the tie to the newest pages: the
+     * Solana mints.
+     *
+     * A scalar subquery, not a join, so a page with a duplicate validator
+     * meta row is still listed once. The COUNT queries never carry it.
+     */
+    private static function unnamedValidatorSql(): string
+    {
+        global $wpdb;
+        $validators = \BCC\Core\DB\DB::table('onchain_validators');
+
+        return "COALESCE((
+                SELECT CASE WHEN " . self::UNNAMED_MONIKER_SQL . " THEN 1 ELSE 0 END
+                FROM {$wpdb->postmeta} pm_named
+                INNER JOIN {$validators} v_named
+                        ON v_named.id = CAST(pm_named.meta_value AS UNSIGNED)
+                WHERE pm_named.post_id = p.ID
+                  AND pm_named.meta_key = '_bcc_onchain_validator_id'
+                LIMIT 1
+            ), 0)";
+    }
+
+    /**
      * Query the denormalized read model table for discovery pages.
      *
      * @param string[] $types
+     * @param array<int, int|string> $status_chain_ids the chains whose validator status is
+     *        current (F-584); used only with a `status` filter, where none matches nothing.
      * @return array{rows: list<object>, total: int, pages: int, page: int}
      * @phpstan-return array{
      *   rows: list<object{
@@ -62,7 +111,8 @@ final class PageDiscoveryRepository
         bool $good_standing_only = false,
         string $chain_slug = '',
         string $status = '',
-        ?float $min_self_stake = null
+        ?float $min_self_stake = null,
+        array $status_chain_ids = []
     ): array {
         global $wpdb;
 
@@ -139,6 +189,21 @@ final class PageDiscoveryRepository
             // present by $needs_validator_join above.
             $where[]  = 'v_chain.status = %s';
             $params[] = $status;
+
+            // F-584: a stored status counts only on a chain still answering
+            // ($status_chain_ids, from ValidatorStatusProjection). On any
+            // other chain it reads `unknown`, which no filter value selects.
+            // No current chain (or none passed) matches nothing.
+            $chainIds = array_values(array_unique(array_filter(
+                array_map('intval', $status_chain_ids),
+                static fn (int $id): bool => $id > 0
+            )));
+            if ($chainIds === []) {
+                $where[] = '1 = 0';
+            } else {
+                $where[] = 'v_chain.chain_id IN (' . implode(',', array_fill(0, count($chainIds), '%d')) . ')';
+                $params  = array_merge($params, $chainIds);
+            }
         }
         if ($min_self_stake !== null) {
             $where[]  = 'v_chain.self_stake >= %f';
@@ -230,6 +295,8 @@ final class PageDiscoveryRepository
             ? ", {$ranking_expr} AS ranking_score"
             : '';
 
+        $unnamed_first = self::unnamedValidatorSql() . ' ASC';
+
         $main_sql = "SELECT p.ID, p.post_title, p.post_date, p.post_name,
                 rm.owner_id, rm.trust_score, rm.reputation_tier,
                 rm.confidence_score, rm.onchain_bonus,
@@ -240,8 +307,10 @@ final class PageDiscoveryRepository
             INNER JOIN {$rm_table} rm ON rm.page_id = p.ID
             {$chain_joins}
             WHERE {$where_clause}
-            ORDER BY {$orderby}, p.ID DESC
+            ORDER BY {$unnamed_first}, {$orderby}, p.ID DESC
             LIMIT %d OFFSET %d";
+        // F-560: named validators first (unnamedValidatorSql()), then the
+        // chosen sort, then the tiebreak.
         // F-143: `p.ID DESC` is the unique tiebreak. Every sort key above
         // (counts, post_date, stake, the ranking expression) can tie, and
         // MySQL returns tied rows in no fixed order, so LIMIT/OFFSET pages
@@ -298,7 +367,8 @@ final class PageDiscoveryRepository
      *     reputation_tier: string,
      *     endorsements: int|numeric-string,
      *     unique_voters: int|numeric-string,
-     *     follower_count: int|numeric-string|null
+     *     follower_count: int|numeric-string|null,
+     *     is_unnamed: int|numeric-string
      *   }>,
      *   total: int,
      *   pages: int,
@@ -464,19 +534,23 @@ final class PageDiscoveryRepository
             return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
         }
 
-        $offset  = ($page - 1) * $limit;
+        $offset         = ($page - 1) * $limit;
+        $unnamed_select = self::unnamedValidatorSql();
         $main_sql = "SELECT DISTINCT p.ID, p.post_title, p.post_date, p.post_author, p.post_name,
                 COALESCE(ps.total_score, 50) AS trust_score,
                 COALESCE(ps.reputation_tier, 'neutral') AS reputation_tier,
                 COALESCE(ps.endorsement_count, 0) AS endorsements,
                 COALESCE(ps.unique_voters, 0) AS unique_voters,
-                {$follower_select}
+                {$follower_select},
+                {$unnamed_select} AS is_unnamed
                 {$ranking_select}
             FROM {$wpdb->posts} p
             {$join}
             WHERE {$where_clause}
-            ORDER BY {$orderby}, p.ID DESC
+            ORDER BY is_unnamed ASC, {$orderby}, p.ID DESC
             LIMIT %d OFFSET %d";
+        // F-560: named validators first. The key is SELECTED, not just
+        // ordered by: this statement is DISTINCT (see the ranking note).
         // F-143: unique `p.ID DESC` tiebreak — same reason as queryFromReadModel().
 
         $all_params = array_merge($params, [$limit, $offset]);
@@ -487,7 +561,7 @@ final class PageDiscoveryRepository
         // pattern as the two finders below. (The shape was equally
         // unverified before: get_results()'s stub return was just loose
         // enough that PHPStan did not object.)
-        /** @var list<object{ID: int|numeric-string, post_title: string, post_author: int|numeric-string, post_date: string, post_name: string, trust_score: float|numeric-string, reputation_tier: string, endorsements: int|numeric-string, unique_voters: int|numeric-string, follower_count: int|numeric-string|null}>|null $rows */
+        /** @var list<object{ID: int|numeric-string, post_title: string, post_author: int|numeric-string, post_date: string, post_name: string, trust_score: float|numeric-string, reputation_tier: string, endorsements: int|numeric-string, unique_voters: int|numeric-string, follower_count: int|numeric-string|null, is_unnamed: int|numeric-string}>|null $rows */
         $rows = self::trustedRows($wpdb->prepare($main_sql, ...$all_params));
 
         // ⚠ Same reasoning as the COUNT above. `get_results()` answers null
@@ -707,6 +781,70 @@ final class PageDiscoveryRepository
         }
 
         return $out;
+    }
+
+    /**
+     * Of the given ids, the pages that are SECRET, or whose privacy could not
+     * be read. In input order, each id once.
+     *
+     * bcc-core's shared rule decides (PeepSoPagePrivacy::notSecretSql()), so
+     * this can never disagree with discovery or with PageAccess: a page is
+     * secret when ANY of its privacy rows reads 2.
+     *
+     * For lists that show pages to one viewer: PageAccess::visibleAmong()
+     * asks this once per list, and only the ids it returns go on to the
+     * per-page member check. Single bulk SELECT, bounded by the caller's
+     * IN-list.
+     *
+     * ⚠ FAILS CLOSED. A read that did not run returns EVERY id, because a
+     * page whose privacy is unknown counts as secret. Each then gets the
+     * single-page check, which hides it again if the database is still
+     * failing.
+     *
+     * An id that names no post is never returned.
+     *
+     * @param  list<int> $pageIds
+     * @return list<int>
+     */
+    public static function findSecretOrUnknownIds(array $pageIds): array
+    {
+        $pageIds = array_values(array_unique(array_filter(
+            $pageIds,
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($pageIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
+        $notSecret    = PeepSoPagePrivacy::notSecretSql('p.ID');
+
+        /** @var list<object{ID: int|numeric-string}>|null $rows */
+        $rows = self::trustedRows($wpdb->prepare(
+            "SELECT p.ID
+               FROM {$wpdb->posts} p
+              WHERE p.ID IN ({$placeholders})
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            ...[...$pageIds, count($pageIds)]
+        ));
+
+        if ($rows === null) {
+            self::logReadFailure('secret pages by id', ['ids' => count($pageIds)]);
+
+            return $pageIds;
+        }
+
+        $secret = [];
+        foreach ($rows as $row) {
+            $secret[(int) $row->ID] = true;
+        }
+
+        return array_values(array_filter(
+            $pageIds,
+            static fn (int $id): bool => isset($secret[$id])
+        ));
     }
 
     /**

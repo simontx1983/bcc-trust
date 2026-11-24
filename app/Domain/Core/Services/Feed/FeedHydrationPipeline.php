@@ -45,6 +45,7 @@ use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\GroupAttribution;
 use BCC\Trust\Core\Support\NoReactionsGate;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -141,7 +142,7 @@ final class FeedHydrationPipeline
         // F-90: after group contexts (it reads the `group` block), same rule
         // as the comment-count gate below.
         $items = $this->gateReactionSignals($items, $viewerId);
-        $items = self::hydratePageContexts($items);
+        $items = self::hydratePageContexts($items, $viewerId);
         $items = $this->hydrateCommentCounts($items, $viewerId);
         // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
         // author.handle is final when the permalink is composed.
@@ -239,14 +240,19 @@ final class FeedHydrationPipeline
      * `name` follows the card's rule: the live moniker over the frozen post
      * title, so the label reads the same as the page it links to.
      *
-     * Batched: one meta prime for the items, then one page read and one
-     * moniker read for the distinct pages. A page of unmarked posts stops
-     * after the meta prime.
+     * ⚠ A SECRET page the viewer may not see (PageAccess) reads as null, like
+     * a page that is no longer published: the context is the page's name,
+     * handle and link, all of which give it away. The post itself stays; it
+     * is its author's post, and its own visibility is decided upstream.
+     *
+     * Batched: one meta prime for the items, then one page read, one
+     * page-privacy read and one moniker read for the distinct pages. A page
+     * of unmarked posts stops after the meta prime.
      *
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
      */
-    private static function hydratePageContexts(array $items): array
+    private static function hydratePageContexts(array $items, int $viewerId): array
     {
         if ($items === []) {
             return [];
@@ -281,6 +287,12 @@ final class FeedHydrationPipeline
 
         $distinctPageIds = array_values(array_unique($pageIdsByItem));
         $pages           = PageDiscoveryRepository::findPublishedByIds($distinctPageIds);
+        if ($pages !== []) {
+            $pages = array_intersect_key(
+                $pages,
+                array_flip(PageAccess::visibleAmong(array_keys($pages), $viewerId))
+            );
+        }
         if ($pages === []) {
             return $items;
         }
@@ -1225,8 +1237,11 @@ final class FeedHydrationPipeline
         ]);
 
         // Prime the user_meta cache for bcc_handle reads — one query
-        // instead of one per user.
-        update_meta_cache('user', array_map(static fn ($u) => (int) $u->ID, $users));
+        // instead of one per user. visibleName()'s real_name_hidden reads
+        // its own guarded copy (bcc-core UserMetaRepository), primed the same way.
+        $reactorIds = array_values(array_map(static fn ($u) => (int) $u->ID, $users));
+        update_meta_cache('user', $reactorIds);
+        \BCC\Trust\Core\Support\PrivacySettings::prime($reactorIds);
 
         $out = [];
         foreach ($users as $u) {

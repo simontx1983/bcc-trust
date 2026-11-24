@@ -175,6 +175,32 @@ final class CommunityCustodyServiceTest extends TestCase
      * sub-reason is still captured server-side (logReceiverDenied) for
      * admin debugging.
      */
+    public function testAnUnreadableReceiverCountIsRetryableAndNotCollapsed(): void
+    {
+        $svc = $this->service(decisions: [
+            self::RECEIVER . ':receive_community' => CapabilityDecision::denied('unavailable', 'community_custody'),
+        ]);
+
+        $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+
+        self::assertSame('bcc_unavailable', $result['error'] ?? null, 'a read failure was answered as a refusal');
+        self::assertSame(['reason' => 'unavailable'], $result['data'] ?? null);
+        self::assertSame(
+            'We couldn\'t check whether that member can receive this community just now. Please try again.',
+            $result['message'] ?? null
+        );
+
+        // Still refuses the WRITE — retryable is not permissive.
+        self::assertSame([], $svc->writerCalls);
+        self::assertSame([], $svc->custodyCalls);
+
+        // And still logged server-side, like every other receiver denial.
+        self::assertSame(
+            [[self::GROUP, self::OWNER, self::RECEIVER, 'unavailable']],
+            $svc->receiverDeniedLog
+        );
+    }
+
     public function testReceiverDenialCollapsesToGenericIneligible(): void
     {
         $subReasons = [

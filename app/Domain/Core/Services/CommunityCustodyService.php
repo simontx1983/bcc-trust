@@ -210,6 +210,28 @@ class CommunityCustodyService
             $receiverDecision = $this->capability($toUserId, 'receive_community');
             if (!$receiverDecision->isAllowed()) {
                 $this->logReceiverDenied($groupId, $viewerId, $toUserId, $receiverDecision->reason);
+
+                // ⚠⚠ `unavailable` is NOT a receiver status — it means the
+                // ownership count (F-503) or, since F-469, the receiver's
+                // trust tier could not be READ. Collapsing it
+                // into `receiver_ineligible` would tell the owner that this
+                // member cannot receive custody, a claim we have no basis
+                // for, and a 403 would tell them to stop trying. It is
+                // retryable: §F-438 / §F-462's `bcc_unavailable` + 503.
+                //
+                // ⚠ This discloses nothing about the receiver. Every real
+                // sub-reason still collapses to the generic wire reason
+                // below; this one is a fact about OUR read failing, emitted
+                // for a database fault independent of who the receiver is,
+                // so it cannot be used to probe their status.
+                if ($receiverDecision->reason === 'unavailable') {
+                    return [
+                        'error'   => 'bcc_unavailable',
+                        'message' => 'We couldn\'t check whether that member can receive this community just now. Please try again.',
+                        'data'    => ['reason' => 'unavailable'],
+                    ];
+                }
+
                 return [
                     'error'   => 'bcc_forbidden',
                     'message' => self::receiverDenyMessage(),

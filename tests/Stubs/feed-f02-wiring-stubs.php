@@ -6,7 +6,7 @@
  * files here: this declares SEVEN classes that also exist for real
  * (`BCC\Core\Feed\ActivityFeedService`, `PeepSoBlockRepository`,
  * `Permissions`, `ReputationRepository`, `HiddenActivityRepository`,
- * `GroupContextResolver`, `FeedHydrationPipeline`, `RestrictedGroups`).
+ * `GroupContextResolver`, `FeedHydrationPipeline`).
  * A class declaration cannot be undone and the first one wins for the
  * rest of the process. The consuming test is
  * `#[RunTestsInSeparateProcesses]` + `#[PreserveGlobalState(false)]`.
@@ -93,6 +93,19 @@ namespace {
         ];
     }
 
+    /**
+     * F-455: `feed_rows` (list of rows, default none), the page a list read
+     * answers. Empty unless a test opts in, as every other suite expects.
+     *
+     * @return list<array<string, mixed>>
+     */
+    function bcc_f02feed_rows(): array
+    {
+        $rows = $GLOBALS['__bcc_f02feed']['feed_rows'] ?? [];
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
+
     /** Record one forwarded call's §F-02 arguments. */
     function bcc_f02feed_record(string $method, int $viewer, $friends, $enforce, $defer = false): void
     {
@@ -157,6 +170,19 @@ namespace BCC\Core\Feed {
         public const SCOPE_FOLLOWING = 'following';
         public const SCOPE_SIGNALS   = 'signals';
         public const SCOPE_GROUP     = 'group';
+        public const SCOPE_GROUPS    = 'groups';
+        public const MEMBER_GROUPS_CAP = 200;
+
+        /**
+         * Core's per-request count of author batches whose names it masked.
+         * getFeed() bumps it when a test sets `mask_authors`.
+         */
+        public static int $authorReadFailures = 0;
+
+        public static function authorReadFailures(): int
+        {
+            return self::$authorReadFailures;
+        }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
         public function getFeed(
@@ -172,8 +198,20 @@ namespace BCC\Core\Feed {
             ?string $hashtag = null,
             ?string $hallFeed = null,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            ?array $onlyForGroupIds = null,
+            ?array $softExcludedAuthorIds = null,
+            ?array $softExclusionExemptGroupIds = null
         ): array {
+            if (!empty($GLOBALS['__bcc_f02feed']['mask_authors'])) {
+                self::$authorReadFailures++;
+            }
+            // A trust-side mask during the build: a privacy flag read for a
+            // member whose read the test made fail (UserMetaRepository double).
+            if (!empty($GLOBALS['__bcc_f02feed']['mask_trust_for'])) {
+                \BCC\Trust\Core\Support\PrivacySettings::flag((int) $GLOBALS['__bcc_f02feed']['mask_trust_for'], 'real_name_hidden');
+            }
+
             // F-276: every argument, in call order, so a surface's
             // limit / cursor / hashtag can be asserted and a refactor
             // can be diffed call for call.
@@ -191,6 +229,10 @@ namespace BCC\Core\Feed {
                 'hallFeed'              => $hallFeed,
                 'viewerFriendIds'       => $viewerFriendIds,
                 'enforcePostVisibility' => $enforcePostVisibility,
+                // F-416, the "My Groups" channel.
+                'onlyForGroupIds'             => $onlyForGroupIds,
+                'softExcludedAuthorIds'       => $softExcludedAuthorIds,
+                'softExclusionExemptGroupIds' => $softExclusionExemptGroupIds,
             ];
 
             unset(
@@ -210,7 +252,9 @@ namespace BCC\Core\Feed {
 
             \bcc_f02feed_record($label, $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
-            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+            // F-455: `feed_rows` (opt-in, default none) gives the page rows,
+            // so the exact block check after the read has authors to check.
+            return ['items' => \bcc_f02feed_rows(), 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
         /** @return array<string, mixed>|null */
@@ -224,7 +268,10 @@ namespace BCC\Core\Feed {
             bool $deferGroupVisibilityToCaller = false
         ): ?array {
             $GLOBALS['__bcc_f02feed']['excluded']['getActivityById'] = $excludedAuthorIds;
-            unset($actId, $excludedAuthorIds, $excludedActIds);
+            // F-451: every permalink read's exclusion list, in call order.
+            $GLOBALS['__bcc_f02feed']['excluded_by_read'][] = $excludedAuthorIds;
+            $GLOBALS['__bcc_f02feed']['hidden_by_read'][]   = $excludedActIds;
+            unset($actId, $excludedActIds);
             \bcc_f02feed_record(
                 'getActivityById',
                 $viewerId,
@@ -238,9 +285,19 @@ namespace BCC\Core\Feed {
             // The only stub method whose RETURN is load-bearing: the
             // permalink's second look is driven entirely by the first
             // call answering null.
-            return $enforcePostVisibility
+            $row = $enforcePostVisibility
                 ? $fixture['row_enforced']
                 : $fixture['row_unenforced'];
+
+            // As bcc-core does: a row whose author is on the exclusion list
+            // is not returned (F-451's caution and block lists). Rows with
+            // no `author` key are never excluded, as before.
+            $authorId = is_array($row) && is_array($row['author'] ?? null) ? (int) ($row['author']['id'] ?? 0) : 0;
+            if ($authorId > 0 && in_array($authorId, array_map('intval', $excludedAuthorIds ?? []), true)) {
+                return null;
+            }
+
+            return $row;
         }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
@@ -264,7 +321,7 @@ namespace BCC\Core\Feed {
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
-            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+            return ['items' => \bcc_f02feed_rows(), 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
@@ -290,28 +347,70 @@ namespace BCC\Core\Feed {
 namespace BCC\Core\Repositories {
     final class PeepSoBlockRepository
     {
-        /** @return list<int> */
-        public static function getBlockedIds(int $userId): array
-        {
-            unset($userId);
+        // ⚠ F-455: NO getBlockedIds() / getBlockerIds() here. They answer []
+        // on a failed read, and the feed must never call them again, so a
+        // call is a fatal in these suites rather than a silent pass.
 
-            return $GLOBALS['__bcc_f02feed']['blocked'] ?? [];
+        /**
+         * `blocked` (list<int>, default none): who the viewer blocks;
+         * `blocked_by_viewer` (viewer id => list<int>) overrides it per viewer.
+         * `blocked_fails` (bool): the read did not run (null). Every read is
+         * logged in `block_reads`.
+         *
+         * @return list<int>|null
+         */
+        public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
+        {
+            unset($limit);
+            $GLOBALS['__bcc_f02feed']['block_reads'][] = ['blocked', $blockerId];
+            if (!empty($GLOBALS['__bcc_f02feed']['blocked_fails'])) {
+                return null;
+            }
+
+            return $GLOBALS['__bcc_f02feed']['blocked_by_viewer'][$blockerId]
+                ?? $GLOBALS['__bcc_f02feed']['blocked']
+                ?? [];
         }
 
-        /** @return list<int> */
-        public static function getBlockerIds(int $userId): array
+        /**
+         * `blockers` (list<int>, default none): who blocks the viewer.
+         * `blockers_fails` (bool): the read did not run (null).
+         *
+         * @return list<int>|null
+         */
+        public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
         {
-            unset($userId);
+            unset($limit);
+            $GLOBALS['__bcc_f02feed']['block_reads'][] = ['blockers', $blockedId];
+            if (!empty($GLOBALS['__bcc_f02feed']['blockers_fails'])) {
+                return null;
+            }
 
             return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
-        /** @return array<int, true>|null */
+        /**
+         * `mutual_blocked` (list<int> author ids, default none): the
+         * authors the viewer and they have blocked between them.
+         * `mutual_fails` (bool): the exact check did not run (null), the
+         * F-455 race after the pre-filter's reads succeeded.
+         *
+         * @return array<int, true>|null
+         */
         public static function getMutuallyBlockedSetOrUnknown(int $viewerId, array $candidateIds): ?array
         {
-            unset($viewerId, $candidateIds);
+            unset($viewerId);
+            if (!empty($GLOBALS['__bcc_f02feed']['mutual_fails'])) {
+                return null;
+            }
+            $set = [];
+            foreach ($GLOBALS['__bcc_f02feed']['mutual_blocked'] ?? [] as $id) {
+                if (in_array((int) $id, array_map('intval', $candidateIds), true)) {
+                    $set[(int) $id] = true;
+                }
+            }
 
-            return [];
+            return $set;
         }
     }
 }
@@ -319,9 +418,22 @@ namespace BCC\Core\Repositories {
 namespace BCC\Trust\Core\Repositories {
     final class ReputationRepository
     {
-        /** @return list<int> */
-        public function getCautionAndRiskyUserIds(): array
+        // ⚠ F-454: NO getCautionAndRiskyUserIds() here. It answers [] on a
+        // failed read and is for an inclusion-set worker only, so a feed
+        // calling it is a fatal in these suites rather than a silent pass.
+
+        /**
+         * `caution` (list<int>, default none). `caution_throws` (bool): no
+         * usable last-good list, which the real reader throws for.
+         *
+         * @return list<int>
+         */
+        public function getCautionAndRiskyUserIdsForExclusion(): array
         {
+            if (!empty($GLOBALS['__bcc_f02feed']['caution_throws'])) {
+                throw new \BCC\Trust\Core\Exceptions\RepositoryException('caution list unreadable, no usable last-good copy');
+            }
+
             return $GLOBALS['__bcc_f02feed']['caution'] ?? [];
         }
     }
@@ -331,7 +443,16 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getAllHiddenIds(): array
         {
-            return [];
+            // F-438: `hidden_throws` (bool): the read failed with no
+            // last-good list, which the real repository throws for.
+            if (!empty($GLOBALS['__bcc_f02feed']['hidden_throws'])) {
+                throw new \BCC\Trust\Core\Exceptions\RepositoryException('hidden list unreadable, no last-good copy');
+            }
+
+            // F-451: `hidden` (list<int> act ids, default none).
+            $hidden = $GLOBALS['__bcc_f02feed']['hidden'] ?? [];
+
+            return is_array($hidden) ? array_values(array_map('intval', $hidden)) : [];
         }
 
         public static function getGeneration(): int
@@ -368,26 +489,33 @@ namespace BCC\Trust\Core\Services {
 
     final class GroupContextResolver
     {
-        public function forGroup(int $groupId): ?object
+        /**
+         * `group_contexts` (array<int, GroupContext>, default none): the
+         * room each group id resolves to. F-451's third look asks it whether
+         * the room lifts the shadow-limit.
+         */
+        public function forGroup(int $groupId): ?\BCC\Trust\Core\ValueObjects\GroupContext
         {
-            unset($groupId);
+            // ⚠ Default none: a suite that never sets it gets null, as before.
+            $ctx = $GLOBALS['__bcc_f02feed']['group_contexts'][$groupId] ?? null;
 
-            return null;
+            return $ctx instanceof \BCC\Trust\Core\ValueObjects\GroupContext ? $ctx : null;
         }
-    }
-}
 
-namespace BCC\Trust\Core\Support {
-    // ⚠ ProfileAccess and PeepSoFriendGate live in this namespace too and
-    // are deliberately NOT declared here — they are the real thing.
-    final class RestrictedGroups
-    {
-        /** @return list<int> */
-        public static function forViewer(int $viewerId): array
+        /**
+         * F-438: "My Groups" asks each of the viewer's rooms at once.
+         *
+         * @param list<int> $groupIds
+         * @return array<int, \BCC\Trust\Core\ValueObjects\GroupContext|null>
+         */
+        public function forManyGroups(array $groupIds): array
         {
-            unset($viewerId);
+            $out = [];
+            foreach ($groupIds as $groupId) {
+                $out[(int) $groupId] = $this->forGroup((int) $groupId);
+            }
 
-            return [];
+            return $out;
         }
     }
 }
@@ -430,15 +558,22 @@ namespace BCC\Trust\Core\Services\Feed {
         /** @return mixed */
         function get_post_meta(int $postId, string $key = '', bool $single = false)
         {
-            unset($single);
             if ($key !== 'peepso_group_id') {
-                return '';
+                return $single ? '' : [];
             }
 
-            // '' for an unmapped post — what WordPress returns for absent
-            // meta, and what `(int)` then turns into the 0 that means
-            // "not a group post".
-            return \bcc_f02feed_fixture()['group_by_post'][$postId] ?? '';
+            // `group_by_post` maps a post to one group id, or (F-451) to a
+            // list of them for a post tagged into several rooms. As
+            // WordPress answers: $single gives the FIRST value ('' for an
+            // unmapped post, which `(int)` turns into the 0 that means
+            // "not a group post"); otherwise every value, as strings.
+            $mapped = \bcc_f02feed_fixture()['group_by_post'][$postId] ?? null;
+            $values = $mapped === null ? [] : (is_array($mapped) ? array_values($mapped) : [$mapped]);
+            if ($single) {
+                return $values === [] ? '' : $values[0];
+            }
+
+            return array_map('strval', $values);
         }
     }
 
@@ -463,6 +598,25 @@ namespace BCC\Trust\Core\Support {
         function get_current_user_id(): int
         {
             return 0;
+        }
+    }
+
+    // ProfileAccess::userIsExemptFromVisibility() asks about a GIVEN user
+    // (canView()'s mentionee), unlike the `is_admin` key, which models the
+    // request's user. Fixture key `admin_ids` (list<int>) lists the users
+    // holding `manage_options`. Outside this suite's fixture it defers to
+    // whatever global user_can() another suite defined, so it changes
+    // nothing for them.
+    if (!\function_exists('BCC\Trust\Core\Support\user_can')) {
+        function user_can($user, string $capability, ...$args): bool
+        {
+            if (!isset($GLOBALS['__bcc_f02feed'])) {
+                return \function_exists('user_can') && \user_can($user, $capability, ...$args);
+            }
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $capability === 'manage_options'
+                && in_array($id, $GLOBALS['__bcc_f02feed']['admin_ids'] ?? [], true);
         }
     }
 

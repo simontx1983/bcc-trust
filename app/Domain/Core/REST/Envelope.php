@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Security\RateLimiter;
 use BCC\Trust\Core\Support\ApiResponse;
 
 if (!defined('ABSPATH')) {
@@ -107,9 +108,12 @@ final class Envelope
         // fallback. Since F-289 bcc-core also records ONLY denials, so a 429
         // no throttle caused (the captcha step-up's bcc_captcha_required, with
         // every bucket having let the request through) gets nothing injected.
+        //
+        // F-391: bcc-trust's own RateLimiter::allow() records its denials in
+        // the same shape, and latestDenial() picks whichever refused.
         $ownRetryAfter = isset($response->get_headers()['Retry-After']);
-        if ($status === 429 && !$ownRetryAfter && class_exists(\BCC\Core\Security\Throttle::class)) {
-            $denial = \BCC\Core\Security\Throttle::lastDenial();
+        if ($status === 429 && !$ownRetryAfter) {
+            $denial = self::latestDenial();
             if (is_array($denial)) {
                 $window     = max(1, (int) ($denial['window'] ?? 60));
                 $limit      = max(0, (int) ($denial['limit'] ?? 0));
@@ -149,7 +153,20 @@ final class Envelope
             && ($data['error']['code'] ?? null) === 'bcc_unauthorized'
         ) {
             $failure = \BCC\Trust\Core\Support\BearerAuth::presentedTokenFailure();
-            if ($failure !== null) {
+            if ($failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_UNAVAILABLE) {
+                // F-462: the token's revocation state could not be read. It is
+                // neither expired nor invalid, and saying "invalid" would make the
+                // app sign the member out (#673), so it is the same 503 that
+                // BearerAuth::refuseUnknownTokenState() gives at the door (this
+                // catches a request that reached a handler without that check,
+                // such as an internal dispatch).
+                $data['error']['code']    = 'bcc_unavailable';
+                $data['error']['message'] = \BCC\Trust\Core\Support\BearerAuth::UNAVAILABLE_MESSAGE;
+                $data['error']['status']  = 503;
+                $response->set_data($data);
+                $response->set_status(503);
+                $response->header('Cache-Control', 'private, no-store');
+            } elseif ($failure !== null) {
                 $expired = $failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_EXPIRED;
                 $data['error']['code']    = $expired ? 'bcc_token_expired' : 'bcc_token_invalid';
                 $data['error']['message'] = $expired
@@ -211,6 +228,35 @@ final class Envelope
         ]);
 
         return $response;
+    }
+
+    /**
+     * F-391: the rate-limit denial that refused this request, or null.
+     *
+     * Two limiters record one: bcc-core's Throttle (most routes, and the
+     * permission-stage buckets) and bcc-trust's RateLimiter::allow() (watch,
+     * unwatch, user status, X share). Both record only denials. If both did in
+     * one request, the later one is what refused it; on the same second the
+     * RateLimiter one wins, because its calls run inside handlers, after the
+     * permission stage. bcc-core may be absent (degradation), so Throttle is
+     * feature-detected.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function latestDenial(): ?array
+    {
+        $core = class_exists(\BCC\Core\Security\Throttle::class)
+            ? \BCC\Core\Security\Throttle::lastDenial()
+            : null;
+        $trust = RateLimiter::lastDenial();
+
+        if (!is_array($core)) {
+            return $trust;
+        }
+        if ($trust === null) {
+            return $core;
+        }
+        return $trust['at'] >= (int) ($core['at'] ?? 0) ? $trust : $core;
     }
 
     private static function isOurNamespace(string $route): bool

@@ -243,6 +243,47 @@ final class NotificationRepository
         return is_int($affected) && $affected > 0;
     }
 
+    /** Ids one markReadMany() call takes, at most (F-516). */
+    public const MARK_READ_MANY_MAX = 50;
+
+    /**
+     * F-516: mark several of the user's own BCC notifications read in ONE
+     * bounded statement (the ids a push carried). Ids that are not the
+     * user's, not BCC's, or already read are simply not touched. Returns
+     * the rows changed; 0 for an empty list or more than
+     * MARK_READ_MANY_MAX ids (the caller validates first).
+     *
+     * @param list<int> $notificationIds
+     */
+    public function markReadMany(int $userId, array $notificationIds): int
+    {
+        $ids = [];
+        foreach ($notificationIds as $id) {
+            $id = (int) $id;
+            if ($id > 0) {
+                $ids[$id] = $id;
+            }
+        }
+        if ($userId <= 0 || $ids === [] || count($ids) > self::MARK_READ_MANY_MAX) {
+            return 0;
+        }
+        global $wpdb;
+        $table = $this->table();
+
+        $affected = $wpdb->query(
+            $wpdb->prepare(
+                "UPDATE `{$table}`"
+                . " SET `not_read` = 1"
+                . " WHERE `not_id` IN (" . implode(', ', array_fill(0, count($ids), '%d')) . ")"
+                . " AND `not_user_id` = %d"
+                . " AND `not_module_id` = %d"
+                . " AND `not_read` = 0",
+                ...[...array_values($ids), $userId, BCC_NOTIFICATION_MODULE_ID]
+            )
+        );
+        return is_int($affected) ? $affected : 0;
+    }
+
     /**
      * Mark every unread BCC notification for a user as read.
      * Returns the number of rows updated. Single bulk UPDATE — no

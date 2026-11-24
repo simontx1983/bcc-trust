@@ -51,6 +51,24 @@ if (!defined('ABSPATH')) {
  *                              reads that sit inside a write path and
  *                              have to decide what to do with the write.
  *
+ *   {@see runRead()}          VERIFIED, and the shapes
+ *   {@see runReadRow()}       {@see runReadVar()} on top of it. These
+ *                             RUN the SELECT themselves and check
+ *                             query()'s RETURN VALUE as well as the
+ *                             error, so they catch the failure the
+ *                             three above cannot see at all.
+ *
+ * ⚠⚠ PREFER THE runRead FAMILY IN NEW CODE. guardRead(),
+ * guardReadOrThrow() and readFailed() inspect `last_error` and nothing
+ * else, so they are blind to wpdb's pre-`flush()` bails: a failed
+ * reconnect (`! $this->ready`) and an emptied `query` filter each return
+ * false with NO error recorded and the PREVIOUS query's rows still in
+ * `last_result`. The guard reads that as success and the caller gets
+ * rows that never passed its own WHERE clause. The three stay because
+ * they are the only option for a read that does NOT go through $wpdb —
+ * get_users() and other WordPress APIs — where there is no return value
+ * of our own to check.
+ *
  * Neither variant changes a SUCCESSFUL return shape, which is why
  * adopting the throwing one required no caller rewrites.
  *
@@ -175,11 +193,79 @@ trait GuardsReadFailures
         return is_array($rows) ? array_values($rows) : [];
     }
 
+    /**
+     * Run a SELECT that expects at most ONE row, verified the same way.
+     *
+     * The `get_row()` shape. `get_row()` returns null BOTH for no-such-row
+     * and for a read that did not run, which is why every caller that
+     * guarded it had to run its guard on the null path too and leave a
+     * comment explaining that it must. When $failClosed, null here has
+     * ONE meaning: the query matched no row.
+     *
+     * @param  string $method usually `__FUNCTION__` at the call site
+     * @return object|null the first row, or null when nothing matched
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function runReadRow(string $sql, string $method, bool $failClosed): ?object
+    {
+        $rows = self::runRead($sql, $method, $failClosed);
+        $row  = $rows[0] ?? null;
+
+        return is_object($row) ? $row : null;
+    }
+
+    /**
+     * Run a SELECT and return the FIRST COLUMN OF THE FIRST ROW.
+     *
+     * The `get_var()` shape, and a string (or null) for the same reason
+     * wpdb's is: a column arrives from the driver as a string, and the
+     * callers already cast what they get.
+     *
+     * ⚠ $failClosed is what removes the ambiguity, not this method. With
+     * it TRUE a read that did not run throws, so null means no such row
+     * and nothing else. With it FALSE runRead() returns [], so null stays
+     * exactly as ambiguous as get_var()'s — deliberately: a fail-SAFE
+     * caller's whole contract is that it carries on with the empty shape.
+     *
+     * @param  string $method usually `__FUNCTION__` at the call site
+     * @return string|null
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function runReadVar(string $sql, string $method, bool $failClosed): ?string
+    {
+        $row = self::runReadRow($sql, $method, $failClosed);
+        if ($row === null) {
+            return null;
+        }
+
+        $values = array_values(get_object_vars($row));
+        $first  = $values[0] ?? null;
+        if (!is_scalar($first)) {
+            // A column yields a scalar or SQL NULL; nothing else reaches here.
+            return null;
+        }
+
+        return (string) $first;
+    }
+
     /** The error string left behind by the most recent query, if any. */
     private static function lastReadError(): string
     {
         global $wpdb;
 
         return isset($wpdb->last_error) ? (string) $wpdb->last_error : '';
+    }
+
+    /**
+     * Start a read from a clean `last_error`, so guardRead*() never blames
+     * it for an error an earlier, unrelated query left behind. For reads that
+     * go through a WordPress API rather than runRead() (which resets itself),
+     * e.g. MemberSearchCandidates' get_users() lookups (F-432).
+     */
+    private static function clearReadError(): void
+    {
+        global $wpdb;
+
+        $wpdb->last_error = '';
     }
 }

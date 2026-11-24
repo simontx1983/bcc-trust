@@ -44,7 +44,9 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\BlogCoverImageWriter;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedUnavailable;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Services\ClaimService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use WP_REST_Request;
@@ -194,11 +196,17 @@ final class PagesEndpoint
      * GET /pages/:id/feed — the posts written for a validator page, newest
      * first. Public, and filtered by the post marker only: a post stays here
      * after its author stops being the page's operator.
+     *
+     * A SECRET page the viewer may not see (PageAccess) answers exactly as a
+     * missing page does.
      */
     public function feed(WP_REST_Request $request): WP_REST_Response
     {
         $pageId = (int) $request->get_param('id');
-        if ($pageId <= 0 || !ValidatorPageOperatorAuthority::isValidatorPage($pageId)) {
+        if ($pageId <= 0
+            || !ValidatorPageOperatorAuthority::isValidatorPage($pageId)
+            || !PageAccess::viewerMaySeeId($pageId, get_current_user_id())
+        ) {
             return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
         }
 
@@ -441,7 +449,7 @@ final class PagesEndpoint
         // If the user already has a verified claim, return 200 with
         // status="already_verified" so the frontend doesn't have to
         // distinguish from a fresh success.
-        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($existing !== null && (string) $existing->status === 'verified') {
             $role = (string) $existing->claim_role;
 
@@ -525,7 +533,7 @@ final class PagesEndpoint
         // its trust-scoring event) is already in place — log and
         // continue rather than rolling back.
         $role       = (string) ($result['role'] ?? 'operator');
-        $underlying = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
+        $underlying = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($underlying !== null) {
             $mirror = ClaimRepository::createExclusiveClaim(
                 $userId,
@@ -759,7 +767,7 @@ final class PagesEndpoint
     }
 
     /**
-     * @param array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool} $result
+     * @param array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string} $result
      */
     private static function mapClaimFailure(array $result): WP_REST_Response
     {
@@ -837,6 +845,21 @@ final class PagesEndpoint
                 "Holding an NFT doesn't make you this collection's creator.",
                 403,
                 ['reason' => 'holder_not_owner']
+            );
+        }
+
+        // F-515: the validator cannot be claimed at all (ValidatorClaimSupport).
+        // Final, never a wallet problem: the message is the same hint the
+        // card shows, and `unclaimable_reason_code` is the card's code.
+        if (($result['error'] ?? '') === 'not_claimable') {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                (string) $result['message'],
+                403,
+                [
+                    'reason'                  => 'not_claimable',
+                    'unclaimable_reason_code' => (string) ($result['reason_code'] ?? ''),
+                ]
             );
         }
 

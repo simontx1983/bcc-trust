@@ -11,6 +11,7 @@ use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\PageOwnerResolver;
 use BCC\Trust\Core\Services\ReviewReplyService;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -47,6 +48,19 @@ final class ReviewReplyServiceTest extends TestCase
     protected function setUp(): void
     {
         require_once __DIR__ . '/../Stubs/review-reply-service-stubs.php';
+        // F-361 — edit() now wraps its write in PeepSoAddPostGuard::pinOnly().
+        // The REAL guard, and the loader throws rather than skipping.
+        require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+        $GLOBALS['__bcc_pin_at_write'] = [];
+        // forReviews() checks the shown reply's author with
+        // ProfileAccess::filterVisible() (PeepSoUserSearch). Everyone is
+        // visible unless a test says otherwise.
+        require_once __DIR__ . '/../Stubs/filter-visible-stubs.php';
+        $GLOBALS['__bcc_fv'] = [
+            'visible'     => array_fill_keys([self::MEMBER, self::REVIEWER, self::STRANGER, self::OPERATOR, self::OWNER, self::NEW_OPERATOR], true),
+            'admin'       => false,
+            'constructed' => [],
+        ];
         \ReplyWorld::reset();
         \ReplyWorld::$reviews[self::VOTE] = ['voter' => self::REVIEWER, 'page' => self::selfPage()];
     }
@@ -105,12 +119,12 @@ final class ReviewReplyServiceTest extends TestCase
     {
         \ReplyWorld::$reviews[self::VOTE] = ['voter' => self::MEMBER, 'page' => self::selfPage()];
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::MEMBER, self::VOTE, 'me again')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::MEMBER, self::VOTE, 'me again')), 'F-531: the same answer as a missing review');
     }
 
     public function testAThirdPartyCannotReply(): void
     {
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::STRANGER, self::VOTE, 'drive-by')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::STRANGER, self::VOTE, 'drive-by')), 'F-531: the same answer as a missing review');
         self::assertSame([], \ReplyWorld::$published, 'nothing written');
     }
 
@@ -119,7 +133,7 @@ final class ReviewReplyServiceTest extends TestCase
         $this->onValidatorPage(self::OPERATOR);
         \ReplyWorld::$owners[self::VALIDATOR_PAGE] = self::OWNER; // the page owner is NOT the answerer here
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OWNER, self::VOTE, 'not me')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OWNER, self::VOTE, 'not me')));
         self::assertNull(self::code(self::service()->create(self::OPERATOR, self::VOTE, 'operator here')));
     }
 
@@ -127,7 +141,7 @@ final class ReviewReplyServiceTest extends TestCase
     {
         $this->onValidatorPage(0);
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OPERATOR, self::VOTE, 'x')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OPERATOR, self::VOTE, 'x')));
     }
 
     public function testAClaimedProjectPageIsAnsweredByItsOwnerAndAnUnownedPlaceholderByNobody(): void
@@ -138,7 +152,7 @@ final class ReviewReplyServiceTest extends TestCase
         \ReplyWorld::$owners[self::PLACEHOLDER]  = 0;
 
         self::assertNull(self::code(self::service()->create(self::OWNER, self::VOTE, 'owner reply')));
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OWNER, 71, 'x')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OWNER, 71, 'x')));
         self::assertFalse(self::service()->answersFor(self::PLACEHOLDER, 0));
     }
 
@@ -203,6 +217,73 @@ final class ReviewReplyServiceTest extends TestCase
         self::assertSame('bcc_unauthorized', self::code(self::service()->create(0, self::VOTE, 'x')));
     }
 
+    // ── F-531: one answer for every refusal about the review ────────────
+
+    /**
+     * A missing review, the reviewer's own, a stranger's, an unanswered
+     * placeholder's: byte-identical, so the answer never says which.
+     */
+    public function testEveryRefusalToReplyIsTheSameAnswer(): void
+    {
+        \ReplyWorld::$reviews[71] = ['voter' => self::STRANGER, 'page' => self::PLACEHOLDER];
+        \ReplyWorld::$owners[self::PLACEHOLDER] = 0;
+
+        $missing = self::service()->create(self::STRANGER, 9999, 'x');
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Not found.'], $missing);
+        foreach ([
+            'a stranger on a real review'    => self::service()->create(self::STRANGER, self::VOTE, 'x'),
+            'the reviewer on their own'      => self::service()->create(self::REVIEWER, self::VOTE, 'x'),
+            'anyone on an unowned page'      => self::service()->create(self::OWNER, 71, 'x'),
+        ] as $case => $answer) {
+            self::assertSame($missing, $answer, $case);
+        }
+        self::assertSame([], \ReplyWorld::$published);
+    }
+
+    /** No review, no reply of theirs, a frozen one, a handed-over one: one answer. */
+    public function testEveryRefusalToEditOrDeleteIsTheSameAnswer(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'old');
+        \ReplyWorld::$reviews[72] = ['voter' => self::STRANGER, 'page' => self::VALIDATOR_PAGE];
+        self::service()->create(self::OPERATOR, 72, 'frozen');
+        \ReplyWorld::hide(72, self::OPERATOR);
+
+        $missing = self::service()->update(self::STRANGER, 9999, 'x');
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Not found.'], $missing);
+        $answers = [
+            'no reply of theirs on a real review' => self::service()->update(self::STRANGER, self::VOTE, 'x'),
+            'their reply is frozen'               => self::service()->update(self::OPERATOR, 72, 'x'),
+            'delete, no reply of theirs'          => self::service()->delete(self::STRANGER, self::VOTE),
+        ];
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
+        $answers['the page changed hands'] = self::service()->update(self::OPERATOR, self::VOTE, 'x');
+
+        foreach ($answers as $case => $answer) {
+            self::assertSame($missing, $answer, $case);
+        }
+        self::assertSame('old', \ReplyWorld::$replies[self::VOTE][0]['body']);
+    }
+
+    /**
+     * The throttle comes FIRST: a throttled caller is refused before any
+     * review is read, whatever they ask for, so probes are rate-limited too.
+     */
+    public function testTheThrottleRunsBeforeAnythingIsLookedUp(): void
+    {
+        \ReplyWorld::$throttled = true;
+        \ReplyWorld::$readFails = true; // any review or reply read would answer 503
+
+        foreach ([
+            'create, missing review' => self::service()->create(self::STRANGER, 9999, 'x'),
+            'create, not the party'  => self::service()->create(self::STRANGER, self::VOTE, 'x'),
+            'create, empty body'     => self::service()->create(self::MEMBER, self::VOTE, ''),
+            'update, missing review' => self::service()->update(self::STRANGER, 9999, 'x'),
+        ] as $case => $answer) {
+            self::assertSame('bcc_rate_limited', self::code($answer), $case);
+        }
+    }
+
     // ── edit and delete ─────────────────────────────────────────────────
 
     public function testOnlyTheAuthorEditsAndTheEditIsStamped(): void
@@ -265,13 +346,193 @@ final class ReviewReplyServiceTest extends TestCase
         self::assertSame('from the new operator', self::service()->forReviews(0, self::rows(self::VOTE))[self::VOTE]['reply']['body'] ?? null);
     }
 
+
+    /**
+     * The shown reply follows its author's profile visibility for the
+     * viewer: a reply by an author the viewer may not see (profile level,
+     * suspension, a block either way) is not shown, author and text alike.
+     * The viewer's own stale reply needs no check.
+     */
+    public function testAReplyWhoseAuthorTheViewerMayNotSeeIsNotShown(): void
+    {
+        self::service()->create(self::MEMBER, self::VOTE, 'the member answers');
+        self::assertSame('the member answers', self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE]['reply']['body'] ?? null, 'control: visible');
+
+        unset($GLOBALS['__bcc_fv']['visible'][self::MEMBER]);
+        $bundle = self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE];
+
+        self::assertNull($bundle['reply'], 'not shown to a viewer the author is hidden from');
+        self::assertFalse($bundle['can_reply']['allowed'], 'and the stranger still may not reply');
+    }
+
+    /**
+     * The page's own Reviews tab ($pageMayAnswer). PeepSo's profile ladder
+     * (profile-access-stubs.php) and bcc-core's REAL block read over a
+     * recording $wpdb, for a stranger reading a validator page whose
+     * operator's profile is "only me".
+     */
+    private function pageAttributionWorld(): void
+    {
+        require_once __DIR__ . '/../Stubs/profile-access-stubs.php';
+        require_once __DIR__ . '/../Stubs/profile-level-block-wpdb.php';
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoBlockRepository.php');
+
+        $GLOBALS['__bcc_profile_access'] = [
+            'viewer_id' => self::STRANGER,
+            'levels'    => [self::OPERATOR => 40],
+            'verdicts'  => [10 => true, 20 => true, 40 => false],
+        ];
+        $GLOBALS['__bcc_fv_viewer'] = self::STRANGER;
+        $GLOBALS['wpdb']            = new \BccProfileLevelBlockWpdb();
+
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'the operator answers');
+        unset($GLOBALS['__bcc_fv']['visible'][self::OPERATOR]);
+    }
+
+    public function testOnThePagesTabAReplyHiddenOnlyByItsAuthorsProfileLevelIsKeptAsThePages(): void
+    {
+        $this->pageAttributionWorld();
+
+        $bundles = self::service()->forReviews(self::STRANGER, self::rows(self::VOTE), true);
+
+        self::assertSame('the operator answers', $bundles[self::VOTE]['reply']['body'] ?? null);
+        self::assertTrue($bundles[self::VOTE]['reply']['as_page'] ?? false, 'marked for the page shaper');
+        self::assertSame([], ReviewReplyService::replyAuthorIds($bundles), 'its author is never prefetched');
+        self::assertSame('not_author', $bundles[self::VOTE]['reply']['permissions']['can_edit']['reason_code']);
+        self::assertSame('not_author', $bundles[self::VOTE]['reply']['permissions']['can_delete']['reason_code']);
+    }
+
+    public function testTheMembersTabNeverKeepsAHiddenAuthorsReply(): void
+    {
+        $this->pageAttributionWorld();
+
+        self::assertNull(self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE]['reply']);
+        self::assertSame([], $GLOBALS['wpdb']->queries, 'nor reads anything to decide');
+    }
+
+    /** @return array<string, array{string}> */
+    public static function otherReasons(): array
+    {
+        return [
+            'the viewer blocked the author' => ['blocked'],
+            'the author blocked the viewer' => ['blocker'],
+            'the block read failed'         => ['block_read_failed'],
+            'the author is suspended'       => ['suspended'],
+            'the author is banned'          => ['banned'],
+            'the profile level admits the viewer (dropped for another reason)' => ['public'],
+        ];
+    }
+
+    #[DataProvider('otherReasons')]
+    public function testOnThePagesTabEveryOtherReasonStillHidesTheReply(string $reason): void
+    {
+        $this->pageAttributionWorld();
+        match ($reason) {
+            'blocked'           => $GLOBALS['wpdb']->blocks = [[self::STRANGER, self::OPERATOR]],
+            'blocker'           => $GLOBALS['wpdb']->blocks = [[self::OPERATOR, self::STRANGER]],
+            'block_read_failed' => $GLOBALS['wpdb']->fail = true,
+            'suspended'         => \ReplyWorld::$suspended[self::OPERATOR] = true,
+            'banned'            => $GLOBALS['__bcc_profile_access']['roles'] = [self::OPERATOR => 'ban'],
+            'public'            => $GLOBALS['__bcc_profile_access']['levels'] = [self::OPERATOR => 10],
+        };
+
+        self::assertNull(self::service()->forReviews(self::STRANGER, self::rows(self::VOTE), true)[self::VOTE]['reply']);
+    }
+
+    /** One visibility batch per page, constrained to the shown replies' authors, not a search. */
+    public function testTheAuthorCheckIsOneBatchForThePage(): void
+    {
+        \ReplyWorld::$reviews[71] = ['voter' => self::STRANGER, 'page' => self::selfPage()];
+        self::service()->create(self::MEMBER, self::VOTE, 'first');
+        self::service()->create(self::MEMBER, 71, 'second');
+        $GLOBALS['__bcc_fv']['constructed'] = [];
+
+        self::service()->forReviews(self::REVIEWER, self::rows(self::VOTE, 71));
+
+        $calls = $GLOBALS['__bcc_fv']['constructed'];
+        self::assertCount(1, $calls);
+        self::assertSame([self::MEMBER], array_values(array_unique(array_map('intval', (array) $calls[0]['args']['include']))));
+        self::assertTrue((bool) ($calls[0]['args'][\BCC\Trust\Core\Support\PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT] ?? false), 'profile visibility, not the search opt-out');
+        self::assertSame('', $calls[0]['search']);
+    }
+
+    /**
+     * shownAuthors() is the tabs' decision, and the one a reply report asks
+     * (FeedItemReportVisibility), so the two cannot drift.
+     */
+    public function testShownAuthorsIsTheDecisionTheTabsAndReportsShare(): void
+    {
+        $this->pageAttributionWorld();
+
+        self::assertSame([self::MEMBER => ReviewReplyService::SHOWN_AS_AUTHOR], ReviewReplyService::shownAuthors([self::MEMBER], true), 'an author the viewer may see');
+        self::assertSame([self::OPERATOR => ReviewReplyService::SHOWN_AS_PAGE], ReviewReplyService::shownAuthors([self::OPERATOR], true), "hidden only by profile level, on a page's tab");
+        self::assertSame([], ReviewReplyService::shownAuthors([self::OPERATOR], false), "never on a member's tab");
+        self::assertSame(
+            [self::MEMBER => ReviewReplyService::SHOWN_AS_AUTHOR, self::OPERATOR => ReviewReplyService::SHOWN_AS_PAGE],
+            ReviewReplyService::shownAuthors([self::MEMBER, self::OPERATOR], true),
+            'one batch decides each author'
+        );
+
+        $GLOBALS['wpdb']->blocks = [[self::OPERATOR, self::STRANGER]];
+        self::assertSame([], ReviewReplyService::shownAuthors([self::OPERATOR], true), 'a block hides the author on every tab');
+    }
+
+    /**
+     * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing their own reply.
+     *
+     * #772 pinned the reply PUBLISH (inside ActivityStreamWriter); this is
+     * the EDIT, a separate `wp_update_post()` on the same post, reached
+     * straight from the operator's own request. An update is not a quieter
+     * write than an insert: it reaches the same `wp_insert_post` action,
+     * where third-party listeners run. Rationale: F-361 (private tracker).
+     *
+     * ⚠ The snapshot is taken INSIDE the write, because the guard restores
+     * the request in a `finally`.
+     */
+    public function testTheReplyEditWriteIsPinned(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'original');
+
+        // Only the EDIT is under test — the create's own (already pinned)
+        // writes are discarded so a pass cannot come from them.
+        $GLOBALS['__bcc_pin_at_write'] = [];
+
+        $_GET = $_POST = $_REQUEST = [
+            'mood'     => '7',
+            'location' => 'somewhere else',
+            'anon_id'  => '41',
+            'group_id' => '900',
+        ];
+
+        self::assertNull(self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited')));
+
+        /** @var list<array{fn: string, get: array<string, mixed>, post: array<string, mixed>}> $writes */
+        $writes = $GLOBALS['__bcc_pin_at_write'];
+        self::assertNotEmpty($writes, 'the write never ran — the fixture is not measuring anything');
+
+        foreach ($writes as $w) {
+            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — the query string is read FIRST');
+            // ⚠ PINNED, NOT UNSET. A reader of these keys can fall back to
+            // a source that merely UNSETTING them does not cover, so only a
+            // present key at a neutral value closes the path. Rationale: F-361 (private tracker).
+            self::assertArrayHasKey('mood', $w['post'], $w['fn'] . ': mood must be pinned, not unset');
+            self::assertSame(0, $w['post']['mood'], $w['fn'] . ': mood neutral during the write');
+            self::assertSame(0, $w['post']['anon_id'], $w['fn'] . ': anon_id neutral during the write');
+            self::assertSame('', $w['post']['location'], $w['fn'] . ': location neutral during the write');
+            self::assertSame(0, $w['post']['group_id'], $w['fn'] . ': group_id neutral during the write');
+        }
+    }
+
     public function testTheOldAuthorCanDeleteButNotEditAStaleReply(): void
     {
         $this->onValidatorPage(self::OPERATOR);
         self::service()->create(self::OPERATOR, self::VOTE, 'old');
         \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited after losing the page')));
+        self::assertSame('bcc_not_found', self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited after losing the page')), 'F-531: the same answer as no reply');
         self::assertSame('old', \ReplyWorld::$replies[self::VOTE][0]['body']);
         self::assertSame(['deleted' => true], self::service()->delete(self::OPERATOR, self::VOTE));
     }

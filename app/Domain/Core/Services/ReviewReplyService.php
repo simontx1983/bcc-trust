@@ -8,8 +8,10 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\ReviewReplyRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Feed\ActivityStreamWriter;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -50,6 +52,12 @@ final class ReviewReplyService
 {
     public const BODY_MAX_LENGTH = 1000;
 
+    /** {@see shownAuthors()}: the reply shows its author. */
+    public const SHOWN_AS_AUTHOR = 'author';
+
+    /** {@see shownAuthors()}: the reply stands as the page's response. */
+    public const SHOWN_AS_PAGE = 'page';
+
     /** Seconds a create waits for a concurrent create on the same review. */
     private const CREATE_LOCK_WAIT = 5;
 
@@ -83,10 +91,28 @@ final class ReviewReplyService
      * (logged): a review list must still render, and a can_reply that
      * guessed "no reply yet" could offer a duplicate.
      *
+     * The shown reply follows its AUTHOR's profile visibility for this
+     * viewer, by {@see shownAuthors()} (one batch for the page: profile
+     * level, suspension, blocks either way; not the search opt-out, since
+     * this is not a search), and a reply whose author the viewer may not
+     * see is not shown, author and text alike. A check that cannot
+     * answer shows none. `viewer_stale_reply` is the viewer's own and needs
+     * no check. ⚠ filterVisible() reads the CURRENT user, so $viewerId must
+     * be the request's viewer, as it is on both Reviews tabs.
+     *
+     * $pageMayAnswer (the page's own Reviews tab only): a reply whose author
+     * is hidden from this viewer ONLY by the level they chose for their
+     * profile (ProfileAccess::hiddenOnlyByProfileLevel()) is kept, marked
+     * `as_page`, and shown as the PAGE's response with nothing of the
+     * person (CardReviewsService::withReply()). A block either way, a
+     * suspension, a banned author, or anything unread still hides it. The
+     * member's Reviews tab never passes it. The `as_page` marker never
+     * reaches the wire: both shapers copy named keys only.
+     *
      * @param list<array{id: int, page_id: int, voter_user_id: int}> $reviews
-     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
+     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
      */
-    public function forReviews(int $viewerId, array $reviews): array
+    public function forReviews(int $viewerId, array $reviews, bool $pageMayAnswer = false): array
     {
         $voteIds = [];
         foreach ($reviews as $r) {
@@ -125,15 +151,89 @@ final class ReviewReplyService
                     : self::deny('unavailable'),
             ];
         }
+
+        // Each shown reply's author must be shown to this viewer: one
+        // decision for the page ({@see shownAuthors()}).
+        $authorIds = [];
+        foreach ($out as $bundle) {
+            if ($bundle['reply'] !== null) {
+                $authorIds[] = $bundle['reply']['author_id'];
+            }
+        }
+        if ($authorIds !== []) {
+            $shown = self::shownAuthors($authorIds, $pageMayAnswer);
+
+            foreach ($out as $voteId => $bundle) {
+                $reply = $bundle['reply'];
+                if ($reply === null) {
+                    continue;
+                }
+                $as = $shown[$reply['author_id']] ?? null;
+                if ($as === self::SHOWN_AS_PAGE) {
+                    $reply['as_page']      = true;
+                    $out[$voteId]['reply'] = $reply;
+                } elseif ($as === null) {
+                    $out[$voteId]['reply'] = null;
+                }
+            }
+        }
+
         return $out;
+    }
+
+    /**
+     * Of $authorIds (reply authors), how a Reviews tab shows each one's
+     * reply to the CURRENT viewer, keyed by author id:
+     *   - SHOWN_AS_AUTHOR: the viewer may see the author;
+     *   - SHOWN_AS_PAGE ($pageMayAnswer, the page's own tab only): the
+     *     author is hidden from the viewer ONLY by the level they chose for
+     *     their profile, so the reply stands as the page's response.
+     * An author missing from the result is not shown at all: a block either
+     * way, a suspension, a banned author, or anything that could not be read.
+     *
+     * The ONE decision for the Reviews tabs ({@see forReviews()}) and for
+     * reporting a reply (FeedItemReportVisibility), so a reply can be
+     * reported exactly where it is shown. One ProfileAccess::filterVisible()
+     * batch (not the search opt-out: this is not a search), then one
+     * ProfileAccess::hiddenOnlyByProfileLevel() batch for the authors it
+     * left out.
+     *
+     * ⚠ CURRENT VIEWER ONLY, as both of those are: a caller asking about
+     * another viewer must refuse instead of calling this.
+     *
+     * @param list<int> $authorIds
+     * @return array<int, 'author'|'page'>
+     */
+    public static function shownAuthors(array $authorIds, bool $pageMayAnswer): array
+    {
+        if ($authorIds === []) {
+            return [];
+        }
+        $shown = array_fill_keys(ProfileAccess::filterVisible($authorIds, false), self::SHOWN_AS_AUTHOR);
+
+        $hidden = [];
+        foreach ($authorIds as $id) {
+            if (!isset($shown[$id])) {
+                $hidden[$id] = $id;
+            }
+        }
+        if ($pageMayAnswer && $hidden !== []) {
+            foreach (ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)) as $id) {
+                $shown[$id] = self::SHOWN_AS_PAGE;
+            }
+        }
+
+        return $shown;
     }
 
     /**
      * The author ids a list path must prefetch for forReviews() output: the
      * shown reply's and the viewer's stale reply's. A summary built without
      * its prefetch rows would show zero followers rather than re-reading.
+     * A reply shown as the page's (`as_page`) shows no person, so its
+     * author is never prefetched.
      *
-     * @param array<int, array{reply: array{author_id: int}|null, viewer_stale_reply: array{author_id: int}|null}> $bundles
+     * @param array<int, array{reply: array{author_id: int, as_page?: true}|null, viewer_stale_reply: array{author_id: int}|null}> $bundles
      * @return list<int>
      */
     public static function replyAuthorIds(array $bundles): array
@@ -141,7 +241,7 @@ final class ReviewReplyService
         $ids = [];
         foreach ($bundles as $bundle) {
             foreach ([$bundle['reply'], $bundle['viewer_stale_reply']] as $reply) {
-                if ($reply !== null) {
+                if ($reply !== null && !isset($reply['as_page'])) {
                     $ids[$reply['author_id']] = true;
                 }
             }
@@ -196,6 +296,11 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs FIRST, before anything about the review is
+        // looked up, so every attempt counts, refused ones included.
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -210,13 +315,15 @@ final class ReviewReplyService
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
+        // F-531: a review that is missing, removed or hidden, and one this
+        // viewer may not reply to, get the SAME answer.
         if ($review === null) {
-            return self::error('bcc_not_found', 'Review not found.');
+            return self::notFound();
         }
         $pageId  = (int) $review->page_id;
         $voterId = (int) $review->voter_user_id;
         if ($voterId === $viewerId || !$this->answersFor($pageId, $viewerId)) {
-            return self::error('bcc_forbidden', 'Only the reviewed member or page can reply to this review.');
+            return self::notFound();
         }
 
         // One create per review at a time, so two concurrent requests from
@@ -236,10 +343,6 @@ final class ReviewReplyService
                 }
             } catch (RepositoryReadFailure $e) {
                 return self::unavailable();
-            }
-
-            if (!self::withinRateLimit($viewerId)) {
-                return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
             }
 
             $written = $this->writer->publishReviewReply($viewerId, $voteId, $clean);
@@ -281,6 +384,10 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs first, as in create().
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -293,24 +400,25 @@ final class ReviewReplyService
         try {
             $review = $this->votes->findReviewForReply($voteId);
             if ($review === null) {
-                return self::error('bcc_not_found', 'Review not found.');
+                return self::notFound();
             }
             $reply = $this->replies->findForVoteByAuthor($voteId, $viewerId);
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
-        // Not theirs, gone, or frozen by a moderator: the same answer.
-        if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
-        }
-        if (!$this->answersFor((int) $review->page_id, $viewerId)) {
-            return self::error('bcc_forbidden', 'You no longer answer for this page, so this reply can no longer be edited.');
-        }
-        if (!self::withinRateLimit($viewerId)) {
-            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        // F-531: no review, not theirs, frozen by a moderator, or handed
+        // over (the author no longer answers for the page): the same answer.
+        if ($reply === null || $reply['hidden'] || !$this->answersFor((int) $review->page_id, $viewerId)) {
+            return self::notFound();
         }
 
-        $updated = wp_update_post(['ID' => $reply['post_id'], 'post_content' => $clean], true);
+        // ⚠ F-361 — pinned. #772 pinned the reply PUBLISH (in
+        // ActivityStreamWriter); this is the EDIT, a separate write on the
+        // same post from the operator's own request.
+        $updated = PeepSoAddPostGuard::pinOnly(
+            [], // a reply edit drives nothing through the request
+            static fn () => wp_update_post(['ID' => $reply['post_id'], 'post_content' => $clean], true)
+        );
         if (is_wp_error($updated) || (int) $updated <= 0) {
             return self::unavailable();
         }
@@ -347,7 +455,7 @@ final class ReviewReplyService
             return self::unavailable();
         }
         if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
+            return self::notFound();
         }
         if (!$this->writer->deleteReviewReply($reply['post_id'], $reply['act_id'])) {
             return self::unavailable();
@@ -361,11 +469,12 @@ final class ReviewReplyService
      * member-summary shape the review rows carry as their `author` (so a
      * Reviews list renders both with one component). Returns null when the
      * author no longer exists, as a review row whose author vanished is
-     * skipped rather than shown faceless.
+     * skipped rather than shown faceless. `author_kind` is `member`; see
+     * asPage() for the other kind.
      *
-     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>} $reply
+     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true} $reply
      * @param array<string, mixed>|null $prefetched a MemberSummaryPrefetcher bundle on list paths
-     * @return array{id: int, body: string, author: array<string, mixed>, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null
+     * @return array{id: int, body: string, author_kind: 'member', author: array<string, mixed>, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null
      */
     public function withAuthor(array $reply, int $viewerId, ?array $prefetched): ?array
     {
@@ -377,7 +486,42 @@ final class ReviewReplyService
         return [
             'id'          => $reply['id'],
             'body'        => $reply['body'],
+            'author_kind' => 'member',
             'author'      => $author,
+            'posted_at'   => $reply['posted_at'],
+            'edited_at'   => $reply['edited_at'],
+            'feed_id'     => $reply['feed_id'],
+            'permissions' => $reply['permissions'],
+        ];
+    }
+
+    /**
+     * The wire shape of a reply shown as the PAGE's response (forReviews()
+     * with $pageMayAnswer): the page in place of the person.
+     *
+     * ⚠ NAMED KEYS ONLY. Nothing of the author is copied: no `author`, no
+     * id, handle, name, avatar or anything else of theirs. `permissions`
+     * were computed server-side for this viewer, who is never the author
+     * (the author's own view always sees themselves), so edit and delete
+     * are `not_author`. `feed_id` is the report target, which names no one.
+     *
+     * @param array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true} $reply
+     * @param array{id: int, card_kind: string, name: string, handle: string, avatar_url: string} $page the reviewed page, as its Card shows it
+     * @return array{id: int, body: string, author_kind: 'page', page: array{id: int, card_kind: string, name: string, handle: string, avatar_url: string}, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}
+     */
+    public static function asPage(array $reply, array $page): array
+    {
+        return [
+            'id'          => $reply['id'],
+            'body'        => $reply['body'],
+            'author_kind' => 'page',
+            'page'        => [
+                'id'         => $page['id'],
+                'card_kind'  => $page['card_kind'],
+                'name'       => $page['name'],
+                'handle'     => $page['handle'],
+                'avatar_url' => $page['avatar_url'],
+            ],
             'posted_at'   => $reply['posted_at'],
             'edited_at'   => $reply['edited_at'],
             'feed_id'     => $reply['feed_id'],
@@ -446,7 +590,7 @@ final class ReviewReplyService
      * (§1.4.5). For the page's response its author answers for the page by
      * construction, so editing needs only authorship and good standing. A
      * $stale reply is the viewer's own after a hand-over: deletable, never
-     * editable (update() refuses it with 403).
+     * editable (update() refuses it with the one not-found answer, F-531).
      *
      * @param array{author_id: int} $row
      * @return array{can_edit: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_delete: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_report: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}
@@ -556,6 +700,23 @@ final class ReviewReplyService
     private static function error(string $code, string $message): array
     {
         return ['error' => $code, 'message' => $message];
+    }
+
+    /**
+     * F-531: the ONE refusal for anything about the review or the reply, so
+     * no answer tells a caller whether a review exists, is hidden, or is
+     * someone else's to answer: a missing, removed or hidden review, one the
+     * caller may not reply to, a reply that is not theirs or is frozen, and
+     * a reply whose author no longer answers for the page. Refusals about
+     * the CALLER (sign-in, suspension, the rate limit, the body) are
+     * unchanged; they say nothing about any review. Rationale: F-531
+     * (private tracker).
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function notFound(): array
+    {
+        return self::error('bcc_not_found', 'Not found.');
     }
 
     /** @return array{error: string, message: string} */

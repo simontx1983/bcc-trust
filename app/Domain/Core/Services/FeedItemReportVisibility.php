@@ -37,7 +37,10 @@
  * Deliberately NOT applied: viewer-specific presentation filters
  * (mutual-block invisibility, caution-tier shadow limiting). Those live in
  * FeedRankingService's exclusion lists, and a member who blocked an author
- * may still need to report what that author posted.
+ * may still need to report what that author posted. A REVIEW REPLY is the
+ * exception: it is reportable exactly where its Reviews tab shows it, and
+ * the tab already applies its author's visibility, blocks included
+ * ({@see replyIsShownTo()}).
  *
  * @package BCC\Trust\Core\Services
  */
@@ -49,7 +52,9 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\GroupSyndicationGate;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\ProfileAccess;
 
@@ -57,6 +62,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type PostGroupFacts from PostGroupFactsRepository
+ */
 class FeedItemReportVisibility
 {
     /**
@@ -82,8 +90,15 @@ class FeedItemReportVisibility
     public function __construct(
         private readonly GroupsService $groups,
         private readonly HiddenActivityRepository $hidden,
-        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null
+        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null,
+        private ?\BCC\Trust\Core\Repositories\CommentRepository $comments = null
     ) {
+    }
+
+    /** Injected by tests; built lazily in production, as $votes is. */
+    private function comments(): \BCC\Trust\Core\Repositories\CommentRepository
+    {
+        return $this->comments ??= \BCC\Trust\Core\Plugin::instance()->commentRepository();
     }
 
     /**
@@ -140,10 +155,15 @@ class FeedItemReportVisibility
         // includes a reply that no longer renders after a hand-over (its
         // author no longer answers for the page; only they still see it).
         // Reviews are never group-tagged, so the group rule does not apply.
+        // F-532: the review's page must also pass PageAccess for this viewer,
+        // so a reply on a SECRET page they may not see answers as missing.
+        // And the Reviews tab must show this viewer the reply: a member's
+        // profile they may open, an author they may see (replyIsShownTo()).
         if ((int) ($activity->act_module_id ?? 0)
             === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
         ) {
-            return $this->isLive($activity) && $this->replyParentIsVisible($postId);
+            return $this->isLive($activity)
+                && $this->replyIsShownTo($postId, (int) ($activity->act_user_id ?? 0), $viewerId);
         }
         // Only modules a feed or permalink can show at all: the SAME
         // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
@@ -155,34 +175,104 @@ class FeedItemReportVisibility
         if (!FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return false;
         }
+        // ⚠ A COMMENT act is not a feed item, and nothing above can tell.
+        // PeepSo gives a comment's activity row the SAME module a status post
+        // carries, so it passes the allowlist, and every rule below would then
+        // be asked about the COMMENT: its own wp_post has no peepso_group_id
+        // (a secret group's comment reads as un-grouped) and its author's own
+        // §F-02 level. So a `feed_item` report on a comment under a secret
+        // group's post, a followers-only post or a page wall was FILED, where
+        // a missing id gets 404. Refused here, so no caller of canSee() can be
+        // handed one. (bcc-core #140's top-level-only read would do the same,
+        // but is not in production yet; this works on any core.)
+        if (FeedItemGate::isCommentAct($actId, $this->comments())) {
+            return false;
+        }
         if (!$this->isLive($activity)) {
             return false; // trashed/unpublished or moderation-hidden: no feed shows it
         }
-
-        if (!$this->groupRuleAllows($viewerId, $postId)) {
+        // A SECRET page's announcement (§4.32.8 writes it as the operator's
+        // own activity): a viewer the page does not admit gets what a missing
+        // post gets, so the delete and comment refusals and a `feed_item`
+        // report cannot tell them it exists. The feeds and the permalink
+        // apply the same rule (FeedRankingService::pageFilters()).
+        if (!AnnouncementPageAccess::mayViewerSeeRow($activity, $viewerId)) {
             return false;
         }
 
-        return self::audienceAllows($viewerId, $actId, $postId);
+        // F-461: the post's group facts, read ONCE for both rules below,
+        // through PostGroupFactsRepository, never get_post_meta(): a read
+        // that cannot be trusted refuses.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
+            return false;
+        }
+
+        if (!$this->groupRuleAllows($viewerId, $groupFacts)) {
+            return false;
+        }
+
+        return self::audienceAllows($viewerId, $actId, $postId, $groupFacts);
     }
 
     /**
      * F-345: is the review a reply (backing post $postId) answers still
      * showable — active and not moderation-hidden? Fails CLOSED: a failed
      * read is "not visible", so a reply is never reportable on a guess.
+     *
+     * F-532: and may $viewerId see the review's page? PageAccess decides for
+     * a PeepSo page (a SECRET page admits its members, invitees, author and
+     * site admins; a failed read admits no one). Rationale: F-532 (private
+     * tracker).
+     *
+     * And would the Reviews tab show $viewerId this reply? The reply is
+     * reportable exactly where it is shown:
+     *  - a review of a MEMBER (their self-page, which is not a PeepSo page):
+     *    only when the viewer may open that member's profile, as the
+     *    member's Reviews tab answers 403 otherwise (CardReviewsEndpoint);
+     *  - its author ($authorId, the reply's post author): by the tabs' own
+     *    decision, ReviewReplyService::shownAuthors(). A block either way,
+     *    a suspended or banned author, or a state that could not be read
+     *    refuses. On a page's review, an author hidden only by the level
+     *    they chose for their profile is still shown (as the page's
+     *    response), so that reply stays reportable.
+     * ⚠ Both read the CURRENT user (PeepSo answers for no one else), so a
+     * $viewerId that is not the request's user is refused rather than
+     * answered as someone else. Every caller passes the request's user.
+     * Unchanged: a reply whose author no longer answers for the page
+     * (hand-over) stays reportable while it is live.
      */
-    private function replyParentIsVisible(int $postId): bool
+    private function replyIsShownTo(int $postId, int $authorId, int $viewerId): bool
     {
+        if ($viewerId !== (int) get_current_user_id()) {
+            return false;
+        }
         $voteId = (int) get_post_meta($postId, '_bcc_activity_sidecar_id', true);
         if ($voteId <= 0) {
             return false;
         }
         $this->votes ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
         try {
-            return $this->votes->findReviewForReply($voteId) !== null;
+            $review = $this->votes->findReviewForReply($voteId);
         } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
             return false;
         }
+        if ($review === null) {
+            return false;
+        }
+
+        $pageId   = (int) $review->page_id;
+        $selfPage = MemberSelfPageService::isSelfPage($pageId);
+        $tabOpens = $selfPage
+            ? ProfileAccess::canViewProfile(MemberSelfPageService::ownerOfSelfPage($pageId))
+            : \BCC\Trust\Core\Support\PageAccess::viewerMaySeeId($pageId, $viewerId);
+        if (!$tabOpens) {
+            return false;
+        }
+
+        // A member's Reviews tab never shows a reply as the page's; a
+        // page's own tab does.
+        return isset(ReviewReplyService::shownAuthors([$authorId], !$selfPage)[$authorId]);
     }
 
     /**
@@ -218,7 +308,10 @@ class FeedItemReportVisibility
             return false;
         }
 
-        return $this->groupRuleAllows($viewerId, $postId);
+        // F-461: unreadable group facts are a refusal, never "no group".
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+
+        return $groupFacts !== null && $this->groupRuleAllows($viewerId, $groupFacts);
     }
 
     /**
@@ -237,14 +330,20 @@ class FeedItemReportVisibility
      * ALSO check that the post is group-tagged before letting this rescue
      * an item §F-02 refused — this method answers a group question and
      * says nothing about profile visibility.
+     *
+     * ⚠⚠ F-461: the facts come from {@see PostGroupFactsRepository}, never
+     * get_post_meta(): its read either answers or is null (refused
+     * upstream).
+     *
+     * @phpstan-param PostGroupFacts $groupFacts
      */
-    private function groupRuleAllows(int $viewerId, int $postId): bool
+    private function groupRuleAllows(int $viewerId, array $groupFacts): bool
     {
-        $groupRaw   = get_post_meta($postId, 'peepso_group_id', true);
-        $visibility = (string) get_post_meta($postId, '_bcc_post_visibility', true);
+        $groupRaw   = $groupFacts['group_raw'];
+        $visibility = $groupFacts['visibility'];
 
         // Not group-tagged at all: an ordinary global-feed post.
-        if ($groupRaw === '' || $groupRaw === false) {
+        if ($groupRaw === '') {
             return true;
         }
 
@@ -265,7 +364,7 @@ class FeedItemReportVisibility
         // fail-closed posture as `isVisibleGlobally()`. A refusal is not
         // final: it falls through to the group's own gate below, so a
         // MEMBER of the now-secret group still reads their own post.
-        if ($visibility === self::GLOBAL_VISIBILITY && self::syndicationAllows($postId)) {
+        if ($visibility === self::GLOBAL_VISIBILITY && self::syndicationAllows($groupFacts)) {
             return true;
         }
 
@@ -302,7 +401,10 @@ class FeedItemReportVisibility
      * ⚠ The admin exemption is {@see ProfileAccess::postVisibilityArgs()},
      * the SAME definition the profile and feed halves use, so the three
      * cannot drift into the listed-but-unopenable state F-02 exists to
-     * remove. Safe here because every caller is a per-viewer request path.
+     * remove. Safe here because every caller is a per-viewer request path
+     * whose viewer IS the request's user. A caller asking about someone
+     * else (as `FeedRankingService::canView()` does for a mentionee) must
+     * pass that viewer's own exemption instead; see postVisibilityArgs().
      * ⛔ A globally cached, viewer-independent payload (the hot feed, warmed
      * by cron into one shared blob) must NEVER reach this method: taking
      * the exemption there would store an ungated payload and serve it to
@@ -311,17 +413,28 @@ class FeedItemReportVisibility
      * @param int $actId The act whose `act_access` the rule reads. For a
      *        COMMENT that is its PARENT post's act, never the comment's
      *        own — a comment carries no audience of its own.
+     * @param array<string, mixed>|null $groupFacts `$postId`'s facts when
+     *        the caller already read them for its own group gate, so one
+     *        decision rests on ONE read. Null reads them here.
+     * @phpstan-param PostGroupFacts|null $groupFacts
      */
-    public static function audienceAllows(int $viewerId, int $actId, int $postId): bool
+    public static function audienceAllows(int $viewerId, int $actId, int $postId, ?array $groupFacts = null): bool
     {
         if ($actId <= 0 || $postId <= 0) {
+            return false;
+        }
+
+        // F-461: through PostGroupFactsRepository, never get_post_meta(): a
+        // read that cannot be trusted refuses.
+        $groupFacts ??= PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
             return false;
         }
 
         // Group-tagged: the group's rule governs. `(int) > 0` matches the
         // test CommentService::gateForParent uses, so a stored '0' is
         // treated as NOT group-tagged by both and gets the stricter path.
-        if ((int) get_post_meta($postId, 'peepso_group_id', true) > 0) {
+        if ((int) $groupFacts['group_raw'] > 0) {
             return true;
         }
 
@@ -493,18 +606,21 @@ class FeedItemReportVisibility
      * Reads the MULTI-VALUE form of `peepso_group_id`, as bcc-core does —
      * a post can carry more than one group id, and the single-value read
      * used for the gate below would silently consider only the first.
+     *
+     * ⚠ F-461: from the same {@see PostGroupFactsRepository} read as the
+     * group gate, never get_post_meta(): an empty list returns true below,
+     * so it must be the database's own answer.
+     *
+     * @phpstan-param PostGroupFacts $groupFacts
      */
-    private static function syndicationAllows(int $postId): bool
+    private static function syndicationAllows(array $groupFacts): bool
     {
-        $groupIds = array_values(array_filter(
-            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
-            static fn(int $id): bool => $id > 0
-        ));
+        $groupIds = $groupFacts['group_ids'];
         if ($groupIds === []) {
             return true;
         }
 
-        $privacyAtPost = get_post_meta($postId, GroupSyndicationGate::META_PRIVACY_AT_POST, true);
+        $privacyAtPost = $groupFacts['privacy_at_post'];
         if (GroupSyndicationGate::madeWhileNonOpen($privacyAtPost)) {
             // A deliberate non-open syndication passes whatever the
             // group's state is now.

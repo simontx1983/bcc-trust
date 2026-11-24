@@ -54,6 +54,7 @@ namespace BCC\Trust\Core\Services\Feed;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
 use BCC\Trust\Core\Services\PostsService;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -140,7 +141,16 @@ final class BlogStatusTransitionHandler
         // plugin upstream blocked WP's automatic call (some
         // performance plugins gate revisions on a custom filter).
         if (function_exists('wp_save_post_revision')) {
-            wp_save_post_revision($postId);
+            // ⚠ F-361 — A REVISION IS A POST INSERT.
+            // `wp_save_post_revision()` calls `_wp_put_post_revision()`
+            // (revision.php:99), which calls `wp_insert_post($post, true)`
+            // (revision.php:19) — so the `wp_insert_post` action fires on
+            // the REVISION row, where third-party listeners run. This write
+            // must stay inside `pinOnly`. Rationale: F-361 (private tracker).
+            PeepSoAddPostGuard::pinOnly(
+                [], // a revision drives nothing through the request
+                static fn () => wp_save_post_revision($postId)
+            );
         }
 
         // §D6 group blogs — a draft PARKS its intended group in sidecar

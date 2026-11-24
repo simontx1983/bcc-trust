@@ -41,6 +41,7 @@ use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\AnnouncementCommentRepository;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 
 if (!defined('ABSPATH')) {
@@ -106,7 +107,7 @@ final class AnnouncementCommentService
      */
     public function listThread(int $announcementId, ?int $limit, ?string $cursor, int $viewerId): array
     {
-        $row = $this->publicAnnouncementOrNull($announcementId);
+        $row = $this->publicAnnouncementOrNull($announcementId, $viewerId);
         if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
@@ -179,7 +180,7 @@ final class AnnouncementCommentService
             return self::fail(self::ERR_RATE_LIMITED, 'Too many comments. Please wait.', 429);
         }
 
-        $row = $this->publicAnnouncementOrNull($announcementId);
+        $row = $this->publicAnnouncementOrNull($announcementId, $viewerId);
         if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
@@ -206,6 +207,13 @@ final class AnnouncementCommentService
             // read as "always true". Coalesced instead, which is the same
             // behaviour without the dead check.
             $reason = $decision['reason_code'] ?? null;
+
+            // F-469: a standing that could not be READ is retryable, not a
+            // refusal: 503 `bcc_unavailable`, the same reason code on the
+            // wire, and nothing written.
+            if ($reason === Caps::REASON_STANDING_UNREADABLE) {
+                return self::fail(self::ERR_UNAVAILABLE, Caps::STANDING_UNREADABLE_HINT, 503, $reason);
+            }
 
             return self::fail(self::ERR_FORBIDDEN, 'Not permitted.', 403, $reason);
         }
@@ -275,7 +283,7 @@ final class AnnouncementCommentService
         }
 
         $announcementId = (int) ($comment->comment_post_ID ?? 0);
-        $row = $this->publicAnnouncementOrNull($announcementId);
+        $row = $this->publicAnnouncementOrNull($announcementId, $viewerId);
         if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
@@ -521,13 +529,19 @@ final class AnnouncementCommentService
     // ── shared helpers ───────────────────────────────────────────────────
 
     /**
-     * The announcement, only if it is PUBLICLY readable.
+     * The announcement, only if it is PUBLICLY readable, and its page is one
+     * the viewer may see.
+     *
+     * ⚠ A SECRET page's announcements are seen only by whoever may see the
+     * page (PageAccess: its author, site admins, its members and invitees).
+     * For anyone else this returns null, so the thread read, a new comment
+     * and a removal all answer the same 404 a missing announcement gets.
      *
      * ⚠ Composed through `AnnouncementRepository::findPublic()`, which applies
      * the canonical §4.32.1 three-predicate SQL. The predicate is not restated
      * here for the same reason A4's projection does not restate it: one copy.
      */
-    private function publicAnnouncementOrNull(int $announcementId): ?\stdClass
+    private function publicAnnouncementOrNull(int $announcementId, int $viewerId): ?\stdClass
     {
         if ($announcementId <= 0) {
             return null;
@@ -550,6 +564,10 @@ final class AnnouncementCommentService
         }
 
         if ($row === null) {
+            return null;
+        }
+
+        if (!PageAccess::viewerMaySeeId($pageId, $viewerId)) {
             return null;
         }
 

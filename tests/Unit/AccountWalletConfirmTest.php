@@ -350,6 +350,28 @@ final class AccountWalletConfirmTest extends TestCase
     }
 
     /**
+     * F-495: the session check reads the token's state again. When that read
+     * fails the token is UNKNOWN, not invalid: the door's 503 (keep the
+     * session, try again), never "sign in again".
+     */
+    public function testAnUnreadableTokenStateIsTheDoors503NotSignInAgain(): void
+    {
+        self::verifiedAgo(1, 49 * 3600);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
+        $GLOBALS['__bcc_token_state']['fail'] = true;
+
+        $res  = (new MyAccountEndpoint())->patchEmail(new \WP_REST_Request(['email' => 'new@example.com'] + self::walletProof($sig)));
+        $data = $res->get_data();
+
+        self::assertSame(503, $res->get_status());
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        $headers = new \ReflectionProperty($res, 'headers');
+        $headers->setAccessible(true);
+        self::assertSame('private, no-store', $headers->getValue($res)['Cache-Control'] ?? null);
+        self::assertTrue(self::challengeIsLive(), 'nothing spent');
+    }
+
+    /**
      * Every token mint in the plugin, and whether it is a real sign-in
      * (auth_time = now) or a continuation of the caller's session (keeps
      * auth_time). A wallet unlink or a credential change is NOT a sign-in:
@@ -887,14 +909,28 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertTrue($data['ok']);
     }
 
+    /**
+     * "Available now": exactly $reason, at an instant bracketed by two clock
+     * reads. Not assertSame(['at' => time(), …]): that time() is read BEFORE
+     * the call, and the code's own read can land in the next second (F-577).
+     */
+    private static function assertAvailableNow(string $reason): void
+    {
+        $before       = time();
+        $availability = AccountCredentialCheck::recoveryEmailAvailability(self::USER);
+        $after        = time();
+
+        self::assertSame(['at', 'reason'], array_keys($availability));
+        self::assertSame($reason, $availability['reason']);
+        self::assertGreaterThanOrEqual($before, $availability['at']);
+        self::assertLessThanOrEqual($after, $availability['at']);
+    }
+
     public function testAvailabilityIsNowForTheSignupWallet(): void
     {
         self::newWalletAccount(600);
 
-        self::assertSame(
-            ['at' => time(), 'reason' => 'signup_wallet'],
-            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
-        );
+        self::assertAvailableNow('signup_wallet');
     }
 
     public function testAvailabilityWaitsFor48HoursOnANewWallet(): void
@@ -902,10 +938,11 @@ final class AccountWalletConfirmTest extends TestCase
         // A placeholder account whose only wallet (not a signup wallet)
         // was verified an hour ago, before this sign-in.
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
-        self::verifiedAgo(1, 3600);
+        // Derived from the stamped instant, not a fresh time() (F-577).
+        $verifiedAt = self::verifiedAgo(1, 3600);
 
         self::assertSame(
-            ['at' => time() - 3600 + 48 * 3600, 'reason' => 'wallet_age'],
+            ['at' => $verifiedAt + 48 * 3600, 'reason' => 'wallet_age'],
             AccountCredentialCheck::recoveryEmailAvailability(self::USER)
         );
     }
@@ -914,10 +951,7 @@ final class AccountWalletConfirmTest extends TestCase
     {
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
 
-        self::assertSame(
-            ['at' => time(), 'reason' => 'wallet_age'],
-            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
-        );
+        self::assertAvailableNow('wallet_age');
     }
 
     public function testAvailabilityTakesTheEarliestQualifyingWallet(): void

@@ -35,11 +35,16 @@ final class FeedItemGateTest extends TestCase
 
     /** A COMMENT act: module 1, exactly like a status post. */
     private const COMMENT_ACT = 9777;
+    private const NOTICE_ACT  = 9205;
+    private const VIEWER      = 5;
 
     protected function setUp(): void
     {
         require_once __DIR__ . '/../Stubs/feed-item-gate-stubs.php';
+        require_once __DIR__ . '/../Stubs/announcement-page-access-stub.php';
         require_once CoreSibling::require('src/Feed/FeedItemNormalizer.php');
+        $GLOBALS['__bcc_apa']       = ['hidden' => [], 'calls' => []];
+        $GLOBALS['__bcc_fig_viewer'] = self::VIEWER;
 
         $GLOBALS['__bcc_fig_comment_acts'] = [];
         $GLOBALS['__bcc_fig_module_by_act'] = [
@@ -48,7 +53,38 @@ final class FeedItemGateTest extends TestCase
             self::REVIEW_ACT => '202',
             self::POLL_ACT   => '30',
             self::COMMENT_ACT => '1',
+            self::NOTICE_ACT  => '205',
         ];
+    }
+
+    // ── a SECRET page's announcement ────────────────────────────────
+
+    /**
+     * Reactions, stoke and helpful marks run check() first. A secret page's
+     * notice used to pass it and reach the "takes no reactions" 403, which
+     * told a stranger it exists; now it is the unknown id's 404.
+     */
+    public function testAHiddenNoticeIsRefusedLikeAnUnknownPostForTheSignedInViewer(): void
+    {
+        $GLOBALS['__bcc_apa']['hidden'] = [self::NOTICE_ACT];
+
+        $notice  = FeedItemGate::check(self::NOTICE_ACT);
+        $unknown = FeedItemGate::check(424242);
+
+        self::assertNotNull($notice);
+        self::assertSame($unknown?->get_data(), $notice->get_data(), 'byte-identical to an unknown id');
+        self::assertSame([self::NOTICE_ACT . ':' . self::VIEWER], $GLOBALS['__bcc_apa']['calls'], 'asked for the signed-in viewer');
+    }
+
+    public function testANoticeTheViewerMaySeePasses(): void
+    {
+        self::assertNull(FeedItemGate::check(self::NOTICE_ACT));
+    }
+
+    public function testAnyOtherModuleNeverAsksAboutAPage(): void
+    {
+        self::assertNull(FeedItemGate::check(self::STATUS_ACT));
+        self::assertSame([], $GLOBALS['__bcc_apa']['calls']);
     }
 
     // ── behaviour ───────────────────────────────────────────────────────

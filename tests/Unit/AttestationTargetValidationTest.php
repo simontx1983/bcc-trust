@@ -95,6 +95,12 @@ final class AttestationTargetValidationTest extends TestCase
             {
                 return $this->tier;
             }
+
+            // F-469: the gates read the tri-state.
+            public function getTierOrUnknown(int $userId): ?string
+            {
+                return \AttestTargetWorld::$tierUnreadable ? null : $this->tier;
+            }
         };
         $rep->tier = \AttestTargetWorld::$tier ?? $tier;
         (new \ReflectionProperty(AttestationService::class, 'reputationRepo'))->setValue($svc, $rep);
@@ -260,6 +266,20 @@ final class AttestationTargetValidationTest extends TestCase
     public function testAnUnreadableBlockTableIsARetryable503NeverAnAdmit(): void
     {
         \AttestTargetWorld::$blocked[self::MEMBER] = null;
+
+        [$code, $status] = self::outcome('user_profile', self::MEMBER);
+        self::assertSame(AttestationException::CODE_UNAVAILABLE, $code);
+        self::assertSame(503, $status);
+    }
+
+    /**
+     * F-469: a standing that could not be read is a retryable 503: never
+     * the neutral default (which would admit a caution attestor), and never
+     * the 403 "Reach Neutral" refusal either.
+     */
+    public function testAnUnreadableStandingIsARetryable503NeverAnAdmitOrARefusal(): void
+    {
+        \AttestTargetWorld::$tierUnreadable = true;
 
         [$code, $status] = self::outcome('user_profile', self::MEMBER);
         self::assertSame(AttestationException::CODE_UNAVAILABLE, $code);

@@ -27,6 +27,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\PublicIdentity;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -98,16 +99,31 @@ final class UserReviewsService
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
+        // F-528: for anyone but the member, reviews of SECRET pages this
+        // viewer may not see are left out, as PageAccess decides for each
+        // page: its members, invitees and author see it, as do site admins.
+        // The same ids go to the count and the page, so the total agrees.
+        // A read that cannot tell throws, and the route answers 503. The
+        // member and site admins see every page, so neither pays the read
+        // (nor its 503).
+        // Rationale: F-528 (private tracker).
+        $hiddenPageIds = $isSelf || \BCC\Trust\Core\Support\ProfileAccess::viewerIsExemptFromVisibility()
+            ? []
+            : \BCC\Trust\Core\Support\PageAccess::hiddenAmong(
+                $this->voteRepository->findSecretPageIdsReviewedBy($userId),
+                $viewerId
+            );
+
         // F-55: the count paired with findByVoterPaginated(): it excludes
         // moderation-hidden reviews exactly as the list does, so the total
         // and the pages agree. (countByVoter() still counts every active
         // vote for weight and stats; that is a separate product question.)
-        $total = $this->voteRepository->countReviewsByVoter($userId);
+        $total = $this->voteRepository->countReviewsByVoter($userId, $hiddenPageIds);
         if ($total === 0) {
             return self::emptyPage($page, $perPage, false);
         }
 
-        $rows = $this->voteRepository->findByVoterPaginated($userId, $perPage, $offset);
+        $rows = $this->voteRepository->findByVoterPaginated($userId, $perPage, $offset, $hiddenPageIds);
 
         // Member self-page targets have no wp_posts row (the LEFT JOIN
         // columns come back NULL) — batch-resolve their owners' display
@@ -122,6 +138,9 @@ final class UserReviewsService
         $members = $memberIds === []
             ? []
             : $this->userMiniRepository->getRowsByIds(array_keys($memberIds));
+        // Their names go through PublicIdentity::visibleName(): one batch for
+        // the "Hide my real name" flags of the page's members.
+        PrivacySettings::prime(array_keys($memberIds));
 
         // F-345: each review's reply (by the reviewed party) and the
         // viewer's can_reply, one batched read; reply authors are hydrated
@@ -146,7 +165,7 @@ final class UserReviewsService
         $now   = time();
         foreach ($rows as $row) {
             $items[] = CardReviewsService::withReply(
-                self::shapeReview($row, $now, $members),
+                self::shapeReview($row, $now, $members, $viewerId),
                 $replies[(int) $row->id] ?? null,
                 $viewerId,
                 $prefetched
@@ -178,6 +197,7 @@ final class UserReviewsService
      *   page_type: string|null
      * } $row
      * @param array<int, array{id: int, user_login: string, display_name: string, handle: string|null}> $members
+     * @param int $viewerId who reads the list (a member sees their own real name)
      * @return array{
      *   id: int,
      *   grade: string,
@@ -188,7 +208,7 @@ final class UserReviewsService
      *   posted_at_label: string
      * }
      */
-    private static function shapeReview(object $row, int $now, array $members): array
+    private static function shapeReview(object $row, int $now, array $members, int $viewerId): array
     {
         $voteType = (int) $row->vote_type;
         $grade    = self::VOTE_TYPE_TO_GRADE[$voteType] ?? 'B';
@@ -204,14 +224,25 @@ final class UserReviewsService
 
         // Member-target rows: the subject is a person, not a page. Only
         // bcc_handle is safe to project publicly — '' when unset (the
-        // panel suppresses the @-link), never user_login.
+        // panel suppresses the @-link), never user_login. The name is the
+        // one OTHER people see (PublicIdentity::visibleName(): "Hide my real
+        // name" shows them '@handle'), with this viewer as the reader.
         $pageId = (int) $row->page_id;
         if (MemberSelfPageService::isSelfPage($pageId)) {
-            $member = $members[MemberSelfPageService::ownerOfSelfPage($pageId)] ?? null;
+            $memberId = MemberSelfPageService::ownerOfSelfPage($pageId);
+            $member   = $members[$memberId] ?? null;
             return [
                 'id'              => (int) $row->id,
                 'grade'           => $grade,
-                'subject'         => $member !== null ? $member['display_name'] : '',
+                'subject'         => $member !== null
+                    ? PublicIdentity::visibleName(
+                        $memberId,
+                        $member['display_name'],
+                        $member['user_login'],
+                        PublicIdentity::handle($memberId, $member['handle']),
+                        $viewerId
+                    )
+                    : '',
                 'subject_handle'  => $member !== null && $member['handle'] !== null ? $member['handle'] : '',
                 'text'            => $body,
                 'scope_label'     => 'MEMBER',

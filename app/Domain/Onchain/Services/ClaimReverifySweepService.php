@@ -54,7 +54,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * @phpstan-type ReverifyRow object{id: numeric-string|int, user_id: numeric-string|int, entity_type: string, entity_id: numeric-string|int, wallet_address: string, chain_id: numeric-string|int, claim_role: string, entity_row_id: numeric-string|int|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}
+ * @phpstan-type ReverifyRow object{id: numeric-string|int, user_id: numeric-string|int, entity_type: string, entity_id: numeric-string|int, wallet_address: string, chain_id: numeric-string|int, claim_role: string, verification_method?: string, entity_row_id: numeric-string|int|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}
  * @phpstan-import-type WalletWithChain from WalletRepository
  */
 class ClaimReverifySweepService
@@ -163,6 +163,12 @@ class ClaimReverifySweepService
     public function decide(object $row, ProviderRequestBudget $budget): array
     {
         try {
+            // The wallet re-checks below apply only to claims a linked wallet
+            // proved. Branch on the stored method FIRST.
+            $method = (string) ($row->verification_method ?? 'wallet');
+            if ($method !== 'wallet') {
+                return self::decideNotWalletProven($method);
+            }
             if ($row->entity_type === 'validator' && $row->claim_role === 'operator') {
                 return $this->decideValidator($row);
             }
@@ -180,6 +186,29 @@ class ClaimReverifySweepService
             ]);
             return [self::UNKNOWN, 'error'];
         }
+    }
+
+    /**
+     * A claim no linked wallet proved is never decided by a wallet match
+     * (it stores none, so every such check would read "link gone"):
+     *  - staff-approved: kept; staff revoke it themselves;
+     *  - a key proof (siws, solana_identity): unknown, never revoked here
+     *    (their own on-chain re-check is separate);
+     *  - any other method: unknown, never revoked, and counted.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function decideNotWalletProven(string $method): array
+    {
+        if ($method === 'staff') {
+            return [self::KEEP, ''];
+        }
+        if ($method === 'siws' || $method === 'solana_identity') {
+            return [self::UNKNOWN, 'proof_recheck_not_here'];
+        }
+        \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'unknown_verification_method');
+
+        return [self::UNKNOWN, 'unknown_verification_method'];
     }
 
     /**

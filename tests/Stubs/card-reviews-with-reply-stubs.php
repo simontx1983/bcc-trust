@@ -18,6 +18,9 @@ namespace BCC\Trust\Core {
             /** @var list<array{author_id: int, viewer: int, prefetched: array<string, mixed>|null}> */
             public static array $withAuthorCalls = [];
 
+            /** @var list<bool> each forReviews() call's $pageMayAnswer */
+            public static array $forReviewsCalls = [];
+
             public static function instance(): self
             {
                 return self::$instance ??= new self();
@@ -38,6 +41,34 @@ namespace BCC\Trust\Core {
                         $out['author'] = ['id' => $reply['author_id']];
                         unset($out['author_id']);
                         return $out;
+                    }
+
+                    /**
+                     * @param list<array<string, int>> $reviews
+                     * @return array<int, mixed>
+                     */
+                    public function forReviews(int $viewerId, array $reviews, bool $pageMayAnswer = false): array
+                    {
+                        Plugin::$forReviewsCalls[] = $pageMayAnswer;
+                        return [];
+                    }
+                };
+            }
+
+            /**
+             * For the REAL ReviewReplyService::withAuthor(): a recognisable
+             * member summary, or null for an author that no longer exists.
+             */
+            public function userViewService(): object
+            {
+                return new class {
+                    /**
+                     * @param array<string, mixed>|null $prefetched
+                     * @return array<string, mixed>|null
+                     */
+                    public function getSummary(int $userId, int $viewerId, ?array $prefetched): ?array
+                    {
+                        return $userId > 0 ? ['id' => $userId, 'handle' => 'member' . $userId] : null;
                     }
                 };
             }

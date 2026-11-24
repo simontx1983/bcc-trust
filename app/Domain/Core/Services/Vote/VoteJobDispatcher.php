@@ -65,6 +65,14 @@ class VoteJobDispatcher {
     public const POST_VOTE_RETRY_HOOK = 'bcc_trust_async_post_vote_retry';
 
     /**
+     * Delayed retries of a failed edge recalculation after a vote removal
+     * ({@see handleEdgeRecalculate()}): retry number => delay in seconds.
+     * After the last one the job gives up and records it.
+     */
+    public const EDGE_RETRY_HOOK    = 'bcc_trust_async_edge_recalculate_retry';
+    private const EDGE_RETRY_DELAYS = [ 1 => 300, 2 => 1800 ];
+
+    /**
      * Schedule all post-commit async jobs for a committed vote.
      *
      * Enqueues a SINGLE composite job that internally dispatches all
@@ -210,6 +218,78 @@ class VoteJobDispatcher {
      */
     public static function dispatchRemoval( int $voterId, int $pageId ): void {
         self::enqueue( 'bcc_trust_async_edge_recalculate', [ $voterId, $pageId ] );
+    }
+
+    /**
+     * The `bcc_trust_async_edge_recalculate` job ({@see dispatchRemoval()}):
+     * recalculate the voter → page-owner trust edge after a vote removal.
+     * Registered in Plugin::registerAsyncJobs with 2 accepted args.
+     *
+     * The owner is resolved here: recalculateVoteEdge() takes
+     * (source_user_id, target_user_id), never the page id.
+     *
+     * A failure never escapes: an escaping throw would end a wp-cron tick and
+     * skip that tick's later events. Until the edge is recalculated it keeps
+     * its pre-removal weight (its read throws before it writes), and nothing
+     * else may touch that pair again, so a failure is retried
+     * ({@see EDGE_RETRY_DELAYS}) before the job gives up.
+     */
+    public static function handleEdgeRecalculate( int $voterId, int $pageId ): void {
+        self::runEdgeRecalculate( $voterId, $pageId, 0 );
+    }
+
+    /**
+     * A delayed retry of {@see handleEdgeRecalculate()}. Registered in
+     * Plugin::registerAsyncJobs on EDGE_RETRY_HOOK with 3 accepted args.
+     */
+    public static function handleEdgeRetry( int $voterId, int $pageId, int $attempt ): void {
+        self::runEdgeRecalculate( $voterId, $pageId, $attempt );
+    }
+
+    /**
+     * One attempt at the edge recalculation; attempt 0 is the original job.
+     *
+     * A failure books the next retry while one is left (a warning), and
+     * after the last one records the give-up on post_commit_task /
+     * vote_subtask_failed (the handlePostVote() event, so the bcc-core
+     * subsystem map and its docs stay as they are) with an error log. A retry
+     * that cannot be booked is recorded by scheduleRetry() on cron_dispatch.
+     * Re-running is safe: the recalculation recomputes the edge from the live
+     * votes.
+     */
+    private static function runEdgeRecalculate( int $voterId, int $pageId, int $attempt ): void {
+        try {
+            $ownerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId( $pageId );
+            if ( $ownerId > 0 && $ownerId !== $voterId ) {
+                \BCC\Trust\Core\Plugin::instance()->edgeRepository()->recalculateVoteEdge( $voterId, $ownerId );
+            }
+        } catch ( \Throwable $e ) {
+            $next = $attempt + 1;
+            if ( isset( self::EDGE_RETRY_DELAYS[ $next ] ) ) {
+                if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
+                    \BCC\Core\Log\Logger::warning( '[BCC Trust] Edge recalculation after a vote removal failed; retrying', [
+                        'voter_id' => $voterId,
+                        'page_id'  => $pageId,
+                        'attempt'  => $attempt,
+                        'error'    => $e->getMessage(),
+                    ] );
+                }
+                self::scheduleRetry( self::EDGE_RETRY_HOOK, [ $voterId, $pageId, $next ], self::EDGE_RETRY_DELAYS[ $next ] );
+
+                return;
+            }
+            if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
+                \BCC\Core\Observability\DegradationMetrics::record( 'post_commit_task', 'vote_subtask_failed' );
+            }
+            if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
+                \BCC\Core\Log\Logger::error( '[BCC Trust] Edge recalculation after a vote removal failed; retries EXHAUSTED, the edge keeps its last weight', [
+                    'voter_id' => $voterId,
+                    'page_id'  => $pageId,
+                    'attempt'  => $attempt,
+                    'error'    => $e->getMessage(),
+                ] );
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

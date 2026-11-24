@@ -9,12 +9,15 @@
  *   - 'hooks'   every add_filter / add_action call, recorded
  *   - 'die' / 'redirect'  the last wp_die() / wp_redirect() /
  *               wp_safe_redirect() call: [where it really went, status]
+ *   - 'redirect_by'  the last wp_redirect()'s X-Redirect-By
  *   - 'allowed_redirect_hosts'  hosts that filter adds (none at admin_init:
  *               FrontendRedirect only registers it on rest_api_init)
  *   - 'reset_keys'   user ids get_password_reset_key() minted a key for
  *   - 'reset_throws' make get_password_reset_key() throw
- * wp_die() and both redirects throw SignInGateHalt, so the code after them
- * (an `exit`) never runs in a test. wp_safe_redirect() checks the host the
+ *   - 'status' / 'nocache'  the last status_header() code; whether
+ *               nocache_headers() ran
+ * wp_die(), both redirects and status_header() throw SignInGateHalt, so the
+ * code after them (an `exit`) never runs in a test. wp_safe_redirect() checks the host the
  * way core's wp_validate_redirect() does: an off-site target becomes
  * admin_url().
  */
@@ -29,20 +32,49 @@ namespace {
     }
 
     if (!class_exists('WP_Error', false)) {
+        /** Core's shape: several codes, each with its messages, first code first. */
         class WP_Error
         {
-            public function __construct(private string $code = '', private string $message = '')
+            /** @var array<string, list<string>> */
+            public array $errors = [];
+
+            public function __construct(string $code = '', string $message = '')
             {
+                if ($code !== '') {
+                    $this->errors[$code][] = $message;
+                }
+            }
+
+            public function add(string $code, string $message): void
+            {
+                $this->errors[$code][] = $message;
+            }
+
+            public function remove(string $code): void
+            {
+                unset($this->errors[$code]);
+            }
+
+            public function has_errors(): bool
+            {
+                return $this->errors !== [];
+            }
+
+            /** @return list<string> */
+            public function get_error_codes(): array
+            {
+                return array_map('strval', array_keys($this->errors));
             }
 
             public function get_error_code(): string
             {
-                return $this->code;
+                return (string) (array_key_first($this->errors) ?? '');
             }
 
             public function get_error_message(): string
             {
-                return $this->message;
+                $first = array_key_first($this->errors);
+                return $first === null ? '' : $this->errors[$first][0];
             }
         }
     }
@@ -92,11 +124,28 @@ namespace {
         }
     }
 
+    if (!function_exists('nocache_headers')) {
+        function nocache_headers(): void
+        {
+            $GLOBALS['__bcc_sig']['nocache'] = true;
+        }
+    }
+
+    if (!function_exists('status_header')) {
+        /** @return never */
+        function status_header(int $code, string $description = '')
+        {
+            $GLOBALS['__bcc_sig']['status'] = $code;
+            throw new \SignInGateHalt('status');
+        }
+    }
+
     if (!function_exists('wp_redirect')) {
         /** @return never */
         function wp_redirect(string $location, int $status = 302, string $by = 'WordPress')
         {
-            $GLOBALS['__bcc_sig']['redirect'] = [$location, $status];
+            $GLOBALS['__bcc_sig']['redirect']    = [$location, $status];
+            $GLOBALS['__bcc_sig']['redirect_by'] = $by;
             throw new \SignInGateHalt('redirect');
         }
     }
@@ -178,6 +227,19 @@ namespace {
         {
             $GLOBALS['__bcc_sig']['hooks'][] = [$hook, $callback, $priority, $args];
             return true;
+        }
+    }
+
+    if (!function_exists('wp_unique_post_slug')) {
+        /**
+         * F-496: records each call in 'unique_slug' and answers the slug
+         * plus 'unique_suffix' (default ''), as core would after making it
+         * unique.
+         */
+        function wp_unique_post_slug(string $slug, int $postId, string $postStatus, string $postType, int $postParent): string
+        {
+            $GLOBALS['__bcc_sig']['unique_slug'][] = [$slug, $postId, $postStatus, $postType, $postParent];
+            return $slug . ($GLOBALS['__bcc_sig']['unique_suffix'] ?? '');
         }
     }
 }

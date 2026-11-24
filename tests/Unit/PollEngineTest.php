@@ -11,6 +11,7 @@ use BCC\Trust\Tests\Stubs\InMemoryPollRepository;
 use BCC\Trust\Tests\Stubs\RankUnitWpFakes;
 use BCC\Trust\Tests\Stubs\StubClusterFindingsRepository;
 use BCC\Trust\Tests\Stubs\TestPollService;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../Stubs/rank-unit-stubs.php';
@@ -198,6 +199,58 @@ final class PollEngineTest extends TestCase
         $result = $this->service->closeDuePolls($this->at(self::SWEEP_AT));
 
         self::assertSame(['closed' => 0, 'inconclusive' => 0], $result);
+        self::assertSame('open', $this->polls->rows[$pollId]->status);
+        self::assertSame([], RankUnitWpFakes::firedHooks());
+    }
+
+    // ── F-464 / F-466: a failed read closes nothing ─────────────────────
+
+    /** @return array<string, array{string}> */
+    public static function failedSweepReads(): array
+    {
+        return [
+            'confirmed clusters (F-464)' => ['failConfirmed'],
+            'suspected clusters (F-466)' => ['failSuspected'],
+        ];
+    }
+
+    /**
+     * The close is final, so a failed cluster read must stop the sweep
+     * before any poll is evaluated: nothing closed, no closure audit, no hook.
+     */
+    #[DataProvider('failedSweepReads')]
+    public function testAFailedClusterReadClosesNothing(string $flag): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0); // decisive
+        $this->clusters->{$flag} = true;
+
+        try {
+            $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+            self::fail('the sweep went on without the cluster findings');
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+        }
+
+        self::assertSame('open', $this->polls->rows[$pollId]->status);
+        self::assertSame([], RankUnitWpFakes::firedHooks());
+        foreach ($this->ballots->listActiveForPoll($pollId) as $row) {
+            self::assertNull($row->counted ?? null, 'no closure audit was written');
+        }
+    }
+
+    /** A failed ballot read never evaluates as "no ballots", even past expiry. */
+    public function testAFailedBallotReadClosesNothingEvenPastExpiry(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0);
+        $this->ballots->failCloseRead = true;
+
+        try {
+            $this->service->closeDuePolls($this->at(self::EXPIRED_SWEEP_AT));
+            self::fail('the sweep evaluated a poll without its ballots');
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+        }
+
         self::assertSame('open', $this->polls->rows[$pollId]->status);
         self::assertSame([], RankUnitWpFakes::firedHooks());
     }

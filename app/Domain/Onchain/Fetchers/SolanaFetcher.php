@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\Base58;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 use BCC\Trust\Onchain\Support\StakeAmount;
 use BCC\Trust\Onchain\Support\EndpointDescriptor;
@@ -815,7 +816,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 
         foreach ($all as $v) {
             if (($v['nodePubkey'] ?? '') === $address) {
-                return $this->mapValidator($v, 0);
+                return $this->mapValidator($v, 0, self::voteAccountIndex($all)['votes'][$address] ?? null);
             }
         }
 
@@ -1135,9 +1136,15 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return StakeAmount::compareDesc($a, $b, 'activatedStake');
         });
 
+        // F-550: each identity's vote account, or null where it can't be
+        // trusted (see voteAccountIndex()). An identity naming 2+ vote
+        // accounts is counted, never resolved by picking one.
+        $voteIndex = self::voteAccountIndex($accounts);
+        $this->countNewlySharedIdentities($voteIndex['shared']);
+
         $results = [];
         foreach ($accounts as $rank => $v) {
-            $results[] = $this->mapValidator($v, $rank);
+            $results[] = $this->mapValidator($v, $rank, $voteIndex['votes'][(string) ($v['nodePubkey'] ?? '')] ?? null);
         }
 
         return $results;
@@ -1417,13 +1424,95 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return true;
     }
 
+    /** Per chain: the identities found shared on the previous run (not autoloaded). */
+    private const SHARED_IDENTITIES_OPTION = 'bcc_solana_shared_identities_';
+
+    /**
+     * F-550 (security S3): an identity naming more than one vote account is
+     * COUNTED when it becomes shared, not on every run it stays shared, so a
+     * persistent one can't keep DegradationAlerter tripped.
+     *
+     * The previous run's set is kept per chain and replaced each run, so an
+     * identity that stops being shared and comes back is counted again. It's
+     * logged on every run while any identity is shared.
+     *
+     * @param list<string> $shared
+     */
+    private function countNewlySharedIdentities(array $shared): void
+    {
+        $option   = self::SHARED_IDENTITIES_OPTION . (int) $this->chain->id;
+        $stored   = get_option($option, []);
+        $previous = is_array($stored) ? array_values(array_map('strval', $stored)) : [];
+        $new      = array_values(array_diff($shared, $previous));
+
+        foreach ($new as $ignored) {
+            \BCC\Core\Observability\DegradationMetrics::record('validator_index', 'solana_shared_identity');
+        }
+        if ($shared !== []) {
+            \BCC\Core\Log\Logger::warning('[Solana Fetcher] identities naming more than one vote account; their vote_account is left empty', [
+                'count' => count($shared),
+                'new'   => count($new),
+            ]);
+        }
+
+        sort($shared);
+        sort($previous);
+        if ($shared !== $previous) {
+            update_option($option, $shared, false);
+        }
+    }
+
+    /**
+     * F-550: each identity's vote account, from one getVoteAccounts set.
+     *
+     * A claim reads the validator's authorities (the vote account's withdraw
+     * authority, and its current node key) from the vote account stored on
+     * the row, so the value must be unambiguous. An identity maps to null
+     * when:
+     *   - its entry's `votePubkey` doesn't decode to a 32-byte key; or
+     *   - it names more than one vote account in the set. BCC never picks
+     *     one; such identities are also listed in `shared`.
+     *
+     * @param array<int, array<string, mixed>> $accounts
+     * @return array{votes: array<string, string|null>, shared: list<string>}
+     */
+    private static function voteAccountIndex(array $accounts): array
+    {
+        /** @var array<string, array<string, true>> $seen identity → its distinct vote accounts ('' = unreadable) */
+        $seen = [];
+        foreach ($accounts as $v) {
+            $node = (string) ($v['nodePubkey'] ?? '');
+            $vote = $v['votePubkey'] ?? null;
+            $vote = is_string($vote) && Base58::decodedLength($vote) === 32 ? $vote : '';
+            $seen[$node][$vote] = true;
+        }
+
+        $votes  = [];
+        $shared = [];
+        foreach ($seen as $node => $distinct) {
+            $node = (string) $node;
+            if (count($distinct) > 1) {
+                $votes[$node] = null;
+                $shared[]     = $node;
+                continue;
+            }
+            $only         = (string) array_key_first($distinct);
+            $votes[$node] = $only !== '' ? $only : null;
+        }
+
+        return ['votes' => $votes, 'shared' => $shared];
+    }
+
     /**
      * Map a Solana vote account to the standard validator schema.
+     *
+     * `vote_account` is always set (null where voteAccountIndex() couldn't
+     * trust one), so the index run writes it, clearing a stale value too.
      *
      * @param array<string, mixed> $v
      * @return array<string, mixed>
      */
-    private function mapValidator(array $v, int $rank): array
+    private function mapValidator(array $v, int $rank, ?string $voteAccount): array
     {
         $nodePubkey    = is_string($v['nodePubkey'] ?? null) ? $v['nodePubkey'] : '';
         $activatedStake = (float) ($v['activatedStake'] ?? 0) / 1e9; // lamports → SOL
@@ -1458,6 +1547,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             'uptime_30d'        => $uptime,
             'jailed_count'      => 0,
             'voting_power_rank' => $rank + 1,
+            'vote_account'      => $voteAccount,
         ];
     }
 

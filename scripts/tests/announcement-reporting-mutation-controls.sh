@@ -187,7 +187,7 @@ echo "── server-side resolution ──────────────�
 # self-report check entirely.
 mutate "$SVC" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "\$resolved = \$this->resolveAnnouncementTarget(\$targetId);";
+$old = "\$resolved = \$this->resolveAnnouncementTarget(\$reporterUserId, \$targetId);";
 $new = "\$resolved = [\x27author_id\x27 => self::resolveFeedItemAuthor(\$targetId)];";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
@@ -212,7 +212,7 @@ $old = "                (int) \$post->post_parent,";
 $new = "                (int) (\$_POST[\x27page_id\x27] ?? 0),";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
-' 'testTheAnnouncementResolverTakesOnlyTheNoticeIdAndDerivesTheRest' \
+' 'testTheAnnouncementResolverTakesOnlyTheReporterAndTheNoticeIdAndDerivesTheRest' \
   'M4 the page id is taken from the request'
 
 # ── M5. An unreadable database answers "not found" ──────────────────────────

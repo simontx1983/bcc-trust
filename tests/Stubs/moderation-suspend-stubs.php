@@ -21,6 +21,12 @@
 
 declare(strict_types=1);
 
+namespace {
+    // F-462: JwtToken reads token state through TokenStateRepository; these
+    // suites test token behaviour, so they get its stand-in (see the file).
+    require_once __DIR__ . '/token-state-stubs.php';
+}
+
 namespace BCC\Trust\Core\Support {
     if (!function_exists(__NAMESPACE__ . '\\wp_salt')) {
         function wp_salt(string $scheme = 'auth'): string
@@ -48,6 +54,11 @@ namespace BCC\Trust\Core\Support {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            // F-508: $GLOBALS['__bcc_ms']['tv_write_fails'] = true makes the
+            // write fail (false, nothing stored), as a failed UPDATE does.
+            if (!empty($GLOBALS['__bcc_ms']['tv_write_fails'])) {
+                return false;
+            }
             $GLOBALS['__bcc_ms']['tv'][$userId] = (int) $value;
             return true;
         }

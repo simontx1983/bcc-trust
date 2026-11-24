@@ -9,8 +9,9 @@
  *     peepso_message_* + the peepso-message CPT)
  *   - bcc-core PeepSoBlockRepository (the mutual-block SEND gate, and
  *     separately the one-directional READ treatment below)
- *   - peepso-messages PeepSoChatModel (chat_enabled + chat_friends_only
- *     primitives — exposed via MyMessagesPrefsEndpoint)
+ *   - PeepSoChatPrefs (chat_enabled + chat_friends_only with
+ *     PeepSoChatModel's meaning, but from a TRUSTED read and never
+ *     written; H6. Also behind MyMessagesPrefsEndpoint)
  *   - peepso-friends PeepSoFriendsModel (are_friends gate)
  *   - bcc-trust UserViewService (slim author view-models for the
  *     conversation list + thread participants)
@@ -24,6 +25,11 @@
  *      returns false → bcc_forbidden
  *   5. PeepSoBlockRepository::isMutuallyBlocked(sender, recipient) →
  *      bcc_not_found (404, info-leak shielded; never reveals the block)
+ *
+ *   H6: a chat setting (2–4) that cannot be READ refuses the send with a
+ *   retryable bcc_unavailable (503), and the read paths answer
+ *   `unavailable`, exactly as an unreadable block table does. It is never
+ *   taken as PeepSo's default ("enabled").
  *
  * Read-side blocked-sender treatment (#122, policy (b) "hide-on-read"):
  *   A message whose author THE VIEWER HAS BLOCKED is annotated
@@ -92,6 +98,7 @@ use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoMessageRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Services\BadgesService;
+use BCC\Trust\Core\Support\PeepSoChatPrefs;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgQueueRepository;
 
@@ -544,7 +551,11 @@ final class MessagesService
         }
 
         // Sender-side gate: can the viewer chat at all?
-        if (!self::chatEnabled($viewerId)) {
+        $senderChat = self::chatEnabled($viewerId);
+        if ($senderChat === null) {
+            return self::chatPrefsUnavailable();
+        }
+        if (!$senderChat) {
             return [
                 'error'   => 'bcc_forbidden',
                 'message' => 'Messaging is disabled in your account settings.',
@@ -676,7 +687,11 @@ final class MessagesService
             ];
         }
 
-        if (!self::chatEnabled($viewerId)) {
+        $senderChat = self::chatEnabled($viewerId);
+        if ($senderChat === null) {
+            return self::chatPrefsUnavailable();
+        }
+        if (!$senderChat) {
             return [
                 'error'   => 'bcc_forbidden',
                 'message' => 'Messaging is disabled in your account settings.',
@@ -1098,7 +1113,13 @@ final class MessagesService
         if (self::senderRestricted($viewerId) !== null) {
             return self::eligibilityDeny(null, 'sender_restricted');
         }
-        if (!self::chatEnabled($viewerId)) {
+        $senderChat = self::chatEnabled($viewerId);
+        if ($senderChat === null) {
+            // H6: the viewer's own setting could not be read. Same answer
+            // as an unreadable block table: hide, retry later.
+            return self::eligibilityDeny(null, 'unavailable');
+        }
+        if (!$senderChat) {
             return self::eligibilityDeny(
                 'Turn on direct messages in your settings to send messages.',
                 'sender_chat_disabled'
@@ -1210,8 +1231,9 @@ final class MessagesService
             return array_fill_keys($ids, $senderGate);
         }
 
-        // Prime recipient usermeta so chatEnabled/chatFriendsOnly are
-        // cache hits (same trick PageCardPrefetcher uses for owners).
+        // Prime the users so userExists() is a cache hit (same trick
+        // PageCardPrefetcher uses for owners). The chat settings do NOT
+        // come from this cache: see chatPrefsMany() below.
         cache_users($ids);
         // ⚠ `null` means the block table could not be READ — not that
         // nobody is blocked. `[]` would hand every candidate a live
@@ -1239,6 +1261,14 @@ final class MessagesService
             return array_fill_keys($ids, self::eligibilityDeny(null, 'unavailable'));
         }
 
+        // H6: every recipient's chat settings in one trusted read. `null`
+        // is "could not read", and answers the whole batch `unavailable`,
+        // for the same reasons as the block read above.
+        $prefs = self::chatPrefsMany($ids);
+        if ($prefs === null) {
+            return array_fill_keys($ids, self::eligibilityDeny(null, 'unavailable'));
+        }
+
         /** @var array<int, true>|null $friendIds lazily fetched */
         $friendIds = null;
 
@@ -1250,11 +1280,11 @@ final class MessagesService
             }
             // Block and recipient-chat-off intentionally share one
             // payload — the §4.19 info-leak shield holds on reads too.
-            if (isset($blocked[$recipientId]) || !self::userExists($recipientId) || !self::chatEnabled($recipientId)) {
+            if (isset($blocked[$recipientId]) || !self::userExists($recipientId) || !$prefs[$recipientId]['chat_enabled']) {
                 $out[$recipientId] = self::eligibilityDeny(null, 'messaging_unavailable');
                 continue;
             }
-            if (self::chatFriendsOnly($recipientId)) {
+            if ($prefs[$recipientId]['chat_friends_only']) {
                 if ($friendIds === null) {
                     $friendIds = PeepSoFriendGate::friendIdsOf($viewerId);
                 }
@@ -1365,7 +1395,21 @@ final class MessagesService
             return null;
         }
 
-        if (!self::chatEnabled($recipientId)) {
+        // H6: one trusted read for both settings. Unreadable REFUSES, in
+        // every context that reaches here and whatever
+        // `$refuseOnUnknownBlock` says: unlike the block read, there is no
+        // caller for whom "assume enabled" is a correct answer.
+        $prefs = self::chatPrefs($recipientId);
+        if ($prefs === null) {
+            return [
+                'error'       => 'bcc_unavailable',
+                'message'     => 'Messaging is temporarily unavailable. Please try again.',
+                'gate'        => 'chat_prefs_read_failed',
+                'reason_code' => 'unavailable',
+                'unlock_hint' => null,
+            ];
+        }
+        if (!$prefs['chat_enabled']) {
             return [
                 'error'       => 'bcc_forbidden',
                 'message'     => 'This member has direct messages turned off.',
@@ -1374,7 +1418,7 @@ final class MessagesService
                 'unlock_hint' => null,
             ];
         }
-        if (self::chatFriendsOnly($recipientId) && !PeepSoFriendGate::areFriends($senderId, $recipientId)) {
+        if ($prefs['chat_friends_only'] && !PeepSoFriendGate::areFriends($senderId, $recipientId)) {
             return [
                 'error'       => 'bcc_forbidden',
                 'message'     => 'This member only accepts messages from friends.',
@@ -1411,22 +1455,56 @@ final class MessagesService
 
     // ── Privacy primitives ──────────────────────────────────────────────
 
-    private static function chatEnabled(int $userId): bool
+    /**
+     * H6: a member's two chat settings, or null when they could not be
+     * read. Never PeepSoChatModel::chat_enabled(): it writes a default
+     * when its read comes back empty. See PeepSoChatPrefs.
+     *
+     * @return array{chat_enabled: bool, chat_friends_only: bool}|null
+     */
+    private static function chatPrefs(int $userId): ?array
     {
         if (!class_exists('PeepSoChatModel')) {
             // peepso-messages plugin missing — treat as disabled rather
             // than silently allowing writes.
-            return false;
+            return ['chat_enabled' => false, 'chat_friends_only' => false];
         }
-        return (bool) \PeepSoChatModel::chat_enabled($userId);
+        return PeepSoChatPrefs::forUser($userId);
     }
 
-    private static function chatFriendsOnly(int $userId): bool
+    /**
+     * chatPrefs() for many members in one read; null when it failed.
+     *
+     * @param list<int> $userIds
+     * @return array<int, array{chat_enabled: bool, chat_friends_only: bool}>|null keyed by user id
+     */
+    private static function chatPrefsMany(array $userIds): ?array
     {
         if (!class_exists('PeepSoChatModel')) {
-            return false;
+            return array_fill_keys($userIds, ['chat_enabled' => false, 'chat_friends_only' => false]);
         }
-        return (bool) \PeepSoChatModel::chat_friends_only($userId);
+        return PeepSoChatPrefs::forUsers($userIds);
+    }
+
+    /** A member's own chat_enabled, or null when it could not be read. */
+    private static function chatEnabled(int $userId): ?bool
+    {
+        $prefs = self::chatPrefs($userId);
+        return $prefs === null ? null : $prefs['chat_enabled'];
+    }
+
+    /**
+     * H6: the send-path answer when a chat setting could not be read. A
+     * retryable 503, the same code and copy as an unreadable block table.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function chatPrefsUnavailable(): array
+    {
+        return [
+            'error'   => 'bcc_unavailable',
+            'message' => 'Messaging is temporarily unavailable. Please try again.',
+        ];
     }
 
     private static function userExists(int $userId): bool

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
+use BCC\Trust\Tests\Support\UserMetaWpdb;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -42,6 +43,14 @@ final class MentionSearchNoLoginOracleTest extends TestCase
             10 => ['u_dana', 'u_dana', 'zed', false],
         ];
         $GLOBALS['__ms_ctor'] = [];
+        // F-512: the real-name flags are read through bcc-core's REAL
+        // UserMetaRepository; the database holds each fixture user's flag.
+        require_once dirname(__DIR__) . '/Support/UserMetaWpdb.php';
+        UserMetaWpdb::loadCore();
+        $GLOBALS['wpdb'] = new UserMetaWpdb();
+        foreach ($GLOBALS['__ms_users'] as $id => [, , , $hidden]) {
+            $GLOBALS['wpdb']->meta[$id] = ['bcc_privacy_real_name_hidden' => [$hidden ? '1' : '0']];
+        }
         eval(<<<'PHP'
             function get_users(array $args = []): array
             {
@@ -128,5 +137,20 @@ final class MentionSearchNoLoginOracleTest extends TestCase
     {
         self::assertSame([], self::ids('Carol'));
         self::assertSame([9], self::ids('quiet'));
+    }
+
+    /**
+     * F-512: a member holding a '1' AND a '0' row (the pre-filter lets them
+     * through on the '0' row) is hidden from name search all the same, in
+     * either row order, and still found by handle.
+     */
+    public function testAnyHidingRowKeepsTheMentionPickerFromMatchingTheName(): void
+    {
+        foreach ([['1', '0'], ['0', '1']] as $rows) {
+            $GLOBALS['wpdb']->meta[7] = ['bcc_privacy_real_name_hidden' => $rows];
+
+            self::assertSame([], self::ids('Smith'), implode('+', $rows) . ': no name match');
+            self::assertSame([7], self::ids('@alice'), implode('+', $rows) . ': still found by handle');
+        }
     }
 }
