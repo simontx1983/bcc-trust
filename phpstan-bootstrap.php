@@ -91,6 +91,19 @@ if (!class_exists('PeepSo')) {
         /** PeepSo's permission gate (peepso.php); false = refused. */
         public static function check_permissions(int $owner, string $action, int $author, bool $allow_logged_out = false, mixed $post = null): bool { return true; }
         public static function get_page(string $page = ''): string { return ''; }
+        /**
+         * PeepSo's working directory and its URL — both `public static`
+         * and read-only (a static cache, an option, and a filter).
+         * `get_peepso_dir()` ENDS IN A DIRECTORY SEPARATOR and
+         * `get_peepso_uri()` in a slash, which is why callers append
+         * `pages/{id}/` without one.
+         *
+         * ⚠ Both are untyped in the real class (peepso.php:5431, :5451)
+         * and the value finally passes through a filter, so a caller that
+         * cares casts — `PhotoRepository` already does. Typed `string`
+         * here to match this stub's existing convention.
+         */
+        public static function get_peepso_dir(): string { return ''; }
         public static function get_peepso_uri(): string { return ''; }
         public static function get_asset(string $asset): string { return ''; }
         /**

@@ -48,6 +48,9 @@ use ReflectionClass;
 final class PageDiscoveryMediaTest extends TestCase
 {
     private const PAGE_ID = 4100;
+    private const HASH    = 'abc123';
+
+    private string $peepsoDir = '';
 
     protected function setUp(): void
     {
@@ -61,6 +64,36 @@ final class PageDiscoveryMediaTest extends TestCase
         $GLOBALS['__bcc_pm']    = [];
         $GLOBALS['__bcc_thumb'] = [];
         \PeepSoPage::reset();
+
+        // A real directory, because the resolver asks the filesystem
+        // whether the avatar file is there. The page subdirectory is NOT
+        // created here: a test that wants the file creates it.
+        $this->peepsoDir = sys_get_temp_dir()
+            . DIRECTORY_SEPARATOR . 'bcc-page-media-' . bin2hex(random_bytes(6))
+            . DIRECTORY_SEPARATOR;
+        mkdir($this->peepsoDir, 0777, true);
+
+        \PeepSo::$dir = $this->peepsoDir;
+        \PeepSo::$uri = 'https://peepso.example/peepso/';
+    }
+
+    protected function tearDown(): void
+    {
+        if ($this->peepsoDir !== '' && is_dir($this->peepsoDir)) {
+            // ⚠ CHILD_FIRST already yields children before their parent;
+            // reversing it put parents first and every rmdir warned
+            // "Directory not empty" — and a PHP warning fails this suite.
+            $walk = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($this->peepsoDir, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::CHILD_FIRST
+            );
+            foreach ($walk as $entry) {
+                /** @var \SplFileInfo $entry */
+                $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+            }
+            rmdir($this->peepsoDir);
+        }
+        parent::tearDown();
     }
 
     public function testAPageWithACoverGetsItsCover(): void
@@ -86,20 +119,47 @@ final class PageDiscoveryMediaTest extends TestCase
 
     public function testAPageWithAnUploadedAvatarGetsIt(): void
     {
-        $GLOBALS['__bcc_pm'][self::PAGE_ID]['peepso_page_avatar_hash'] = 'abc123';
-        \PeepSoPage::$avatarUrls[self::PAGE_ID] = 'https://img.example/avatar.jpg';
+        $this->givenAvatarHash();
+        $this->givenAvatarFileExists();
 
-        self::assertSame('https://img.example/avatar.jpg', $this->card()['avatar_url']);
+        self::assertSame(
+            'https://peepso.example/peepso/pages/' . self::PAGE_ID . '/' . self::HASH . '-avatar-full.jpg',
+            $this->card()['avatar_url']
+        );
+    }
+
+    /**
+     * ⭐ THE CASE REVIEW ASKED FOR: the hash is there and the FILE IS NOT.
+     *
+     * A database copied without the uploads directory, which happens on
+     * staging. `PeepSoPage::get_avatar_url()` answers PeepSo's generic
+     * default for this, so a page that should show its WP featured image
+     * would show the default instead — and it would also call
+     * `set_avatar_custom_flag(FALSE)` on the way, writing meta on a read.
+     *
+     * Building the path and checking the file is what makes the fallback
+     * correct here.
+     */
+    public function testAHashWhoseFileIsMissingFallsBackToTheFeaturedImage(): void
+    {
+        $this->givenAvatarHash();
+        $GLOBALS['__bcc_thumb'][self::PAGE_ID] = 'https://img.example/featured.jpg';
+        // No file created.
+
+        self::assertSame('https://img.example/featured.jpg', $this->card()['avatar_url']);
+    }
+
+    /** And with neither file nor featured image, it reports no avatar. */
+    public function testAHashWithNoFileAndNoFeaturedImageReportsNoAvatar(): void
+    {
+        $this->givenAvatarHash();
+
+        self::assertSame('', $this->card()['avatar_url']);
     }
 
     /**
      * The fallback that existed before and must survive: a page with no
      * uploaded avatar shows its WP featured image.
-     *
-     * ⚠ This is what calling the accessor unconditionally would have
-     * broken. It never returns empty, so the fallback below would have
-     * become unreachable and these pages would have switched to PeepSo's
-     * generic default — a visible change, inside a bug fix.
      */
     public function testAPageWithoutAnUploadedAvatarKeepsTheFeaturedImage(): void
     {
@@ -109,39 +169,51 @@ final class PageDiscoveryMediaTest extends TestCase
     }
 
     /**
-     * ⭐ And such a page never builds a PeepSoPage at all.
+     * ⭐⭐ NO PAGE OBJECT IS EVER CONSTRUCTED, on any of the three paths.
      *
-     * The real accessor costs a `file_exists()` per call and calls
-     * `set_avatar_custom_flag()`, whose short-circuit compares
-     * `0 == $current_val` against an absent meta (`''`) — false under
-     * PHP 8, so it does NOT fire for exactly these pages. That is a write
-     * attempt on a read path, once per page, in a bounded discovery loop.
+     * This is the assertion that keeps the read path read-only, and it is
+     * stronger than "the accessor is not called for avatar-less pages":
+     * `PeepSoPage::get_avatar_url()` writes TWICE — `get_image_dir()` ends
+     * in `_make_user_dir()`, which `@mkdir()`s the directory just for being
+     * asked, and `set_avatar_custom_flag(FALSE)` stores `FALSE` as `''`, so
+     * its own guard `0 == $current_val` is `0 == ''` — false under PHP 8 —
+     * and the meta is rewritten on EVERY read, forever.
      *
-     * Gating on the upload hash is what avoids it, and this assertion is
-     * what stops someone removing the gate "to simplify".
+     * ⇒ Two writes per page, in a bounded discovery loop. Nothing here may
+     * construct that object, so this test drives every path and asserts
+     * zero constructions.
      */
-    public function testAnAvatarLessPageNeverTouchesThePeepSoAccessor(): void
+    public function testNoPathEverConstructsAPeepSoPage(): void
     {
-        $GLOBALS['__bcc_thumb'][self::PAGE_ID] = 'https://img.example/featured.jpg';
-
+        // 1. no hash at all
+        $this->card();
+        // 2. hash, file missing
+        $this->givenAvatarHash();
+        $this->card();
+        // 3. hash, file present
+        $this->givenAvatarFileExists();
         $this->card();
 
         self::assertSame(
             0,
             \PeepSoPage::$constructed,
-            'the accessor was consulted for a page with no uploaded avatar:'
-            . ' that is a file_exists() and an attempted meta write per page'
+            'a PeepSoPage was constructed on a read path: get_avatar_url()'
+            . ' mkdirs the page directory and rewrites page_avatar_custom'
+            . ' on every read'
         );
     }
 
-    /** With a hash present it IS consulted — the control for the test above. */
-    public function testAPageWithAHashDoesTouchTheAccessor(): void
+    private function givenAvatarHash(): void
     {
-        $GLOBALS['__bcc_pm'][self::PAGE_ID]['peepso_page_avatar_hash'] = 'abc123';
+        $GLOBALS['__bcc_pm'][self::PAGE_ID]['peepso_page_avatar_hash'] = self::HASH;
+    }
 
-        $this->card();
-
-        self::assertSame(1, \PeepSoPage::$constructed);
+    /** The file exactly where `get_avatar_url()` would look for it. */
+    private function givenAvatarFileExists(): void
+    {
+        $dir = $this->peepsoDir . 'pages' . DIRECTORY_SEPARATOR . self::PAGE_ID . DIRECTORY_SEPARATOR;
+        mkdir($dir, 0777, true);
+        file_put_contents($dir . self::HASH . '-avatar-full.jpg', 'jpeg');
     }
 
     /**

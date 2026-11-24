@@ -438,41 +438,58 @@ class PageDiscoveryService {
      * lines into `Call to undefined method`. PHPStan could see neither
      * problem, because an unknown class has no methods to check.
      *
-     * ── WHY THE ACCESSOR IS GATED BY THE UPLOAD HASH ────────────────
+     * ── WHY THE PATH IS BUILT HERE, NOT READ FROM PeepSoPage ─────────
      *
-     * `PeepSoPage::get_avatar_url()` never returns empty: with no avatar
-     * file it answers `get_default_avatar_url()`. Calling it
-     * unconditionally would make the post-thumbnail fallback below
-     * unreachable, so pages showing their WP featured image today would
-     * switch to PeepSo's generic default — a visible change this fix has
-     * no mandate for.
+     * ⚠⚠ `PeepSoPage::get_avatar_url()` IS NOT CALLED, and must not be:
+     * it performs TWO WRITES on what is a read path, once per page in a
+     * bounded discovery loop.
      *
-     * It also costs a `file_exists()` per page and calls
-     * `set_avatar_custom_flag()`, whose short-circuit compares
-     * `0 == $current_val` against an ABSENT meta (`''`). Under PHP 8
-     * `0 == ''` is FALSE, so that short-circuit does not fire for exactly
-     * the pages that have no avatar — i.e. a write attempt on a read
-     * path, in a bounded loop, in the common case.
+     * 1. `get_image_dir()` ends in `_make_user_dir()`, which `@mkdir()`s
+     *    the directory when it is absent (page.php:872-880). Asking for
+     *    the path CREATES it.
+     * 2. it calls `set_avatar_custom_flag()` (page.php:532-544), and for
+     *    the miss case that flag can never settle: it stores `FALSE`,
+     *    which `update_post_meta` persists as `''`, and the guard
+     *    `FALSE === $flag && 0 == $current_val` is then `0 == ''` — FALSE
+     *    under PHP 8 (verified on 8.2.30). So the short-circuit never
+     *    engages and the meta is REWRITTEN ON EVERY READ, forever.
      *
-     * ⇒ `peepso_page_avatar_hash` is written by the UPLOAD path
-     * (pageajax), never by the getter, so a non-empty hash means a real
-     * uploaded avatar. Only then is the accessor consulted; pages
-     * without one keep exactly today's behaviour.
+     * It is also wrong for this caller even when it writes nothing: with
+     * the hash present but the FILE missing — a database copied without
+     * the uploads directory, which happens on staging — it answers
+     * `get_default_avatar_url()`, so a page that should fall back to its
+     * WP featured image would show PeepSo's generic default instead.
      *
-     * ⚠ Known gap, stated rather than hidden: an avatar predating
-     * hashing has no hash and is still missed. That is strictly better
-     * than today, where every page is missed, and it fails to the same
-     * fallback rather than to an error.
+     * ⇒ So the path is assembled here from PeepSo's own two STATIC,
+     * read-only accessors, exactly as `get_avatar_url()` assembles it
+     * (page.php:504-517) — `{dir}pages/{id}/{hash}-avatar-full.jpg` — and
+     * the file is checked before any URL is returned. No page object is
+     * constructed, nothing is created, nothing is written.
+     *
+     * `peepso_page_avatar_hash` is written by the UPLOAD path (pageajax)
+     * and never by a getter, so a non-empty hash means a real uploaded
+     * avatar. Everything else falls through to the featured image, which
+     * is exactly today's behaviour for those pages.
+     *
+     * ⚠ `is_file()`, deliberately stricter than PeepSo's `file_exists()`:
+     * a DIRECTORY with that name is not a servable image, and falling
+     * back beats serving a URL that 404s.
+     *
+     * ⚠ Known gap, stated rather than hidden: an avatar predating hashing
+     * has no hash and is still missed. Strictly better than today, where
+     * every page is missed, and it fails to the same fallback.
      */
     private function resolvePageAvatarUrl(int $postId): string
     {
         $hash = get_post_meta($postId, 'peepso_page_avatar_hash', true);
 
-        if (is_string($hash) && $hash !== '' && class_exists('PeepSoPage')) {
-            $page = new \PeepSoPage($postId);
-            $url  = $page->get_avatar_url();
-            if (is_string($url) && $url !== '') {
-                return $url;
+        if (is_string($hash) && $hash !== '' && class_exists('PeepSo')) {
+            $name = $hash . '-avatar-full.jpg';
+            $file = \PeepSo::get_peepso_dir()
+                . 'pages' . DIRECTORY_SEPARATOR . $postId . DIRECTORY_SEPARATOR . $name;
+
+            if (is_file($file)) {
+                return \PeepSo::get_peepso_uri() . 'pages/' . $postId . '/' . $name;
             }
         }
 

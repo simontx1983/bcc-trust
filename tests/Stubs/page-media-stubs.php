@@ -35,10 +35,13 @@ namespace {
             /** How many times a page object was built — see the file docblock. */
             public static int $constructed = 0;
 
-            /** @var array<int, string> post_id => avatar URL the real file would yield */
-            public static array $avatarUrls = [];
-
-            /** @var array<int, string> post_id => default, used when no file exists */
+            /**
+             * What the real accessor answers when no avatar file exists.
+             * Nothing in the suite reads it any more — the resolver no
+             * longer calls the accessor at all — but it stays as the
+             * record of WHY: this default is what a page with a stale
+             * hash would have been given instead of its featured image.
+             */
             public static string $defaultAvatarUrl = 'https://peepso.example/default-avatar.jpg';
 
             private int $id;
@@ -80,17 +83,46 @@ namespace {
              */
             public function get_avatar_url($full = true)
             {
-                return self::$avatarUrls[$this->id] ?? self::$defaultAvatarUrl;
+                return self::$defaultAvatarUrl;
             }
 
             public static function reset(): void
             {
                 self::$constructed = 0;
-                self::$avatarUrls  = [];
             }
         }
     }
 
+    /**
+     * ⭐ The two STATIC, read-only accessors the resolver builds the
+     * avatar path from. Pointing `$dir` at a real temp directory is what
+     * lets a test cover the case that matters: hash present, FILE
+     * MISSING — a database copied without the uploads directory.
+     *
+     * ⚠ `class_exists('PeepSo', false)`, with the second argument, or
+     * the guard itself AUTOLOADS the real class and the stub never
+     * defines.
+     */
+    if (!class_exists('PeepSo', false)) {
+        class PeepSo
+        {
+            /** Ends in a separator, like the real one. */
+            public static string $dir = '';
+
+            /** Ends in a slash, like the real one. */
+            public static string $uri = 'https://peepso.example/peepso/';
+
+            public static function get_peepso_dir(): string
+            {
+                return self::$dir;
+            }
+
+            public static function get_peepso_uri(): string
+            {
+                return self::$uri;
+            }
+        }
+    }
     if (!function_exists('get_post_meta')) {
         /** @return mixed */
         function get_post_meta(int $postId, string $key = '', bool $single = false)
