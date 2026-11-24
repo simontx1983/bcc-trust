@@ -1742,18 +1742,18 @@ final class CardViewService
      * user's `description` field (the standard profile-bio field).
      * Returns "" when not set.
      *
-     * ⚠⚠ AND WHEN THE MEMBER HAS HIDDEN THEIR ABOUT SECTION, "".
+     * ⚠⚠ AND IT FOLLOWS THE MEMBER'S ABOUT VISIBILITY: "" when that
+     * section is not visible to this viewer.
      *
-     * F-341 lets a member hide About from their profile, and the
-     * profile honours it: `UserViewService` returns `bio` as a
-     * documented `null` for a viewer who may not see that section.
-     * The card did not, so the same text was served on every card in
-     * every list — the member's setting held on one surface and not
-     * on the other.
-     *
-     * The gate is the SAME accessor the profile uses, so the two
-     * cannot drift: the owner always sees their own, an admin keeps
+     * F-341's accessor is the single owner of that question, and both
+     * surfaces ask it: the profile returns `bio` as a documented
+     * `null`, the card returns `''`. One rule, so the two cannot
+     * drift — the owner always sees their own, an exempt viewer keeps
      * the §F-02 exemption, and an untouched setting reads as SHOWN.
+     *
+     * ⚠ The accessor's read is fail-closed: an untrusted read hides.
+     * Card lists reach it through a batched meta prime, which is why
+     * that distinction is made there rather than here.
      *
      * ⚠ `''`, not `null`: the card's `bio` is a `string` on every
      * kind (a group with no description sends `''` too), and the

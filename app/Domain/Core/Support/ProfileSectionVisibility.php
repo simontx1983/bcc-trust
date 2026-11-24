@@ -41,6 +41,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Support;
 
+use BCC\Core\Repositories\UserMetaRepository;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -118,7 +120,14 @@ final class ProfileSectionVisibility
         if ($viewerId > 0 && $viewerId === $ownerId) {
             return false;
         }
-        if (ProfileAccess::viewerIsExemptFromVisibility()) {
+        // The viewer is not always the request's user: a card list can
+        // be composed for one member while another is signed in, and an
+        // async or fan-out build has no current user at all. So the
+        // exemption is resolved for the VIEWER being served.
+        $exempt = $viewerId === get_current_user_id()
+            ? ProfileAccess::viewerIsExemptFromVisibility()
+            : ProfileAccess::userIsExemptFromVisibility($viewerId);
+        if ($exempt) {
             return false;
         }
 
@@ -136,7 +145,12 @@ final class ProfileSectionVisibility
             return false;
         }
 
-        return !self::showFlag($ownerId, self::SHOW_META[$section]);
+        $shown = self::showFlagOrUnknown($ownerId, self::SHOW_META[$section]);
+
+        // A read that could not be trusted HIDES. The owner and the
+        // exempt already returned above, so this is only ever the
+        // answer given to a viewer the setting applies to.
+        return $shown === null ? true : !$shown;
     }
 
     /** The inverse of {@see hides()}, for readability at call sites. */
@@ -189,14 +203,59 @@ final class ProfileSectionVisibility
      * permissively here would make the five show-switches disagree with
      * each other on corrupt data. Unreachable in practice: the only writer
      * stores "1"/"0". If this is ever revisited, change BOTH or neither.
+     *
+     * ⚠⚠ AND IT MUST BE ABLE TO SAY "I DO NOT KNOW", which a plain
+     * `get_user_meta()` cannot: that answers '' both for "no row" and
+     * for "the read did not happen". Those two need different
+     * answers here, because one of them means ON.
+     *
+     * ⇒ So the flag is read through bcc-core's
+     * `UserMetaRepository::valuesOrUnknown()`, which answers null when
+     * the read cannot be trusted. Same seam, same memo, and the same
+     * strictest-row rule `PrivacySettings::flagOrUnknown()` already
+     * uses for the §K2 flags — those were made fail-closed first, and
+     * this brings the show-flags alongside them.
+     *
+     * @return bool|null true shown, false hidden, null NOT READ
      */
-    private static function showFlag(int $ownerId, string $metaKey): bool
+    private static function showFlagOrUnknown(int $ownerId, string $metaKey): ?bool
     {
-        $raw = get_user_meta($ownerId, $metaKey, true);
-        if (!is_scalar($raw) || trim((string) $raw) === '') {
-            return true;
+        $values = UserMetaRepository::valuesOrUnknown([$ownerId], [$metaKey]);
+        if ($values === null) {
+            return null;
         }
 
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        return self::strictestShow($values[$ownerId][$metaKey] ?? []);
+    }
+
+    /**
+     * Strictest row wins, in the direction that hides.
+     *
+     * WordPress allows several rows per (user, key);
+     * `update_user_meta()` rewrites them all, so they only diverge when
+     * something called `add_user_meta()` directly.
+     * `PrivacySettings::strictest()` resolves its HIDE flags the same
+     * way — any ON row hides — and this is that rule for a SHOW flag,
+     * which is why the comparison is inverted: any row that does not
+     * say ON hides the section.
+     *
+     * An empty row is NO PREFERENCE rather than an OFF vote, so it is
+     * skipped — exactly the ABSENT-MEANS-ON case, which is every
+     * account that has never opened the setting.
+     *
+     * @param list<string> $rows
+     */
+    private static function strictestShow(array $rows): bool
+    {
+        foreach ($rows as $raw) {
+            if (trim($raw) === '') {
+                continue;
+            }
+            if (!filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

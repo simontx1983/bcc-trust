@@ -16,13 +16,13 @@ use ReflectionMethod;
 /**
  * A member card's bio follows that member's About visibility (F-341).
  *
- * ## The gap this closes
+ * ## The rule
  *
- * The profile honours the switch: `UserViewService` returns `bio` as a
- * documented `null` for a viewer who may not see the About section. The
- * CARD did not — `CardViewService` held no reference to
- * `ProfileSectionVisibility` at all — so the same text was served on every
- * card in every list while the member's own profile withheld it.
+ * One accessor answers for every surface: `ProfileSectionVisibility`.
+ * The profile returns `bio` as a documented `null` when About is not
+ * visible to the viewer; the card returns `''`, which is what the card
+ * shape uses for "no bio" on every kind. Same question, same answer,
+ * two field types.
  *
  * ## What each level of this file can and cannot show
  *
@@ -61,7 +61,9 @@ final class CardBioAboutVisibilityTest extends TestCase
         require_once dirname(__DIR__) . '/Stubs/profile-section-visibility-stubs.php';
         require_once dirname(__DIR__) . '/Stubs/card-bio-about-gate-stubs.php';
 
-        $GLOBALS['__bcc_psv'] = ['is_admin' => false, 'meta' => []];
+        $GLOBALS['__bcc_psv'] = ['is_admin' => false, 'admin_ids' => [], 'meta' => []];
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
+        \BCC\Core\Repositories\UserMetaRepository::$rows       = [];
     }
 
     /**
@@ -104,13 +106,63 @@ final class CardBioAboutVisibilityTest extends TestCase
         self::assertSame(self::BIO, $this->bioFor(self::OWNER));
     }
 
-    /** An admin keeps the §F-02 exemption the rest of profile privacy uses. */
-    public function testAnAdminKeepsTheVisibilityExemption(): void
+    /**
+     * An admin keeps the §F-02 exemption the rest of profile privacy
+     * uses — and it is THIS VIEWER's exemption, so the fixture says the
+     * viewer holds `manage_options`.
+     */
+    public function testAnAdminViewerKeepsTheVisibilityExemption(): void
     {
         $this->givenAboutSetting('0');
-        $GLOBALS['__bcc_psv']['is_admin'] = true;
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [self::VIEWER];
 
         self::assertSame(self::BIO, $this->bioFor(self::VIEWER));
+    }
+
+    /**
+     * ⭐ AND AN ADMIN REQUEST DOES NOT EXEMPT A DIFFERENT VIEWER.
+     *
+     * A card list is where the two identities come apart: it is composed
+     * for one member while another is signed in, and a fan-out build has
+     * no current user at all. The exemption is the viewer's.
+     */
+    public function testAnAdminRequestDoesNotExemptADifferentViewer(): void
+    {
+        $this->givenAboutSetting('0');
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [];
+
+        self::assertSame('', $this->bioFor(self::VIEWER));
+    }
+
+    /**
+     * ⭐ A FLAG THAT COULD NOT BE READ WITHHOLDS THE BIO.
+     *
+     * Card lists reach the flag through a batched meta prime, where a
+     * plain `get_user_meta()` cannot tell "no row" from "not read". The
+     * flag is read through `UserMetaRepository::valuesOrUnknown()` so
+     * the two are distinguishable, and an untrusted read withholds.
+     *
+     * Stored as SHOWN, so only the failed read can withhold it.
+     */
+    public function testAnUnreadableFlagWithholdsTheBioFromOthers(): void
+    {
+        $this->givenAboutSetting('1');
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        self::assertSame('', $this->bioFor(self::VIEWER));
+    }
+
+    /**
+     * ⚠ … and the owner still gets their own. A transient read failure
+     * must not blank the owner's own card.
+     */
+    public function testAnUnreadableFlagStillShowsTheOwnerTheirOwnBio(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        self::assertSame(self::BIO, $this->bioFor(self::OWNER));
     }
 
     /**

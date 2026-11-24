@@ -58,6 +58,11 @@ final class ProfileSectionVisibilityTest extends TestCase
     protected function tearDown(): void
     {
         unset($GLOBALS['__bcc_psv']);
+        // The meta double's state is STATIC. Left set, an unreadable
+        // member or a duplicate-row fixture would leak into every later
+        // test in this process and hide sections they never asked to hide.
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
+        \BCC\Core\Repositories\UserMetaRepository::$rows       = [];
         parent::tearDown();
     }
 
@@ -86,10 +91,19 @@ final class ProfileSectionVisibilityTest extends TestCase
         }
     }
 
-    /** ⭐ CONTROL. Admins keep the §F-02 exemption, on every section. */
+    /**
+     * ⭐ CONTROL. Admins keep the §F-02 exemption, on every section.
+     *
+     * ⚠ The exemption belongs to the VIEWER being asked about, so the
+     * fixture says this viewer holds `manage_options` rather than only
+     * that the request's user is an admin. {@see
+     * testAnAdminRequestDoesNotExemptADifferentViewer()} is the other
+     * half of that distinction.
+     */
     public function testAnAdminSeesEverySection(): void
     {
-        $GLOBALS['__bcc_psv']['is_admin'] = true;
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [self::VIEWER];
         $this->storeFor(self::OWNER, self::ALL_OFF);
 
         foreach (PSV::SECTIONS as $section) {
@@ -97,6 +111,114 @@ final class ProfileSectionVisibilityTest extends TestCase
         }
     }
 
+    /**
+     * The four sections whose storage is a `bcc_show_*` flag read
+     * through bcc-core's `UserMetaRepository`.
+     *
+     * ⚠ Halls is NOT among them: it delegates to F-270's
+     * `ProfileAccess::showsGroupsOnProfile()`, a separate read. Reviews
+     * and disputes are not either — they are §K2 flags, and
+     * `PrivacySettings::flag()` already answers "hidden" for an
+     * untrusted read.
+     *
+     * @return list<string>
+     */
+    private static function showMetaSections(): array
+    {
+        return [
+            PSV::SECTION_ABOUT,
+            PSV::SECTION_VERIFICATIONS,
+            PSV::SECTION_OPERATOR,
+            PSV::SECTION_BLOGS,
+        ];
+    }
+
+    /**
+     * ⭐ A FLAG THAT COULD NOT BE READ HIDES THE SECTION.
+     *
+     * This is the case a plain `get_user_meta()` cannot express: it
+     * answers `''` for BOTH "no row" and "the read did not happen".
+     * `UserMetaRepository::valuesOrUnknown()` separates them, and an
+     * untrusted read hides.
+     *
+     * Stored as SHOWN here, so nothing but the failed read can hide it.
+     * The unit double fails a member's read via `$unreadable[$id]`.
+     */
+    public function testAnUnreadableFlagHidesTheSectionFromOthers(): void
+    {
+        $this->storeFor(self::OWNER, [
+            'bcc_show_about_on_profile'         => '1',
+            'bcc_show_verifications_on_profile' => '1',
+            'bcc_show_operator_on_profile'      => '1',
+            'bcc_show_blogs_on_profile'         => '1',
+        ]);
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::hides($section, self::OWNER, self::VIEWER),
+                $section . ' stayed visible on a read that did not happen'
+            );
+        }
+    }
+
+    /**
+     * ⚠ … AND STILL SHOWS IT TO THE OWNER.
+     *
+     * The owner returns before any flag is read, so a failed read must
+     * not blank their own profile — that would turn a transient read
+     * failure into "your profile is empty", and the owner is the one
+     * viewer who is entitled to see it regardless.
+     */
+    public function testAnUnreadableFlagStillShowsTheOwnerTheirOwnSections(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::shows($section, self::OWNER, self::OWNER),
+                $section . ' was hidden from its own owner'
+            );
+        }
+    }
+
+    /**
+     * ⭐ AN ADMIN REQUEST DOES NOT EXEMPT A DIFFERENT VIEWER.
+     *
+     * The exemption belongs to the viewer being served. A card list can
+     * be composed for one member while another is signed in, and an
+     * async or fan-out build has no current user at all, so the two
+     * identities have to be kept apart.
+     *
+     * `is_admin` true (the request's user is an admin) with `admin_ids`
+     * not containing the viewer is exactly that split.
+     */
+    public function testAnAdminRequestDoesNotExemptADifferentViewer(): void
+    {
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [];
+        $this->storeFor(self::OWNER, self::ALL_OFF);
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::hides($section, self::OWNER, self::VIEWER),
+                $section . " borrowed the request user's exemption"
+            );
+        }
+    }
+
+    /**
+     * ⚠ DUPLICATE ROWS: the strictest wins, in the direction that
+     * hides. WordPress allows several rows per (user, key), and
+     * `PrivacySettings` resolves its §K2 flags the same way, so one OFF
+     * row hides even when another says ON.
+     */
+    public function testTheStrictestStoredRowWins(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$rows[self::OWNER]['bcc_show_about_on_profile'] = ['1', '0'];
+
+        self::assertTrue(PSV::hides(PSV::SECTION_ABOUT, self::OWNER, self::VIEWER));
+    }
     /**
      * ⭐ CONTROL, the other way. With nothing stored, a STRANGER sees
      * everything — the permissive default that keeps F-341 from changing
