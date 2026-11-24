@@ -103,7 +103,7 @@ final class MemberCardPrefetcher
             (new ReputationRepository())->primeByUserIds($reputationIds);
         }
 
-        $map = MemberSummaryPrefetcher::primeFor($idList);
+        $map = MemberSummaryPrefetcher::primeFor($idList, $viewerId);
 
         $attestationRepo = new AttestationRepository();
 

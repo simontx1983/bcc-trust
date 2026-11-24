@@ -133,7 +133,7 @@ final class CardReviewsService
             : null;
 
         $authorIds  = array_values(array_unique($authorIds));
-        $prefetched = $authorIds === [] ? null : MemberSummaryPrefetcher::primeFor($authorIds);
+        $prefetched = $authorIds === [] ? null : MemberSummaryPrefetcher::primeFor($authorIds, $viewerId);
 
         $userView = Plugin::instance()->userViewService();
         $now      = time();

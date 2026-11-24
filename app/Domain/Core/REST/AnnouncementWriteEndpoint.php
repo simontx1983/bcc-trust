@@ -286,7 +286,7 @@ final class AnnouncementWriteEndpoint
             (int) $request['id'],
             $decision,
             null,
-            current_user_can('manage_options'),
+            \BCC\Trust\Core\Support\BearerAuth::userIsAdmin(get_current_user_id()),
             $actorId
         );
 

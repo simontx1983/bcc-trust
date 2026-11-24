@@ -263,7 +263,7 @@ final class AdminReportsEndpoint
         if ($viewerId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
-        if (!current_user_can('manage_options')) {
+        if (!\BCC\Trust\Core\Support\BearerAuth::requireAdmin()) {
             return ApiResponse::error('bcc_forbidden', 'Admin access required.', 403);
         }
         return null;
