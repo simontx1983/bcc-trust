@@ -115,6 +115,10 @@ namespace BCC\Trust\Core\REST {
         {
             // Like WordPress: an UNCHANGED value is not written and returns
             // false, which is NOT an error (M1 must not read it as one).
+            // Like wpdb::query(), which flush()es last_error on every
+            // statement: update_metadata() always runs at least one, so a
+            // failed write before this one leaves no error behind it.
+            $GLOBALS['wpdb']->last_error = '';
             if (($GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? null) === $value) {
                 return false;
             }
@@ -168,6 +172,10 @@ namespace BCC\Trust\Core\Support {
             // Same semantics as the REST shim: an UNCHANGED value is not
             // written and returns false, which is NOT an error — DbWriteCheck
             // must not read it as one.
+            // Like wpdb::query(), which flush()es last_error on every
+            // statement: update_metadata() always runs at least one, so a
+            // failed write before this one leaves no error behind it.
+            $GLOBALS['wpdb']->last_error = '';
             if (($GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? null) === $value) {
                 return false;
             }
@@ -188,7 +196,13 @@ namespace BCC\Trust\Core\Support {
          */
         function get_option(string $key, $default = false)
         {
-            return $default;
+            // F-519: a suite may set an option (the F-257 fold's done-marker)
+            // in `__bcc_prefs_options` and see which were read in
+            // `__bcc_prefs_option_reads`. An empty store returns $default,
+            // as before.
+            $GLOBALS['__bcc_prefs_option_reads'][] = $key;
+
+            return $GLOBALS['__bcc_prefs_options'][$key] ?? $default;
         }
     }
 }

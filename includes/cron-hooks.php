@@ -47,6 +47,7 @@ return [
         'bcc_attestor_reliability_sweep'        => ['interval' => 'daily',                        'description' => 'operator-reliability cache recompute (Slice 3)'],
         'bcc_trust_elite_eligibility_sweep'     => ['interval' => 'daily',                        'description' => '§J.12 elite-eligibility gate recompute (tenure crossings + dispute-window expiry)'],
         'bcc_trust_feed_hot_warm'               => ['interval' => 'bcc_one_minute',               'description' => 'anon /feed/hot first-page payload warm'],
+        'bcc_trust_peepso_upkeep'               => ['interval' => 'bcc_five_minutes',             'description' => 'PeepSo upkeep BCC depends on: hashtags, expired mayfly rows, registration-avatar temp files'],
         // Onchain domain
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],

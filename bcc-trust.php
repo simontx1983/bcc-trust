@@ -704,6 +704,10 @@ add_action('bcc_trust_elite_eligibility_sweep', function () {
 add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
+// F-581: the PeepSo upkeep BCC depends on (trending hashtags, expired
+// mayfly rows, registration-avatar temp files). Only those three steps;
+// see Integration\PeepSoUpkeep.
+add_action(\BCC\Trust\Core\Integration\PeepSoUpkeep::CRON_HOOK, [\BCC\Trust\Core\Integration\PeepSoUpkeep::class, 'runScheduled']);
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
         \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
