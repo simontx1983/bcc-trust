@@ -142,7 +142,7 @@ final class ValidatorRelationshipService
                 'pages'    => $write['mirror_page_ids'],
             ];
         }, static function (array $done) use ($staffId, $pageId, $userId): array {
-            AuditLogger::log('validator_owner_linked', $pageId, ['user_id' => $userId, 'link_id' => $done['link_id']], 'page', $staffId);
+            self::safely('audit', static fn () => AuditLogger::log('validator_owner_linked', $pageId, ['user_id' => $userId, 'link_id' => $done['link_id']], 'page', $staffId));
             self::afterOwnerGained($userId, $done['pages']);
             self::changed('owner_linked', $pageId, $userId, $staffId, (int) $done['link_id']);
 
@@ -241,10 +241,10 @@ final class ValidatorRelationshipService
 
             return ['result' => $result, 'appended' => $appended, 'user_id' => $link['user_id']];
         }, static function (array $done) use ($staffId, $pageId, $linkId, $reason, $logAction): array {
-            AuditLogger::log('validator_' . $logAction, $pageId, ['user_id' => $done['user_id'], 'link_id' => $linkId, 'reason' => $reason], 'page', $staffId);
-            ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, false);
+            self::safely('audit', static fn () => AuditLogger::log('validator_' . $logAction, $pageId, ['user_id' => $done['user_id'], 'link_id' => $linkId, 'reason' => $reason], 'page', $staffId));
+            self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, false));
             foreach ($done['result']['mirror_page_ids'] as $lostPage) {
-                PageOwnershipAligner::schedule((int) $lostPage);
+                self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule((int) $lostPage));
             }
             self::changed($logAction, $pageId, (int) $done['user_id'], $staffId, $linkId);
 
@@ -329,19 +329,32 @@ final class ValidatorRelationshipService
      */
     private static function afterOwnerGained(int $userId, array $pages): void
     {
-        try {
+        self::safely('bonus', static function () use ($userId): void {
             $ownPage = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
             if ($ownPage) {
                 BonusService::recomputeAndApply((int) $ownPage, $userId);
             }
-        } catch (\Throwable $e) {
-            \BCC\Core\Log\Logger::warning('[bcc-trust] owner link: bonus recompute failed', ['user_id' => $userId, 'error' => $e->getMessage()]);
-        }
+        });
         foreach ($pages as $pageId) {
-            \BCC\Trust\Core\Services\PageReadModelSync::markDirty((int) $pageId);
-            PageOwnershipAligner::schedule((int) $pageId);
+            self::safely('read_model', static fn () => \BCC\Trust\Core\Services\PageReadModelSync::markDirty((int) $pageId));
+            self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule((int) $pageId));
         }
-        do_action('bcc_trust_verification_changed', $userId);
+        self::safely('verification_changed', static fn () => do_action('bcc_trust_verification_changed', $userId));
+    }
+
+    /**
+     * One post-commit step: the change is COMMITTED, so a failure here is
+     * logged and counted, never thrown (it must not report the change as
+     * failed).
+     */
+    private static function safely(string $step, callable $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'followup_failed');
+            \BCC\Core\Log\Logger::error('[bcc-trust] validator relationship follow-up failed', ['step' => $step, 'error' => $e->getMessage()]);
+        }
     }
 
     /**
