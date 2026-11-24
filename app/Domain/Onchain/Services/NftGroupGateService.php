@@ -418,9 +418,17 @@ final class NftGroupGateService {
      *   - unless this was the last attempt, ONE single-event retry
      *     REJOIN_BLOCK_RETRY_DELAY seconds later, with the next attempt
      *     number.
-     * A retry that succeeds writes 'group_rejoin_block_recorded'. The
-     * Audit Log admin page lists both; a final failure shows BAD with what
-     * the admin can do.
+     * A retry that succeeds reads the member's group membership, because
+     * the member may have rejoined while the block was not yet recorded:
+     *   - not a member: 'group_rejoin_block_recorded';
+     *   - a member again: 'group_rejoin_block_recorded_rejoined' (the
+     *     block now holds, but they are in: remove them again);
+     *   - membership unreadable: 'group_rejoin_block_recorded_unverified'
+     *     (fails toward telling the admin to check).
+     * Every row carries the removed member as `member_id` in its meta: the
+     * audit log's user column is the ACTOR column. The Audit Log admin page
+     * lists all four; the failures and the two "check" outcomes show BAD
+     * with what the admin can do.
      */
     public function recordEvictionRejoinBlock(int $userId, int $groupId, int $attempt = 0): bool {
         if ($userId <= 0 || $groupId <= 0) {
@@ -428,13 +436,13 @@ final class NftGroupGateService {
         }
         if ($this->recordPermanentOptOut($userId, $groupId)) {
             if ($attempt > 0) {
-                AuditLogger::log('group_rejoin_block_recorded', $groupId, ['attempt' => $attempt], 'group', $userId);
+                AuditLogger::log(self::rejoinBlockRecordedAction($userId, $groupId), $groupId, ['attempt' => $attempt, 'member_id' => $userId], 'group', $userId);
             }
             return true;
         }
 
         $final = $attempt >= self::REJOIN_BLOCK_RETRY_ATTEMPTS;
-        AuditLogger::log('group_rejoin_block_failed', $groupId, ['attempt' => $attempt, 'final' => $final], 'group', $userId);
+        AuditLogger::log('group_rejoin_block_failed', $groupId, ['attempt' => $attempt, 'final' => $final, 'member_id' => $userId], 'group', $userId);
         if (!$final) {
             wp_schedule_single_event(
                 time() + self::REJOIN_BLOCK_RETRY_DELAY,
@@ -443,6 +451,21 @@ final class NftGroupGateService {
             );
         }
         return false;
+    }
+
+    /**
+     * The audit action for a block a RETRY recorded: was the member back in
+     * the group by then? A status starting with 'member' is membership (as
+     * core's ACTIVE_MEMBER_STATUS); a read that failed is 'unverified'.
+     */
+    private static function rejoinBlockRecordedAction(int $userId, int $groupId): string {
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatusOrFail($userId, $groupId);
+        if ($status === false) {
+            return 'group_rejoin_block_recorded_unverified';
+        }
+        return is_string($status) && str_starts_with($status, 'member')
+            ? 'group_rejoin_block_recorded_rejoined'
+            : 'group_rejoin_block_recorded';
     }
 
     public function clearOptOut(int $userId, int $groupId): void {

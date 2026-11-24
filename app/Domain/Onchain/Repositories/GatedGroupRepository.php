@@ -408,7 +408,7 @@ final class GatedGroupRepository {
         // agree. No COLLATE clause is needed or wanted here — unlike the
         // contract lookup, this comparison is numeric, so the case
         // sensitivity of wp_postmeta's collation cannot affect it.
-        $row = $wpdb->get_var($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT pm_coll.post_id
                FROM {$wpdb->postmeta} pm_coll
           INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_coll.post_id
@@ -426,11 +426,12 @@ final class GatedGroupRepository {
             self::KIND_HOLDERS,
             'peepso-group',
             'publish'
-        ));
+        );
 
-        // ⚠ Order matters: guard BEFORE interpreting the result, so a
-        // failed read can never be cast to null and handed back.
-        self::guardReadOrThrow(__FUNCTION__);
+        // ⚠ The verification is INSIDE the read now, so there is no longer
+        // an order to get wrong: a read that did not run throws before any
+        // value exists to cast to null and hand back.
+        $row = self::runReadVar($sql, __FUNCTION__, true);
 
         return $row !== null ? (int) $row : null;
     }

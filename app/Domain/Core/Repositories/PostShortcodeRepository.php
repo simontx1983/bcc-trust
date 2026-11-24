@@ -159,7 +159,10 @@ final class PostShortcodeRepository
      * exist"); `get_var()` used to give the same null on a failed query.
      * The endpoint answers the throw with its retryable 503. The same holds
      * for the table check before it: a SHOW TABLES that failed is not "no
-     * table".
+     * table". That half needed the three-state
+     * {@see TableRegistry::existsOrUnknown()} to be true — `exists()`
+     * reports an unreadable table as missing, and a pre-flush bail leaves
+     * no error string behind for a guard to find.
      *
      * @throws RepositoryReadFailure when the lookup, or the table check before it, did not run
      */
@@ -171,12 +174,31 @@ final class PostShortcodeRepository
 
         global $wpdb;
         $table = TableRegistry::postShortcodes();
-        self::clearReadError();
-        if (!TableRegistry::exists($table)) {
-            // Answered from the memo or the cache, the check runs no query
-            // and leaves the error clean; a failed SHOW TABLES does not.
-            self::guardReadOrThrow(__FUNCTION__ . ': table check');
-            return null;
+
+        // ⚠⚠ existsOrUnknown(), NOT exists(), and no `last_error` check.
+        //
+        // `exists()` is `existsOrUnknown() === true`, and
+        // existsOrUnknown() CATCHES RepositoryReadFailure and answers
+        // null. So a SHOW TABLES that did not run arrived here as
+        // "no such table" — and the guard that was meant to catch that
+        // inspects `last_error`, which a pre-flush bail never sets:
+        // wpdb::query() returns false above flush(), records no error,
+        // and leaves the previous query's rows in last_result.
+        //
+        // The endpoint answered that null as 404, "this post does not
+        // exist", for a database that was merely unreadable. Asking for
+        // the three-state answer is the only way to tell the two apart,
+        // because there is no error string to read.
+        $tableExists = TableRegistry::existsOrUnknown($table);
+        if ($tableExists === null) {
+            throw new RepositoryReadFailure(
+                static::class,
+                __FUNCTION__ . ': table check',
+                'the table-existence probe did not run'
+            );
+        }
+        if ($tableExists === false) {
+            return null; // Genuinely no table, so there is no such code.
         }
 
         $sql = $wpdb->prepare(

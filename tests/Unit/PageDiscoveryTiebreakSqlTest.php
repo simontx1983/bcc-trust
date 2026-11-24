@@ -87,6 +87,57 @@ namespace BCC\Trust\Core\Tests\Unit {
         }
 
         /**
+         * F-560: the read model orders named validators FIRST under every
+         * sort: the unnamed key (a scalar subquery on the page's validator
+         * row), then the chosen sort, then the tiebreak.
+         */
+        public function testEveryReadModelSortPutsNamedValidatorsFirst(): void
+        {
+            foreach (['trust', '', 'endorsements', 'newest', 'followers', 'self_stake'] as $sort) {
+                $GLOBALS['wpdb']->results = [];
+                PageDiscoveryRepository::queryFromReadModel([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+                self::assertMatchesRegularExpression(
+                    "/ORDER BY COALESCE\(\(\s*SELECT CASE WHEN .+FROM wp_postmeta pm_named\s+INNER JOIN wp_bcc_onchain_validators v_named.+'_bcc_onchain_validator_id'\s+LIMIT 1\s*\), 0\) ASC, /s",
+                    self::mainSql(),
+                    "sort '{$sort}': the unnamed key comes first"
+                );
+            }
+        }
+
+        /**
+         * F-560, the posts-table fallback: its statement is DISTINCT, so the
+         * key is SELECTED as `is_unnamed` and the ORDER BY leads with it.
+         */
+        public function testEveryPostsTableSortPutsNamedValidatorsFirst(): void
+        {
+            foreach (['trust', '', 'endorsements', 'newest', 'followers'] as $sort) {
+                $GLOBALS['wpdb']->results = [];
+                PageDiscoveryRepository::queryFromPostsTable([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+                $sql = self::mainSql();
+                self::assertMatchesRegularExpression('/\), 0\) AS is_unnamed\s/', $sql, "sort '{$sort}': the key is selected");
+                self::assertMatchesRegularExpression('/ORDER BY is_unnamed ASC, /', $sql, "sort '{$sort}': and leads the ORDER BY");
+            }
+        }
+
+        /** F-560: no COUNT carries the key, so the total is exactly as before. */
+        public function testNoCountCarriesTheUnnamedKey(): void
+        {
+            $runs = [
+                'read model'               => static fn () => PageDiscoveryRepository::queryFromReadModel([], 'trust', false, '', 0.0, false, 0, 12, 2, ''),
+                'read model, chain filter' => static fn () => PageDiscoveryRepository::queryFromReadModel(['validator'], 'self_stake', false, '', 0.0, false, 0, 12, 2, '', false, 'solana', 'active', 1.0),
+                'posts table'              => static fn () => PageDiscoveryRepository::queryFromPostsTable(['validator'], 'trust', true, '', 0.0, false, 0, 12, 2, 'x'),
+            ];
+            foreach ($runs as $label => $run) {
+                $GLOBALS['wpdb']->results = [];
+                $run();
+                $counts = array_values(array_filter($GLOBALS['wpdb']->results, static fn (string $sql): bool => str_contains($sql, 'COUNT(')));
+                self::assertCount(1, $counts, $label);
+                self::assertStringNotContainsString('pm_named', $counts[0], "{$label}: the COUNT is untouched");
+                self::assertStringNotContainsString('is_unnamed', $counts[0], $label);
+            }
+        }
+
+        /**
          * SECRET pages: the COUNT and the paged SELECT of BOTH discovery
          * queries carry bcc-core's shared rule on the posts alias, for every
          * sort and with the validator and verified-only joins in play.

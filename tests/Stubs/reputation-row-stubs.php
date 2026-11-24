@@ -22,7 +22,7 @@ namespace BCC\Trust\Tests\Stubs {
         public string $last_error = '';
         /** @var list<object>|null */
         public ?array $last_result = [];
-        /** @var array<int, array{tier: string, score: float}> member id => its row */
+        /** @var array<int, array{tier: string, score: float, bonus?: float}> member id => its row */
         public array $rows = [];
         public int $failNext = 0;
         public int $failSilentNext = 0;
@@ -34,6 +34,23 @@ namespace BCC\Trust\Tests\Stubs {
         {
             $this->args = array_map('intval', $args);
             return $sql;
+        }
+
+        /**
+         * wpdb::get_results() as the display readers call it: runs the query
+         * and answers last_result, which is [] after a normal failure (and
+         * stale after a silent one).
+         *
+         * @return list<object>|null
+         */
+        public function get_results(?string $sql = null): ?array
+        {
+            if ($sql === null) {
+                return null;
+            }
+            $this->query($sql);
+
+            return $this->last_result;
         }
 
         public function query(string $sql): int|false
@@ -59,7 +76,7 @@ namespace BCC\Trust\Tests\Stubs {
                         'page_owner_id'      => (string) $memberId,
                         'total_score'        => (string) $this->rows[$memberId]['score'],
                         'reputation_tier'    => $this->rows[$memberId]['tier'],
-                        'contribution_bonus' => '0.00',
+                        'contribution_bonus' => (string) ($this->rows[$memberId]['bonus'] ?? '0.00'),
                         'vote_count'         => '0',
                         'last_calculated_at' => '2026-11-20 00:00:00',
                     ];

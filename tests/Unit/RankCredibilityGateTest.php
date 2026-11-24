@@ -113,6 +113,21 @@ final class RankCredibilityGateTest extends TestCase
         );
     }
 
+    /**
+     * F-469: a tier that could not be read is not Neutral+, so the member is
+     * not credible (an auto-hide report from them is not counted). Exercised
+     * through the real tierAtLeastNeutral() -> tierAtLeast() chain, with only
+     * the tri-state atom scripted.
+     */
+    public function testAnUnreadableTierIsNotCredible(): void
+    {
+        $gate = new UnreadableTierCredibilityGate();
+
+        self::assertFalse($gate->isCredible(self::U));
+        self::assertFalse($gate->isCredibleRecognizer(self::U));
+        self::assertTrue($gate->isCredible(self::U, requireTierNeutral: false), 'control: every other gate passes');
+    }
+
     public function testIsCredibleSuspensionAndFraudGatesCanBeWaived(): void
     {
         // write_review-shape: suspension + fraud waived, rank + tier kept.
@@ -120,6 +135,43 @@ final class RankCredibilityGateTest extends TestCase
             $this->gate(notSuspended: false, fraudClear: false)
                 ->isCredible(self::U, requireNotSuspended: false, requireFraudClear: false)
         );
+    }
+}
+
+/**
+ * F-469: every gate passes except the tier, which could not be read. Only
+ * the tri-state atom is scripted; tierAtLeastNeutral() and tierAtLeast()
+ * run for real.
+ */
+final class UnreadableTierCredibilityGate extends RankCredibilityGate
+{
+    public function __construct()
+    {
+    }
+
+    protected function notSuspended(int $userId): bool
+    {
+        return true;
+    }
+
+    protected function hasRankState(int $userId): bool
+    {
+        return true;
+    }
+
+    protected function inRecovery(int $userId): bool
+    {
+        return false;
+    }
+
+    protected function fraudClear(int $userId): bool
+    {
+        return true;
+    }
+
+    protected function tierAtLeastOrUnknown(int $userId, string $tierSlug): ?bool
+    {
+        return null;
     }
 }
 

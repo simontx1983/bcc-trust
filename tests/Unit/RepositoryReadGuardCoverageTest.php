@@ -58,6 +58,21 @@ final class RepositoryReadGuardCoverageTest extends TestCase
     private const READ_CALLS = ['get_results', 'get_row', 'get_col', 'get_var'];
 
     /**
+     * The verified-read helpers on the guard trait (F-472).
+     *
+     * These RUN the read themselves and check `query()`'s RETURN VALUE as
+     * well as the error, so a call to one is both the read and its guard.
+     * The three guard functions inspect `last_error` and nothing else, and
+     * a pre-`flush()` bail sets no error at all — which is why the sweep
+     * has to know about both shapes rather than one.
+     *
+     * ⚠ Listed separately, not as a prefix match: `runRead` must not also
+     * match `runReadRow`, or the fail-closed regex below would accept the
+     * wrong call's arguments.
+     */
+    private const VERIFIED_READ_CALLS = ['runRead', 'runReadRow', 'runReadVar'];
+
+    /**
      * The reads whose failure must PROPAGATE, because their answer is
      * rendered to an operator as fact.
      *
@@ -153,6 +168,13 @@ final class RepositoryReadGuardCoverageTest extends TestCase
         // was folded into `getAll`, leaving FOUR (get, getAll, recordSuccess,
         // addCuUsage). So 3 is the largest value that still fails if the
         // sweep stops finding them, which is the only job this number has.
+        //
+        // F-472 did NOT move it. `addCuUsage()` now reads through
+        // `runReadRow()`, and this floor fired when it did — correctly: the
+        // sweep had stopped seeing that method. The fix was to teach the
+        // sweep the new shape, so the denominator is still four. Lowering
+        // this number instead would have been the weakening the comment
+        // above warns about.
         self::assertGreaterThan(
             3,
             $inspected,
@@ -182,9 +204,8 @@ final class RepositoryReadGuardCoverageTest extends TestCase
                     $reads,
                     $repository . '::' . $method . '() no longer contains the read this policy is about'
                 );
-                self::assertStringContainsString(
-                    'guardReadOrThrow(',
-                    $reads[$method],
+                self::assertTrue(
+                    $this->failsClosed($reads[$method]),
                     sprintf(
                         '%s::%s() feeds an operator surface and must THROW on a failed read. Absorbing it there '
                             . 'reports a healthy, empty, up-to-date system that nobody managed to look at.',
@@ -203,9 +224,8 @@ final class RepositoryReadGuardCoverageTest extends TestCase
 
             foreach ($methods as $method) {
                 self::assertArrayHasKey($method, $reads, $repository . '::' . $method . '() lost its read');
-                self::assertStringNotContainsString(
-                    'guardReadOrThrow(',
-                    $reads[$method],
+                self::assertFalse(
+                    $this->failsClosed($reads[$method]),
                     sprintf(
                         '%s::%s() runs inside cron. Throwing there turns a logged degradation into a fatal tick; '
                             . 'log it and let the worker come back next pass.',
@@ -276,13 +296,61 @@ final class RepositoryReadGuardCoverageTest extends TestCase
             }
         }
 
+        // A verified read is still a read. Without this the sweep stops
+        // seeing a method the moment it is converted, which is how a
+        // structural test quietly starts testing nothing.
+        return $this->hasVerifiedReadCall($body);
+    }
+
+    private function hasVerifiedReadCall(string $body): bool
+    {
+        foreach (self::VERIFIED_READ_CALLS as $call) {
+            if (str_contains($body, 'self::' . $call . '(')) {
+                return true;
+            }
+        }
+
         return false;
     }
 
     private function hasGuardCall(string $body): bool
     {
-        return str_contains($body, 'guardRead(')
+        // A verified read IS its own guard, and a stricter one: it checks
+        // query()'s return value, which none of the three below can see.
+        return $this->hasVerifiedReadCall($body)
+            || str_contains($body, 'guardRead(')
             || str_contains($body, 'guardReadOrThrow(')
             || str_contains($body, 'readFailed(');
+    }
+
+    /**
+     * Does this method's read PROPAGATE a failure rather than absorb it?
+     *
+     * Two forms satisfy it: an explicit `guardReadOrThrow()` call, and a
+     * verified read whose `$failClosed` argument is a literal `true`.
+     *
+     * ONE predicate, used positively by the fail-closed test and
+     * negatively by the fail-safe one, so the two policy pins cannot
+     * drift apart as more sites are converted.
+     *
+     * ⚠ THE LITERAL `true` IS THE POINT. `runRead($sql, $m, false)` logs
+     * and returns the empty shape, which is the fail-SAFE policy, and
+     * `runRead($sql, $m, $failClosed)` leaves the choice to the caller.
+     * Accepting any runRead call here would let a listed method be
+     * downgraded silently — the exact thing these lists exist to stop.
+     */
+    private function failsClosed(string $body): bool
+    {
+        if (str_contains($body, 'guardReadOrThrow(')) {
+            return true;
+        }
+
+        foreach (self::VERIFIED_READ_CALLS as $call) {
+            if (preg_match('/self::' . $call . '\s*\((?:[^;]*?),\s*true\s*\)/s', $body) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

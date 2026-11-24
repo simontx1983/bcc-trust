@@ -286,19 +286,28 @@ final class NftHoldingsRepository
             )
         );
 
-        $rows = $wpdb->get_results($sql);
-        if ($failClosed) {
-            self::guardReadOrThrow('countVisibleByContractOrThrow');
-        } else {
-            self::guardRead('countVisibleByContract');
+        // The third argument carries the caller's policy, so the two guard
+        // branches collapse into the read. Both log names are unchanged.
+        //
+        // The shape is annotated here because runRead() returns
+        // `list<object>`, which is stronger than get_results()' `mixed`
+        // and so no longer silently permits property access. The columns
+        // are the two this query selects.
+        /** @var list<object{wallet_link_id: int|numeric-string, total: int|numeric-string}> $rows */
+        $rows = self::runRead(
+            (string) $sql,
+            $failClosed ? 'countVisibleByContractOrThrow' : 'countVisibleByContract',
+            $failClosed
+        );
+
+        // No is_array() guard: runRead() returns an array on every path,
+        // so the old one could not fire — and a guard that cannot fire
+        // tells the next reader the shape is uncertain when it is not.
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(int) $row->wallet_link_id] = (int) $row->total;
         }
 
-        $out  = [];
-        if (is_array($rows)) {
-            foreach ($rows as $row) {
-                $out[(int) $row->wallet_link_id] = (int) $row->total;
-            }
-        }
         return $out;
     }
 
@@ -795,7 +804,7 @@ final class NftHoldingsRepository
         global $wpdb;
         $table = self::table();
 
-        $at = $wpdb->get_var($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT MAX(indexed_at)
                FROM {$table}
               WHERE wallet_link_id = %d
@@ -803,8 +812,8 @@ final class NftHoldingsRepository
                 AND balance = 0",
             $walletLinkId,
             strtolower($contract)
-        ));
-        self::guardReadOrThrow('latestLossAtOrThrow');
+        );
+        $at = self::runReadVar($sql, 'latestLossAtOrThrow', true);
 
         if (!is_string($at) || $at === '') {
             return null;

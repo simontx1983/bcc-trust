@@ -186,7 +186,7 @@ final class CommunityCustodyServiceTest extends TestCase
         self::assertSame('bcc_unavailable', $result['error'] ?? null, 'a read failure was answered as a refusal');
         self::assertSame(['reason' => 'unavailable'], $result['data'] ?? null);
         self::assertSame(
-            'We couldn\'t check that member\'s communities just now. Please try again.',
+            'We couldn\'t check whether that member can receive this community just now. Please try again.',
             $result['message'] ?? null
         );
 

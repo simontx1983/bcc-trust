@@ -50,8 +50,11 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
     private const ENDPOINT = 'app/Domain/Core/REST/AnnouncementCommentsEndpoint.php';
     private const READS    = 'app/Domain/Core/REST/AnnouncementsEndpoint.php';
 
-    /** The four STANDING FLAGS, sorted. Each one denies when absent. */
-    private const KEYS = ['authenticated', 'fraud_locked', 'good_standing', 'suspended'];
+    /**
+     * The STANDING FLAGS, sorted. Each one denies when absent. (Five since
+     * F-469 added `standing_known`; some test names still say four.)
+     */
+    private const KEYS = ['authenticated', 'fraud_locked', 'good_standing', 'standing_known', 'suspended'];
 
     /**
      * ⚠⚠ A THIRD CATEGORY OF KEY, AND THE REASON IT NEEDED NAMING.
@@ -153,6 +156,8 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
                 'suspended'     => false,
                 'fraud_locked'  => false,
                 'good_standing' => false,
+                // F-469: nothing was read for a visitor, so it is not known.
+                'standing_known' => false,
                 // ⚠ 0, not null and not absent. The report gate requires BOTH
                 // ids to be positive before it calls a row the viewer's own, so
                 // 0 matches no author — including a row whose `post_author`
@@ -418,9 +423,10 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
                 'UserViewService::isInGoodStanding(',
                 'the tier-to-standing mapping has exactly one owner',
             ],
+            // F-469: the tri-state reader, so an unreadable tier denies.
             'the tier itself from the reputation repository' => [
-                'reputationRepository()->getTier(',
-                'the tier has exactly one source',
+                'reputationRepository()->getTierOrUnknown(',
+                'the tier has exactly one source, and unknown must be visible to it',
             ],
         ];
     }
@@ -491,7 +497,9 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         return [
             'an unreadable suspension state counts as suspended'  => ['isSuspended', 'true'],
             'an unreadable PeepSo role counts as locked'          => ['isFraudLocked', 'true'],
-            'an unreadable tier is not evidence of good standing' => ['isInGoodStanding', 'false'],
+            // F-469: tri-state. NULL is "could not be read": never good
+            // standing, and forViewer() reports it as standing_known false.
+            'an unreadable tier is unknown, never good standing'  => ['isInGoodStanding', 'null'],
         ];
     }
 

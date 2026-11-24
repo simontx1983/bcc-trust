@@ -172,13 +172,16 @@ final class AuthLogoutTest extends TestCase
     public function testAnUnreadableDenylistIsNotOverwritten(): void
     {
         $token = JwtToken::encode(self::USER, 'handle80');
-        $GLOBALS['__bcc_ph']['meta'][self::USER][JwtToken::DENYLIST_META_KEY] = ['someone-else' => time() + 3600];
+        // Asserted against the SAME seeded value, not a recomputed
+        // time() + 3600 that a second boundary would move (F-577).
+        $seeded = ['someone-else' => time() + 3600];
+        $GLOBALS['__bcc_ph']['meta'][self::USER][JwtToken::DENYLIST_META_KEY] = $seeded;
         $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail_from' => 2];
 
         [$status] = self::logout('Bearer ' . $token);
 
         self::assertSame(503, $status);
-        self::assertSame(['someone-else' => time() + 3600], self::denylist(), 'untouched');
+        self::assertSame($seeded, self::denylist(), 'untouched');
     }
 
     public function testAnExpiredDenylistEntryNoLongerDenies(): void

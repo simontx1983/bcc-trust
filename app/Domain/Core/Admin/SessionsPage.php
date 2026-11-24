@@ -117,11 +117,21 @@ final class SessionsPage
     /**
      * H7: a moderator removal from a gated group records a rejoin block.
      * When it can't be recorded, NftGroupGateService::recordEvictionRejoinBlock
-     * audits it and retries; these are its two outcomes.
+     * audits it and retries; these are its outcomes, with what each means.
      */
     public const REJOIN_BLOCK_ACTIONS = [
         'group_rejoin_block_failed',
         'group_rejoin_block_recorded',
+        'group_rejoin_block_recorded_rejoined',
+        'group_rejoin_block_recorded_unverified',
+    ];
+
+    /** @var array<string, array{0: string, 1: string}> action => [badge level, what it means] */
+    private const REJOIN_BLOCK_MEANINGS = [
+        'group_rejoin_block_failed'              => [AdminUi::BAD, 'Removed from the group, but the rejoin block was not recorded. BCC retries automatically; if this stays red, remove them again after they rejoin.'],
+        'group_rejoin_block_recorded'            => [AdminUi::OK, 'The rejoin block was recorded on a retry.'],
+        'group_rejoin_block_recorded_rejoined'   => [AdminUi::BAD, 'The block was recorded on a retry, but they were back in the group by then. Remove them again; the block now stops them rejoining.'],
+        'group_rejoin_block_recorded_unverified' => [AdminUi::BAD, 'The block was recorded on a retry, but their membership could not be read. Check the group\'s members and remove them again if they are back.'],
     ];
 
     private static function renderRejoinBlocks(): void
@@ -149,22 +159,18 @@ final class SessionsPage
             $userId   = (int)    ($row->user_id   ?? 0);
             $userName = (string) ($row->user_name ?? '');
             $groupId  = (int)    ($row->target_id ?? 0);
-            $failed   = $action === 'group_rejoin_block_failed';
+            [$level, $meaning] = self::REJOIN_BLOCK_MEANINGS[$action] ?? [AdminUi::WARN, ''];
 
             echo '<tr>';
             echo '<td><code style="font-size:12px;">' . esc_html((string) ($row->created_at ?? '')) . '</code></td>';
-            echo '<td>' . AdminUi::badge($action, $failed ? AdminUi::BAD : AdminUi::OK) . '</td>';
+            echo '<td>' . AdminUi::badge($action, $level) . '</td>';
             printf(
                 '<td>%s <span style="color:var(--bcc-text-muted);">#%d</span></td>',
                 esc_html($userName !== '' ? $userName : '(user removed)'),
                 $userId
             );
             printf('<td>#%d</td>', $groupId);
-            echo '<td>' . esc_html(
-                $failed
-                    ? 'Removed from the group, but the rejoin block was not recorded. BCC retries automatically; if this stays red, remove them again after they rejoin.'
-                    : 'The rejoin block was recorded on a retry.'
-            ) . '</td>';
+            echo '<td>' . esc_html($meaning) . '</td>';
             echo '</tr>';
         }
 

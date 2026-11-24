@@ -119,12 +119,12 @@ final class ReviewReplyServiceTest extends TestCase
     {
         \ReplyWorld::$reviews[self::VOTE] = ['voter' => self::MEMBER, 'page' => self::selfPage()];
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::MEMBER, self::VOTE, 'me again')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::MEMBER, self::VOTE, 'me again')), 'F-531: the same answer as a missing review');
     }
 
     public function testAThirdPartyCannotReply(): void
     {
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::STRANGER, self::VOTE, 'drive-by')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::STRANGER, self::VOTE, 'drive-by')), 'F-531: the same answer as a missing review');
         self::assertSame([], \ReplyWorld::$published, 'nothing written');
     }
 
@@ -133,7 +133,7 @@ final class ReviewReplyServiceTest extends TestCase
         $this->onValidatorPage(self::OPERATOR);
         \ReplyWorld::$owners[self::VALIDATOR_PAGE] = self::OWNER; // the page owner is NOT the answerer here
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OWNER, self::VOTE, 'not me')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OWNER, self::VOTE, 'not me')));
         self::assertNull(self::code(self::service()->create(self::OPERATOR, self::VOTE, 'operator here')));
     }
 
@@ -141,7 +141,7 @@ final class ReviewReplyServiceTest extends TestCase
     {
         $this->onValidatorPage(0);
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OPERATOR, self::VOTE, 'x')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OPERATOR, self::VOTE, 'x')));
     }
 
     public function testAClaimedProjectPageIsAnsweredByItsOwnerAndAnUnownedPlaceholderByNobody(): void
@@ -152,7 +152,7 @@ final class ReviewReplyServiceTest extends TestCase
         \ReplyWorld::$owners[self::PLACEHOLDER]  = 0;
 
         self::assertNull(self::code(self::service()->create(self::OWNER, self::VOTE, 'owner reply')));
-        self::assertSame('bcc_forbidden', self::code(self::service()->create(self::OWNER, 71, 'x')));
+        self::assertSame('bcc_not_found', self::code(self::service()->create(self::OWNER, 71, 'x')));
         self::assertFalse(self::service()->answersFor(self::PLACEHOLDER, 0));
     }
 
@@ -215,6 +215,73 @@ final class ReviewReplyServiceTest extends TestCase
     public function testAnonymousIsUnauthorized(): void
     {
         self::assertSame('bcc_unauthorized', self::code(self::service()->create(0, self::VOTE, 'x')));
+    }
+
+    // ── F-531: one answer for every refusal about the review ────────────
+
+    /**
+     * A missing review, the reviewer's own, a stranger's, an unanswered
+     * placeholder's: byte-identical, so the answer never says which.
+     */
+    public function testEveryRefusalToReplyIsTheSameAnswer(): void
+    {
+        \ReplyWorld::$reviews[71] = ['voter' => self::STRANGER, 'page' => self::PLACEHOLDER];
+        \ReplyWorld::$owners[self::PLACEHOLDER] = 0;
+
+        $missing = self::service()->create(self::STRANGER, 9999, 'x');
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Not found.'], $missing);
+        foreach ([
+            'a stranger on a real review'    => self::service()->create(self::STRANGER, self::VOTE, 'x'),
+            'the reviewer on their own'      => self::service()->create(self::REVIEWER, self::VOTE, 'x'),
+            'anyone on an unowned page'      => self::service()->create(self::OWNER, 71, 'x'),
+        ] as $case => $answer) {
+            self::assertSame($missing, $answer, $case);
+        }
+        self::assertSame([], \ReplyWorld::$published);
+    }
+
+    /** No review, no reply of theirs, a frozen one, a handed-over one: one answer. */
+    public function testEveryRefusalToEditOrDeleteIsTheSameAnswer(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'old');
+        \ReplyWorld::$reviews[72] = ['voter' => self::STRANGER, 'page' => self::VALIDATOR_PAGE];
+        self::service()->create(self::OPERATOR, 72, 'frozen');
+        \ReplyWorld::hide(72, self::OPERATOR);
+
+        $missing = self::service()->update(self::STRANGER, 9999, 'x');
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Not found.'], $missing);
+        $answers = [
+            'no reply of theirs on a real review' => self::service()->update(self::STRANGER, self::VOTE, 'x'),
+            'their reply is frozen'               => self::service()->update(self::OPERATOR, 72, 'x'),
+            'delete, no reply of theirs'          => self::service()->delete(self::STRANGER, self::VOTE),
+        ];
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
+        $answers['the page changed hands'] = self::service()->update(self::OPERATOR, self::VOTE, 'x');
+
+        foreach ($answers as $case => $answer) {
+            self::assertSame($missing, $answer, $case);
+        }
+        self::assertSame('old', \ReplyWorld::$replies[self::VOTE][0]['body']);
+    }
+
+    /**
+     * The throttle comes FIRST: a throttled caller is refused before any
+     * review is read, whatever they ask for, so probes are rate-limited too.
+     */
+    public function testTheThrottleRunsBeforeAnythingIsLookedUp(): void
+    {
+        \ReplyWorld::$throttled = true;
+        \ReplyWorld::$readFails = true; // any review or reply read would answer 503
+
+        foreach ([
+            'create, missing review' => self::service()->create(self::STRANGER, 9999, 'x'),
+            'create, not the party'  => self::service()->create(self::STRANGER, self::VOTE, 'x'),
+            'create, empty body'     => self::service()->create(self::MEMBER, self::VOTE, ''),
+            'update, missing review' => self::service()->update(self::STRANGER, 9999, 'x'),
+        ] as $case => $answer) {
+            self::assertSame('bcc_rate_limited', self::code($answer), $case);
+        }
     }
 
     // ── edit and delete ─────────────────────────────────────────────────
@@ -444,7 +511,7 @@ final class ReviewReplyServiceTest extends TestCase
         self::service()->create(self::OPERATOR, self::VOTE, 'old');
         \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
 
-        self::assertSame('bcc_forbidden', self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited after losing the page')));
+        self::assertSame('bcc_not_found', self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited after losing the page')), 'F-531: the same answer as no reply');
         self::assertSame('old', \ReplyWorld::$replies[self::VOTE][0]['body']);
         self::assertSame(['deleted' => true], self::service()->delete(self::OPERATOR, self::VOTE));
     }

@@ -2472,6 +2472,10 @@ final class CardViewService
      * unlock hint states the requirement (same copy as the write path
      * in PostsService::createReview).
      *
+     * F-469: a standing that could not be read is not a missing
+     * requirement. It says so (the attestation entries' sentence), with
+     * the `unavailable` reason code, never the "keep your standing" hint.
+     *
      * @return Permission
      */
     private function writeReviewPermission(int $viewerId): array
@@ -2479,6 +2483,12 @@ final class CardViewService
         $decision = $this->capabilityResolver->can($viewerId, 'write_review');
         if ($decision->isAllowed()) {
             return self::allow();
+        }
+        if ($decision->reason === 'unavailable') {
+            return self::deny(
+                'Your standing could not be checked right now. Please try again.',
+                'unavailable'
+            );
         }
         return self::deny(
             'Become an Apprentice and keep your standing at Neutral or better to write reviews.',

@@ -161,6 +161,25 @@ namespace BCC\Core\Log {
     }
 }
 
+namespace BCC\Core\Repositories {
+    // A rejoin-block RETRY reads the removed member's group status
+    // (NftGroupGateService::rejoinBlockRecordedAction()). Fixture
+    // $GLOBALS['__bcc_optout_membership']: a status string, null (no row,
+    // the default) or false (the read failed). Calls are counted.
+    if (!class_exists(__NAMESPACE__ . '\PeepSoGroupRepository', false)) {
+        final class PeepSoGroupRepository
+        {
+            public static int $statusReads = 0;
+
+            public static function getMembershipStatusOrFail(int $userId, int $groupId): string|null|false
+            {
+                self::$statusReads++;
+                return $GLOBALS['__bcc_optout_membership'] ?? null;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\DB {
     // The per-user lock around an opt-out map change (H7 follow-up).
     if (!class_exists(__NAMESPACE__ . '\AdvisoryLock', false)) {

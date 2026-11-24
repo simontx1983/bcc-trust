@@ -5,7 +5,8 @@
  * which the real ProfileAccess::filterVisible asks).
  *
  * ⚠⚠ SUBPROCESS-ONLY, required from the test's setUp(): it declares a fake
- * UserSyncRepository and bcc-core's PeepSoMediaCache, which cannot be
+ * UserSyncRepository (user-sync-recent-stub.php, shared with
+ * ColdStartVisibilityTest) and bcc-core's PeepSoMediaCache, which cannot be
  * undone in a process.
  *
  * Fixture ($GLOBALS['__bcc_sv']):
@@ -15,21 +16,9 @@
 
 declare(strict_types=1);
 
-namespace BCC\Trust\Core\Repositories {
-    if (!class_exists(UserSyncRepository::class, false)) {
-        /** The cold-start top-up's recency source. */
-        final class UserSyncRepository
-        {
-            /** @var list<int> */
-            public static array $recent = [];
-
-            /** @return list<int> */
-            public static function getRecentlyActiveUserIds(int $intervalDays, int $limit, int $excludeUserId = 0): array
-            {
-                return array_values(array_filter(self::$recent, static fn (int $id): bool => $id !== $excludeUserId));
-            }
-        }
-    }
+namespace {
+    // The cold-start top-up's recency source.
+    require_once __DIR__ . '/user-sync-recent-stub.php';
 }
 
 namespace BCC\Core\PeepSo {

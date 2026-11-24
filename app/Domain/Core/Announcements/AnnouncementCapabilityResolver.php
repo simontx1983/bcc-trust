@@ -164,6 +164,18 @@ final class AnnouncementCapabilityResolver
     public const REASON_FEATURE_DISABLED  = 'feature_disabled';
 
     /**
+     * F-469: the viewer's standing could not be READ (`standing_known` is
+     * false). Retryable: the comment POST answers 503 `bcc_unavailable` with
+     * it, and the denial carries a hint saying so. Deliberately not
+     * `suspended`, which a member below Neutral gets: a member whose tier
+     * merely failed to load must not be told their account is suspended.
+     */
+    public const REASON_STANDING_UNREADABLE = 'unavailable';
+
+    /** The standing-unreadable hint, shared by the capability and the POST. */
+    public const STANDING_UNREADABLE_HINT = 'Your standing could not be checked right now. Please try again.';
+
+    /**
      * ⚠ The one capability reason that is neither a standing fact nor an
      * availability fact. The report endpoint is idempotent per
      * (reporter, target), so a second report is ACCEPTED and changes
@@ -221,6 +233,7 @@ final class AnnouncementCapabilityResolver
         self::REASON_SUSPENDED,
         self::REASON_FRAUD_LOCKED,
         self::REASON_FEATURE_DISABLED,
+        self::REASON_STANDING_UNREADABLE,
     ];
 
     /**
@@ -331,6 +344,8 @@ final class AnnouncementCapabilityResolver
      *   - `suspended`      bool
      *   - `fraud_locked`   bool
      *   - `good_standing`  bool  (member standing for commenting)
+     *   - `standing_known` bool  (F-469: false when the standing could not
+     *                              be read; commenting answers `unavailable`)
      *   - `user_id`        int   (for the report gate's self-report rung)
      *
      * ⚠ `author_user_id` and `user_id` are capability INPUTS and must never
@@ -774,13 +789,21 @@ final class AnnouncementCapabilityResolver
         if (self::flag($viewer, 'fraud_locked', true)) {
             return Permission::deny(self::REASON_FRAUD_LOCKED);
         }
+        if (!self::flag($viewer, 'standing_known', false)) {
+            // F-469: the standing could not be READ. Its own retryable reason
+            // (added to §4.32.11's closed inventory) with a hint the frontend
+            // renders, so a member whose tier failed to load is not told
+            // their account is suspended. Below the two known facts above, so
+            // a suspension still reads as one.
+            return Permission::deny(self::REASON_STANDING_UNREADABLE, self::STANDING_UNREADABLE_HINT);
+        }
         if (!self::flag($viewer, 'good_standing', false)) {
             // ⚠ Reported as `suspended`, not as a new code. §4.32.11's
-            // inventory is CLOSED and has no "standing" entry; the
-            // frontend closes the composer on an unrecognised reason, so
-            // inventing one here would produce a disabled control with no
-            // copy. Standing and suspension present identically to a
-            // member: "you may not post right now".
+            // inventory has no "below Neutral" entry; the frontend closes the
+            // composer on an unrecognised reason, so inventing one here would
+            // produce a disabled control with no copy. Standing and
+            // suspension present identically to a member: "you may not post
+            // right now".
             return Permission::deny(self::REASON_SUSPENDED);
         }
         return Permission::allow();

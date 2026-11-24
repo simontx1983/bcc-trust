@@ -118,7 +118,8 @@ final class MemberProfileComposer
         private readonly UserViewService $userViewService,
         private readonly CardViewService $cardViewService,
         private readonly ShiftLogService $shiftLogService,
-        private readonly AttestationService $attestationService
+        private readonly AttestationService $attestationService,
+        private readonly PublicProfileIndex $publicIndex
     ) {
     }
 
@@ -334,6 +335,13 @@ final class MemberProfileComposer
         // lands a hidden section is still reachable by calling its route
         // directly. Not yet a complete privacy boundary.
         $base['sections'] = ProfileSectionVisibility::visibilityMap($userId, $viewerId);
+
+        // F-518: may a search engine index this profile page? The SAME
+        // predicate the app sitemap lists members by, so a page is
+        // indexable exactly when the sitemap lists it. Viewer-independent
+        // (the anonymous answer, even on the owner's own view) and false on
+        // any read that cannot be trusted.
+        $base['indexable'] = $this->publicIndex->isIndexable($userId);
 
         return $base;
     }

@@ -69,6 +69,14 @@ class EdgeRepository {
      */
     public const MAX_SUBGRAPH_EDGES = 100000;
 
+    /**
+     * Bound on the neighbour walk (F-574): ONE MORE than
+     * TrustGraph::incrementalUpdate()'s 500-user neighbourhood cap, so a hub
+     * whose neighbours are cut off here still reads as "more than 500" and is
+     * still deferred to the daily batch, never computed on a truncated set.
+     */
+    public const MAX_NEIGHBOR_IDS = 501;
+
     private string $table;
     private string $votesTable;
     private string $scoresTable;
@@ -225,8 +233,15 @@ class EdgeRepository {
      * SAFETY: unbounded load (the previous implementation returned every row)
      * OOMs PHP once the graph grows into millions of edges. Always paginate.
      *
+     * FAIL-CLOSED read (F-574). Its caller pages until an EMPTY page, so an
+     * empty answer means "end of the table". A failed read must therefore
+     * never come back as [] — that would end the walk early and the ranks of
+     * a truncated graph would be persisted for every member — so runRead()
+     * throws RepositoryReadFailure instead, and the computation is skipped.
+     *
      * @param int $afterId  Return rows with id > this. Pass 0 to start.
      * @param int $limit    Max rows per page (default 1000, capped at 10000).
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the page cannot be read
      * @return object[]
      * @phpstan-return list<object{
      *   id: int|numeric-string,
@@ -241,8 +256,9 @@ class EdgeRepository {
 
         $limit = max(1, min($limit, 10000));
 
-        return $wpdb->get_results(
-            $wpdb->prepare(
+        /** @var list<object{id: int|numeric-string, source_user_id: int|numeric-string, target_user_id: int|numeric-string, weight: float|numeric-string, edge_type: string}> $rows */
+        $rows = self::runRead(
+            (string) $wpdb->prepare(
                 "SELECT id, source_user_id, target_user_id, weight, edge_type
                    FROM {$this->table}
                   WHERE id > %d
@@ -250,8 +266,12 @@ class EdgeRepository {
                   LIMIT %d",
                 $afterId,
                 $limit
-            )
-        ) ?: [];
+            ),
+            __FUNCTION__,
+            true
+        );
+
+        return $rows;
     }
 
     /**
@@ -260,6 +280,11 @@ class EdgeRepository {
      * This is the subgraph needed for incremental PageRank: given a set of
      * "dirty" users, we fetch every edge touching them (inbound or outbound)
      * so we can re-converge only that neighborhood.
+     *
+     * FAIL-SAFE read (F-574): a read that cannot be verified answers [],
+     * never another query's rows. That is enough here because the only
+     * caller treats an empty subgraph as "skip" and writes nothing; the
+     * daily batch corrects the neighbourhood.
      *
      * @param int[] $userIds
      * @return object[]
@@ -279,21 +304,35 @@ class EdgeRepository {
         // otherwise pull an unbounded edge set into this PHP array. A result at
         // the LIMIT signals "too dense" to the caller, which defers to the daily
         // batch cron rather than run PageRank on a truncated subgraph.
-        return $wpdb->get_results( $wpdb->prepare(
+        /** @var list<EdgeRow> $rows */
+        $rows = self::runRead( (string) $wpdb->prepare(
             "SELECT source_user_id, target_user_id, weight, edge_type
                FROM {$this->table}
               WHERE source_user_id IN ({$placeholders})
                  OR target_user_id IN ({$placeholders})
               LIMIT %d",
             array_merge( $userIds, $userIds, [ $limit ] )
-        ) ) ?: [];
+        ), __FUNCTION__, false );
+
+        return $rows;
     }
 
     /**
-     * Return all distinct user IDs that share an edge with any user in $userIds.
+     * Return the distinct user IDs that share an edge with any user in
+     * $userIds, at most MAX_NEIGHBOR_IDS of them.
+     *
+     * FAIL-CLOSED read (F-574). An empty answer shrinks the neighbourhood to
+     * the dirty users alone, which slips under TrustGraph's 500-user hub cap
+     * and persists the ranks of a truncated subgraph. So a read that cannot
+     * be verified throws RepositoryReadFailure instead, and the incremental
+     * pass is skipped (its hook catches; the daily batch corrects).
+     *
+     * Bounded at MAX_NEIGHBOR_IDS, one more than that cap, so a hub still
+     * reads as "too many" and the caller still defers it.
      *
      * @param int[] $userIds
      * @return int[]
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the neighbours cannot be read
      */
     public function getNeighborIds( array $userIds ): array {
         global $wpdb;
@@ -304,14 +343,16 @@ class EdgeRepository {
 
         $placeholders = implode( ',', array_fill( 0, count( $userIds ), '%d' ) );
 
-        $rows = $wpdb->get_results( $wpdb->prepare(
+        /** @var list<object{uid: int|numeric-string}> $rows */
+        $rows = self::runRead( (string) $wpdb->prepare(
             "SELECT DISTINCT source_user_id AS uid FROM {$this->table}
               WHERE target_user_id IN ({$placeholders})
              UNION
              SELECT DISTINCT target_user_id AS uid FROM {$this->table}
-              WHERE source_user_id IN ({$placeholders})",
-            array_merge( $userIds, $userIds )
-        ) ) ?: [];
+              WHERE source_user_id IN ({$placeholders})
+             LIMIT %d",
+            array_merge( $userIds, $userIds, [ self::MAX_NEIGHBOR_IDS ] )
+        ), __FUNCTION__, true );
 
         return array_map( fn( $r ) => (int) $r->uid, $rows );
     }
@@ -349,22 +390,47 @@ class EdgeRepository {
         $count = 0;
 
         // Aggregate all vote weights: voter → page_owner
+        //
+        // ⚠⚠ runRead, NOT get_results() — and here the stakes are higher
+        // than on a read path. Every row this returns is UPSERTED into the
+        // edge table below, so rows that are not this query's own become
+        // trust-graph EDGES: wrong source, target and weight, written and
+        // durable. A read gate recovers when the database does; this does
+        // not.
+        //
+        // `get_results()` could not see that. It discards query()'s return
+        // value, and wpdb::query() bails before flush() on a failed
+        // reconnect or an emptied `query` filter — leaving the PREVIOUS
+        // query's rows in last_result with last_error EMPTY. The old
+        // `?: []` then collapsed a failed read and "no votes yet" into the
+        // same answer, so a bail could not even be distinguished from an
+        // empty source table.
+        //
+        // runRead() clears last_error, calls query() explicitly, checks its
+        // return AND last_error, and throws with failClosed — so a backfill
+        // that cannot trust its source writes NOTHING rather than writing
+        // something it made up. Same guard recalculateVoteEdge() already
+        // uses, for the same reason.
         /** @var list<EdgeBackfillRow> $voteEdges */
-        $voteEdges = $wpdb->get_results( $wpdb->prepare(
-            "SELECT v.voter_user_id   AS source_user_id,
-                    s.page_owner_id   AS target_user_id,
-                    SUM( v.weight )   AS total_weight,
-                    COUNT(*)          AS vote_count
-               FROM {$this->votesTable} v
-               JOIN {$this->scoresTable} s
-                    ON s.page_id = v.page_id
-                   AND s.category_id = 0
-              WHERE v.status = %d
-                AND s.page_owner_id > 0
-                AND " . $this->votes()->hiddenReviewExclusion('v') . "
-           GROUP BY v.voter_user_id, s.page_owner_id",
-            1
-        ) ) ?: [];
+        $voteEdges = self::runRead(
+            (string) $wpdb->prepare(
+                "SELECT v.voter_user_id   AS source_user_id,
+                        s.page_owner_id   AS target_user_id,
+                        SUM( v.weight )   AS total_weight,
+                        COUNT(*)          AS vote_count
+                   FROM {$this->votesTable} v
+                   JOIN {$this->scoresTable} s
+                        ON s.page_id = v.page_id
+                       AND s.category_id = 0
+                  WHERE v.status = %d
+                    AND s.page_owner_id > 0
+                    AND " . $this->votes()->hiddenReviewExclusion('v') . "
+               GROUP BY v.voter_user_id, s.page_owner_id",
+                1
+            ),
+            __FUNCTION__,
+            true
+        );
 
         foreach ( $voteEdges as $edge ) {
             $this->upsertOrDelete(
