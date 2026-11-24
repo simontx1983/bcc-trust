@@ -81,6 +81,17 @@ final class BccWire
     public static $always = null;
 
     /**
+     * Answers by URL, checked before the queue: the first entry whose needle
+     * is a substring of the requested URL answers it, and is NOT consumed.
+     * Lets a scenario that talks to several hosts state each host's answer
+     * once, instead of depending on request order. Empty = the queue alone,
+     * exactly as before routes existed.
+     *
+     * @var list<array{0: string, 1: array{code: int, body: string, headers?: array<string, string>}|\WP_Error}>
+     */
+    public static array $routes = [];
+
+    /**
      * Every URL requested, in order. Anti-vacuity: proves the wire ran.
      *
      * @var list<string>
@@ -102,6 +113,7 @@ final class BccWire
     {
         self::$queue  = [];
         self::$always = null;
+        self::$routes = [];
         self::$urls   = [];
         self::$sleeps = [];
     }
@@ -111,6 +123,11 @@ final class BccWire
     {
         self::$urls[] = $url;
 
+        foreach (self::$routes as [$needle, $response]) {
+            if (str_contains($url, $needle)) {
+                return $response;
+            }
+        }
         if (self::$queue !== []) {
             return array_shift(self::$queue);
         }
@@ -227,6 +244,20 @@ namespace BCC\Core\Http {
         public static function prepareArgs(string $url, array $args = [])
         {
             return $args;
+        }
+
+        /**
+         * A single direct GET (identity gates call SafeHttpClient, not
+         * ApiRetry), answered from the same wire, so it is recorded in
+         * `BccWire::$urls` like every other request. Never follows a redirect:
+         * a scripted 3xx is returned as it is.
+         *
+         * @param  array<string, mixed> $args
+         * @return array{code: int, body: string, headers?: array<string, string>}|\WP_Error
+         */
+        public static function get(string $url, array $args = [])
+        {
+            return \BccWire::next($url);
         }
 
         /**
