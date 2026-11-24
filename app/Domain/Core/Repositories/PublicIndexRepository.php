@@ -70,9 +70,10 @@ final class PublicIndexRepository
      * Member ids after `$afterId`, ascending, that pass the SQL half of the
      * public predicate. At most `$limit`.
      *
+     * @param bool $withLegacyOptOut also honour the legacy listing opt-out: PrivacySettings::legacyOptOutStillRead()
      * @return list<int>|null null = the read failed, or the arguments are out of range
      */
-    public function memberIdsAfter(int $afterId, int $limit): ?array
+    public function memberIdsAfter(int $afterId, int $limit, bool $withLegacyOptOut): ?array
     {
         if ($afterId < 0 || $limit < 1 || $limit > self::PAGE_MAX) {
             return null;
@@ -80,7 +81,7 @@ final class PublicIndexRepository
 
         global $wpdb;
 
-        [$from, $where] = $this->memberClauses();
+        [$from, $where] = $this->memberClauses($withLegacyOptOut);
 
         $rows = self::trustedRows((string) $wpdb->prepare(
             "SELECT {$wpdb->users}.ID AS id
@@ -111,9 +112,10 @@ final class PublicIndexRepository
      * Does this one member pass the SQL half of the public predicate? The
      * same clauses as {@see memberIdsAfter()}, constrained to one id.
      *
+     * @param bool $withLegacyOptOut also honour the legacy listing opt-out: PrivacySettings::legacyOptOutStillRead()
      * @return bool|null null = the read failed
      */
-    public function memberIsCandidate(int $userId): ?bool
+    public function memberIsCandidate(int $userId, bool $withLegacyOptOut): ?bool
     {
         if ($userId <= 0) {
             return false;
@@ -121,7 +123,7 @@ final class PublicIndexRepository
 
         global $wpdb;
 
-        [$from, $where] = $this->memberClauses();
+        [$from, $where] = $this->memberClauses($withLegacyOptOut);
 
         $rows = self::trustedRows((string) $wpdb->prepare(
             "SELECT {$wpdb->users}.ID AS id
@@ -217,11 +219,13 @@ final class PublicIndexRepository
      *     member directory uses, for viewer 0 (so no self-exemption applies);
      *   - not opted out of listings: UserSyncRepository::listingOptOutSql(),
      *     the ONE fragment the member directory shares (F-519): no truthy row
-     *     on the hide-from-listings key or its legacy predecessor.
+     *     on the hide-from-listings key, nor on its legacy predecessor while
+     *     `$withLegacyOptOut` (the fold is not done). The caller decides it;
+     *     this class reads no option.
      *
      * @return array{0: string, 1: string}
      */
-    private function memberClauses(): array
+    private function memberClauses(bool $withLegacyOptOut): array
     {
         global $wpdb;
 
@@ -238,7 +242,7 @@ final class PublicIndexRepository
         $where = "bcc_pub_acc.usr_role NOT IN ({$roles})"
             . ' AND bcc_pub_acc.usr_profile_acc <= ' . self::PUBLIC_PROFILE_ACC_MAX
             . $suspension['where']
-            . ' AND ' . UserSyncRepository::listingOptOutSql("{$wpdb->users}.ID");
+            . ' AND ' . UserSyncRepository::listingOptOutSql("{$wpdb->users}.ID", $withLegacyOptOut);
 
         return [$from, $where];
     }

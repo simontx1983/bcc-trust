@@ -127,6 +127,24 @@ final class PrivacySettings
     public const FOLD_DONE_OPTION = 'bcc_trust_discovery_optout_folded';
 
     /**
+     * Is the legacy discovery opt-out still read? The one answer every
+     * listing gives (search here, and the listing fragment
+     * UserSyncRepository::listingOptOutSql() that the public index and the
+     * directory share): true until fold_discovery_optout_v1's done-marker
+     * reads as set. The runner stores time(), so "set" is truthy.
+     *
+     * Missing, falsy or unreadable (get_option() then answers false) all
+     * give true: keep honouring the legacy key, the side that cannot list
+     * someone who opted out. After the fold it must be false, because the
+     * fold left the legacy rows in place and a member who later turned
+     * listing back on still holds a legacy '1'.
+     */
+    public static function legacyOptOutStillRead(): bool
+    {
+        return !get_option(self::FOLD_DONE_OPTION);
+    }
+
+    /**
      * Read the §K2 flags for the user view-model. Always returns a
      * complete array — missing meta defaults to false (V1 baseline:
      * everything public per §K2).
@@ -596,7 +614,7 @@ final class PrivacySettings
         // implying a dependency that no longer exists. When
         // FOLD_DONE_OPTION is set this whole branch stops running, and the
         // rows can then be dropped.
-        if (!get_option(self::FOLD_DONE_OPTION)) {
+        if (self::legacyOptOutStillRead()) {
             $bccClauses[] = [
                 'relation' => 'OR',
                 [

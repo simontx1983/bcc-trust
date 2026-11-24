@@ -60,15 +60,16 @@ final class UserSyncRepository
         ];
     }
 
+    /** The one live hide-from-listings flag (PrivacySettings::HIDE_FROM_LISTING_META). */
+    public const LISTING_OPTOUT_KEY = 'peepso_is_hide_profile_from_user_listing';
+
     /**
-     * The usermeta keys that take a member out of every listing: the one
-     * live hide-from-listings flag, and the legacy F-257 opt-out it was
-     * folded from (nothing writes the legacy key any more).
+     * The pre-F-257 opt-out the flag was folded from
+     * (PrivacySettings::LEGACY_DISCOVERY_OPTOUT_META). Nothing writes it, but
+     * the fold LEFT ITS ROWS IN PLACE, so it is read only until the fold is
+     * done; see listingOptOutSql().
      */
-    public const LISTING_OPTOUT_KEYS = [
-        'peepso_is_hide_profile_from_user_listing',
-        'bcc_privacy_discovery_optout',
-    ];
+    public const LISTING_OPTOUT_LEGACY_KEY = 'bcc_privacy_discovery_optout';
 
     /** Every stored value that means "opted out" (compared case-insensitively by the column collation). */
     public const LISTING_OPTOUT_TRUTHY = ['1', 'true', 'on', 'yes'];
@@ -79,9 +80,12 @@ final class UserSyncRepository
      * (PublicIndexRepository) and the member directory / search
      * (PrivacySettings::filterPeepSoUserQuery) must agree on who opted out.
      *
-     *     $where .= ' AND ' . UserSyncRepository::listingOptOutSql("{$wpdb->users}.ID");
+     *     $where .= ' AND ' . UserSyncRepository::listingOptOutSql(
+     *         "{$wpdb->users}.ID",
+     *         PrivacySettings::legacyOptOutStillRead()
+     *     );
      *
-     * TRUE when the member has NO row, on either key, holding a truthy
+     * TRUE when the member has NO row, on a key it reads, holding a truthy
      * value. Any truthy row excludes, so a member with both a '0' and a '1'
      * row stays out (the direction that cannot leak).
      *
@@ -96,18 +100,27 @@ final class UserSyncRepository
      *     writes '1', and reads the legacy key as this same set.
      * Excluding too many is the safe direction for a privacy setting.
      *
-     * BOTH KEYS, ALWAYS: no FOLD_DONE_OPTION read. Nothing writes the legacy
-     * key, so once the fold has run it matches nothing; and an option read
-     * that could fail cannot flip this answer.
+     * ⚠⚠ THE LEGACY KEY ONLY WHILE THE FOLD IS NOT DONE (`$withLegacy`).
+     * fold_discovery_optout_v1 copied every legacy opt-out into the flag but
+     * LEFT THE LEGACY ROWS IN PLACE, and after the fold the settings toggle
+     * writes the flag alone. So a member who opted out the old way and later
+     * turned listing back on holds flag '0' + legacy '1'. Reading the legacy
+     * key after the fold would hide them again, for good, and they could not
+     * undo it. Callers pass PrivacySettings::legacyOptOutStillRead(): true
+     * until the fold's done-marker reads as set (a missing or unreadable
+     * marker keeps the legacy key in, the fail-closed side). The bool is
+     * required, so no caller can forget the choice.
      *
-     * Pure SQL: no admin exemption here. A caller that exempts admins (the
-     * directory) does so around this; the public index never exempts anyone.
-     * No `%` in the output, so it is safe inside prepare().
+     * Pure SQL: no admin exemption and no option read here. A caller that
+     * exempts admins (the directory) does so around this; the public index
+     * never exempts anyone. No `%` in the output, so it is safe inside
+     * prepare().
      *
      * @param string $userIdColumn a column reference such as `wp_users.ID`, never input
+     * @param bool   $withLegacy   also read the legacy opt-out key: PrivacySettings::legacyOptOutStillRead()
      * @throws \InvalidArgumentException when `$userIdColumn` is not a column reference
      */
-    public static function listingOptOutSql(string $userIdColumn): string
+    public static function listingOptOutSql(string $userIdColumn, bool $withLegacy): string
     {
         if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $userIdColumn) !== 1) {
             throw new \InvalidArgumentException('listingOptOutSql() takes a column reference such as wp_users.ID.');
@@ -116,7 +129,10 @@ final class UserSyncRepository
         global $wpdb;
 
         // Constants of [a-z0-9_] only, so quoting them inline is safe.
-        $keys   = "'" . implode("', '", self::LISTING_OPTOUT_KEYS) . "'";
+        $keyList = $withLegacy
+            ? [self::LISTING_OPTOUT_KEY, self::LISTING_OPTOUT_LEGACY_KEY]
+            : [self::LISTING_OPTOUT_KEY];
+        $keys   = "'" . implode("', '", $keyList) . "'";
         $truthy = "'" . implode("', '", self::LISTING_OPTOUT_TRUTHY) . "'";
 
         return "NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} bcc_optout"

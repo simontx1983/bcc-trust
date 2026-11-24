@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\PublicIndexRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\PublicProfileIndex;
+use BCC\Trust\Core\Support\PrivacySettings;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -32,6 +33,13 @@ use PHPUnit\Framework\TestCase;
 final class PublicSitemapIndexIntegrationTest extends TestCase
 {
     private const FIRST_ID = 951800;
+
+    /**
+     * Members whose ONLY exclusion is the legacy opt-out key. members()
+     * gives the answer while the fold is not done (no marker, as on a fresh
+     * install); once it is done these two are listed.
+     */
+    private const LEGACY_ONLY_EXCLUSIONS = [951825, 951829];
 
     /**
      * id => [handle|null, peepso row [role, acc]|null, user_info suspended|null,
@@ -69,12 +77,13 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951822 => ['F518-Upper', $member, null, [], false, 'not the current handle shape (upper case)'],
             951823 => ['f518--double', $member, null, [], false, 'not the current handle shape (double hyphen)'],
             951824 => ['f518-two-hide-rows', $member, null, [[$hide, '0'], [$hide, '1']], false, 'any hide row reading 1 excludes'],
-            // The shared listing opt-out fragment (F-519): both keys, the truthy set.
-            951825 => ['f518-legacy-optout', $member, null, [['bcc_privacy_discovery_optout', '1']], false, 'the legacy opt-out key'],
+            // The shared listing opt-out fragment (F-519): the truthy set, and
+            // the legacy key until the fold is done (LEGACY_ONLY_EXCLUSIONS).
+            951825 => ['f518-legacy-optout', $member, null, [['bcc_privacy_discovery_optout', '1']], false, 'the legacy opt-out key, fold not done'],
             951826 => ['f518-hide-yes', $member, null, [[$hide, 'yes']], false, 'hide stored as "yes" (PeepSo saves the raw value)'],
             951827 => ['f518-hide-true-upper', $member, null, [[$hide, 'TRUE']], false, 'hide stored as "TRUE" (case-insensitive)'],
             951828 => ['f518-legacy-off', $member, null, [['bcc_privacy_discovery_optout', '0']], true, 'a legacy opt-out row reading 0'],
-            951829 => ['f518-hide-off-legacy-on', $member, null, [[$hide, '0'], ['bcc_privacy_discovery_optout', '1']], false, "hide '0' but legacy '1'"],
+            951829 => ['f518-hide-off-legacy-on', $member, null, [[$hide, '0'], ['bcc_privacy_discovery_optout', '1']], false, "hide '0' but legacy '1', fold not done"],
             951830 => ['f518-hide-on', $member, null, [[$hide, 'on']], false, 'hide stored as "on"'],
             951831 => ['f518-hide-true', $member, null, [[$hide, 'true']], false, 'hide stored as "true"'],
         ];
@@ -173,6 +182,59 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
         }
         self::assertFalse($index->isIndexable(951899), 'no such user');
         self::assertFalse($index->isIndexable(0));
+    }
+
+    /**
+     * Until fold_discovery_optout_v1 is done (no done-marker), the legacy
+     * opt-out still excludes: a legacy '1' alone, and a legacy '1' beside
+     * hide '0'. Nobody who opted out before the fold is listed while it runs.
+     */
+    public function testUntilTheFoldIsDoneTheLegacyOptOutStillExcludes(): void
+    {
+        unset($GLOBALS['__bcc_test_options'][PrivacySettings::FOLD_DONE_OPTION]);
+
+        $index = self::index();
+        $page  = $index->membersAfter(self::FIRST_ID, PublicIndexRepository::PAGE_MAX);
+        self::assertNotNull($page);
+        $paths = array_column($page['items'], 'path');
+
+        foreach (self::LEGACY_ONLY_EXCLUSIONS as $id) {
+            [$handle, , , , , $why] = self::members()[$id];
+            self::assertNotContains('/u/' . $handle, $paths, "fold not done, listed: {$why}");
+            self::assertFalse($index->isIndexable($id), "fold not done, indexable: {$why}");
+        }
+    }
+
+    /**
+     * Once the fold is done the legacy key is no longer read. The fold left
+     * the legacy rows in place and the settings toggle now writes the hide
+     * key alone, so a member who opted out the old way and later turned
+     * listing back on holds hide '0' + legacy '1'. They must be LISTED and
+     * indexable again. Every other exclusion is unchanged, the list and
+     * `indexable` still agree for every member.
+     */
+    public function testOnceTheFoldIsDoneTheLegacyKeyNoLongerHidesAnyone(): void
+    {
+        // What the migration runner stores on completion: time().
+        $GLOBALS['__bcc_test_options'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
+
+        $index = self::index();
+        $page  = $index->membersAfter(self::FIRST_ID, PublicIndexRepository::PAGE_MAX);
+        self::assertNotNull($page);
+
+        $expected = [];
+        foreach (self::members() as $id => [$handle, , , , $isListed]) {
+            if ($isListed || in_array($id, self::LEGACY_ONLY_EXCLUSIONS, true)) {
+                $expected[] = '/u/' . $handle;
+            }
+        }
+        self::assertSame($expected, self::ownPaths($page['items'], '/u/f518-'));
+        self::assertContains('/u/f518-hide-off-legacy-on', $expected, 'the member who turned listing back on');
+
+        foreach (self::members() as $id => [, , , , $isListed, $why]) {
+            $listedNow = $isListed || in_array($id, self::LEGACY_ONLY_EXCLUSIONS, true);
+            self::assertSame($listedNow, $index->isIndexable($id), "fold done, member {$id}: {$why}");
+        }
     }
 
     public function testMembersWalkInKeysetPagesAndNextAfterIsTheLastScannedId(): void

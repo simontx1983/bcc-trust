@@ -15,10 +15,13 @@ use PHPUnit\Framework\TestCase;
  * sitemap's public index and the member directory / search.
  *
  * Pinned exactly, because two consumers splice it into their own SQL:
- * both keys (the live hide flag and its legacy predecessor), always; the
- * truthy set, because PeepSo's own form stores the client's value raw; no
- * `%` (it runs through prepare() beside other clauses); and only a column
- * reference may be spliced in. What it EXCLUDES on real rows is proven in
+ * - the live hide key, always;
+ * - the legacy key only while the caller says the fold is not done
+ *   (`$withLegacy`, from PrivacySettings::legacyOptOutStillRead());
+ * - the truthy set, because PeepSo's own form stores the client's value raw;
+ * - no `%` (it runs through prepare() beside other clauses);
+ * - only a column reference may be spliced in.
+ * What it EXCLUDES on real rows, before and after the fold, is proven in
  * PublicSitemapIndexIntegrationTest.
  *
  * ⚠ SEPARATE PROCESSES, on purpose. Another unit file
@@ -57,25 +60,51 @@ final class ListingOptOutSqlTest extends TestCase
         parent::tearDown();
     }
 
-    public function testTheExactFragment(): void
+    /** Until the fold is done: the live key and the legacy key. */
+    public function testTheExactFragmentWithTheLegacyKey(): void
     {
         self::assertSame(
             'NOT EXISTS (SELECT 1 FROM wp_usermeta bcc_optout'
             . ' WHERE bcc_optout.user_id = wp_users.ID'
             . " AND bcc_optout.meta_key IN ('peepso_is_hide_profile_from_user_listing', 'bcc_privacy_discovery_optout')"
             . " AND bcc_optout.meta_value IN ('1', 'true', 'on', 'yes'))",
-            UserSyncRepository::listingOptOutSql('wp_users.ID')
+            UserSyncRepository::listingOptOutSql('wp_users.ID', true)
         );
     }
 
-    public function testItCarriesNoPercentForPrepare(): void
+    /**
+     * Once the fold is done: the live key ALONE. The fold left the legacy
+     * rows in place, so reading them now would re-hide a member who turned
+     * listing back on (flag '0', stale legacy '1').
+     */
+    public function testTheExactFragmentWithoutTheLegacyKey(): void
     {
-        self::assertStringNotContainsString('%', UserSyncRepository::listingOptOutSql('wp_users.ID'));
+        self::assertSame(
+            'NOT EXISTS (SELECT 1 FROM wp_usermeta bcc_optout'
+            . ' WHERE bcc_optout.user_id = wp_users.ID'
+            . " AND bcc_optout.meta_key IN ('peepso_is_hide_profile_from_user_listing')"
+            . " AND bcc_optout.meta_value IN ('1', 'true', 'on', 'yes'))",
+            UserSyncRepository::listingOptOutSql('wp_users.ID', false)
+        );
     }
 
-    public function testItAcceptsABareColumn(): void
+    #[DataProvider('bothModes')]
+    public function testItCarriesNoPercentForPrepare(bool $withLegacy): void
     {
-        self::assertStringContainsString('bcc_optout.user_id = ID ', UserSyncRepository::listingOptOutSql('ID'));
+        self::assertStringNotContainsString('%', UserSyncRepository::listingOptOutSql('wp_users.ID', $withLegacy));
+    }
+
+    #[DataProvider('bothModes')]
+    public function testItAcceptsABareColumn(bool $withLegacy): void
+    {
+        self::assertStringContainsString('bcc_optout.user_id = ID ', UserSyncRepository::listingOptOutSql('ID', $withLegacy));
+    }
+
+    /** @return iterable<string, array{0: bool}> */
+    public static function bothModes(): iterable
+    {
+        yield 'with the legacy key'    => [true];
+        yield 'without the legacy key' => [false];
     }
 
     #[DataProvider('refusedArguments')]
@@ -83,7 +112,7 @@ final class ListingOptOutSqlTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('listingOptOutSql() takes a column reference');
-        UserSyncRepository::listingOptOutSql($argument);
+        UserSyncRepository::listingOptOutSql($argument, true);
     }
 
     /** @return iterable<string, array{0: string}> */

@@ -230,10 +230,14 @@ namespace BCC\Trust\Tests\Unit\SitemapEndpoint {
             self::assertStringContainsString('bcc_pub_acc.usr_profile_acc <= 10', $sql);
             self::assertStringContainsString('INNER JOIN wp_peepso_users bcc_pub_acc', $sql);
             self::assertStringContainsString('bcc_f182.is_suspended IS NULL OR bcc_f182.is_suspended = 0 OR wp_users.ID = 0', $sql);
+            // get_option() answers its default in this harness, so the fold
+            // reads as not done and the legacy key is still honoured. The
+            // fold-done side is proven on real engines
+            // (PublicSitemapIndexIntegrationTest).
             self::assertStringContainsString(
-                \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql('wp_users.ID'),
+                \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql('wp_users.ID', true),
                 $sql,
-                'the shared listing opt-out fragment (F-519)'
+                'the shared listing opt-out fragment (F-519), legacy key included'
             );
         }
 

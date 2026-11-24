@@ -10,7 +10,10 @@
  *
  *   1. a PeepSo user row exists, the role is not register / verified / ban,
  *      the profile access is public (≤ 10), the account is not suspended, and
- *      no hide-from-listings row reads '1' (PublicIndexRepository's SQL);
+ *      the member has not opted out of listings (PublicIndexRepository's SQL,
+ *      through the fragment the directory shares). The legacy opt-out counts
+ *      only while PrivacySettings::legacyOptOutStillRead(), read once per
+ *      call here and handed down, so the list and `indexable` always agree;
  *   2. none of the three moderation flags is set (hidden, shadow-limited,
  *      under review), read the way UserViewService::resolveFlags() reads
  *      them (FILTER_VALIDATE_BOOLEAN on the first value);
@@ -40,6 +43,7 @@ use BCC\Core\Repositories\UserMetaRepository;
 use BCC\Trust\Core\Repositories\PublicIndexRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
 if (!defined('ABSPATH')) {
@@ -90,7 +94,7 @@ final class PublicProfileIndex
      */
     public function membersAfter(int $afterId, int $limit): ?array
     {
-        $ids = $this->repository->memberIdsAfter($afterId, $limit);
+        $ids = $this->repository->memberIdsAfter($afterId, $limit, PrivacySettings::legacyOptOutStillRead());
         if ($ids === null) {
             return null;
         }
@@ -124,7 +128,7 @@ final class PublicProfileIndex
             return false;
         }
 
-        if ($this->repository->memberIsCandidate($userId) !== true) {
+        if ($this->repository->memberIsCandidate($userId, PrivacySettings::legacyOptOutStillRead()) !== true) {
             return false;
         }
 
