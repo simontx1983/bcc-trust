@@ -1144,6 +1144,10 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
+    }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
@@ -1298,6 +1302,14 @@ $bccClaimReverify = static function (): void {
 };
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
+
+// Validator relationships: align a page's PeepSo ownership to its claims
+// (one-off after a change, plus the bounded retry sweep). Cron only: no
+// current user.
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::HOOK, static function ($pageId): void {
+    \BCC\Trust\Onchain\Services\PageOwnershipAligner::align((int) $pageId);
+});
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK, [\BCC\Trust\Onchain\Services\PageOwnershipAligner::class, 'sweep']);
 
 // Validator staff step-ups: purge rows that expired more than a day ago.
 add_action('bcc_validator_step_up_purge', static function (): void {
@@ -2463,6 +2475,10 @@ function bcc_trust_activate() {
     // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
+    }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
     }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {

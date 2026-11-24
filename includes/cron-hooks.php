@@ -61,6 +61,7 @@ return [
         'bcc_gated_group_reconcile_sweep'       => ['interval' => 'twicedaily',                   'description' => 'holder-group reconcile sweep'],
         'bcc_gated_group_revoke_sweep'          => ['interval' => 'twicedaily',                   'description' => 'holder-group + delegator-community revoke re-verification sweeps'],
         'bcc_onchain_claim_reverify_sweep'      => ['interval' => 'bcc_weekly',                   'description' => 'F-14 weekly re-verify of verified validator/collection claims (report mode by default)'],
+        'bcc_validator_page_owner_align_sweep'  => ['interval' => 'bcc_five_minutes',             'description' => 'validator page ownership align: bounded retry of pages still to align (PageOwnershipAligner::SWEEP_HOOK)'],
         'bcc_validator_step_up_purge'           => ['interval' => 'daily',                        'description' => 'validator staff step-ups: bounded purge of expired rows'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
@@ -107,6 +108,9 @@ return [
         'bcc_gated_group_member_recheck',
         // F-14: same-tick continuation of a budget-cut claim re-verify sweep.
         'bcc_onchain_claim_reverify_continue',
+        // Validator relationships: the one-off align of one page a minute
+        // after an owner change. Scheduled WITH args (page id).
+        'bcc_validator_page_owner_align',
         'bcc_rank_daily_tier_snapshot_continue',
         // F-307: the deferred author bell for an announcement takedown or
         // restore. Fire-once, scheduled WITH args (notice id, action), so it
