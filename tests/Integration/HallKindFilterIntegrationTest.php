@@ -235,6 +235,48 @@ final class HallKindFilterIntegrationTest extends TestCase
         self::assertSame([null, null], array_column($page['items'], 'topic'));
     }
 
+    /**
+     * A Hall whose chain was retired (the chain row kept, `is_active = 0`)
+     * stays a chain Hall: its `chain` still names that chain, it has no
+     * chain profile, and nothing fails or relabels it.
+     */
+    public function testAHallOfARetiredChainStaysAChainHall(): void
+    {
+        global $wpdb;
+        $chains  = \BCC\Trust\Onchain\Repositories\ChainRepository::table();
+        $chainId = 997002;
+        $hall    = 997110;
+        self::assertNotFalse($wpdb->insert($chains, [
+            'id' => $chainId, 'slug' => 'kind-retired', 'name' => 'Retired Chain', 'chain_type' => 'cosmos', 'is_active' => 0,
+        ]), $wpdb->last_error);
+        try {
+            self::assertNotFalse($wpdb->insert($wpdb->posts, [
+                'ID' => $hall, 'post_title' => 'Kind J Retired chain Hall', 'post_name' => 'kind-' . $hall,
+                'post_type' => 'peepso-group', 'post_status' => 'publish',
+            ]), $wpdb->last_error);
+            foreach (['_bcc_group_kind' => 'hall', '_bcc_chain_tag' => (string) $chainId] as $key => $value) {
+                self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $hall, 'meta_key' => $key, 'meta_value' => $value]), $wpdb->last_error);
+            }
+
+            self::assertSame(['hall_kind' => 'chain', 'topic' => null], HallRepository::kindFactsForHalls([$hall])[$hall] ?? null);
+
+            $halls = Plugin::instance()->hallsService();
+            $row   = array_values(array_filter(
+                $halls->getHalls(0, 1, 50, null, '', PeepSoGroupRepository::HALL_KIND_CHAIN)['items'],
+                static fn (array $i): bool => $i['id'] === $hall
+            ));
+            self::assertSame([['chain', 'kind-retired']], array_map(static fn (array $i): array => [$i['hall_kind'], $i['chain']], $row));
+
+            $detail = $halls->getHall(0, 'kind-' . $hall);
+            self::assertIsArray($detail);
+            self::assertSame(['chain', 'kind-retired', null], [$detail['hall_kind'], $detail['chain'], $detail['chain_profile']], 'no profile for a retired chain');
+
+            self::assertSame([$hall, self::TOPIC, self::ZERO_TAG], $this->ids(FeedColdStartService::hallRows($chainId, 3)), 'a retired home chain still lists its Hall first');
+        } finally {
+            $wpdb->delete($chains, ['id' => $chainId]);
+        }
+    }
+
     // ── bcc-trust: the feed's cold-start panel ──────────────────────────
 
     public function testTheColdStartTopsAHomeChainUpWithTopicHalls(): void
