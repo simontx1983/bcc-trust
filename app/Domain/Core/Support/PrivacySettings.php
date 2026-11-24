@@ -558,9 +558,7 @@ final class PrivacySettings
         if (empty($query->query_vars[self::QV_EXCLUDE_SEARCH_OPTOUT])) {
             return;
         }
-        global $wpdb;
-        $clause = \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql(
-            $wpdb->users . '.ID',
+        $clause = \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSqlForUserQuery(
             self::legacyOptOutStillRead()
         );
         if (str_contains($query->query_where, $clause)) {
