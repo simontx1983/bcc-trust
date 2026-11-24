@@ -193,7 +193,13 @@ final class NotificationViewService
         $actorIds = [];
         foreach ($rows as $row) {
             $fid = isset($row->not_from_user_id) ? (int) $row->not_from_user_id : 0;
-            if ($fid > 0) {
+            // F-578: a row that speaks as a page shows no person, so its
+            // sender is not read at all.
+            $asPage = self::speaksAsPage(
+                isset($row->not_type) && is_string($row->not_type) ? $row->not_type : '',
+                isset($row->not_external_id) ? (int) $row->not_external_id : 0
+            );
+            if ($fid > 0 && !$asPage) {
                 $actorIds[$fid] = true;
             }
         }
@@ -292,9 +298,17 @@ final class NotificationViewService
         }
 
         $recipientId = isset($row->not_user_id) ? (int) $row->not_user_id : 0;
-        $actor   = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '', $recipientId);
+        // F-578: a reply on a card page's review speaks as the PAGE: no
+        // person as its actor, and the text re-rendered in the page's voice
+        // (which also covers rows written before, in the "@handle …" form).
+        $asPage  = self::speaksAsPage($type, $externalId);
+        $actor   = $asPage
+            ? self::resolveActor(0, '', $recipientId)
+            : ($actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '', $recipientId));
         $link    = self::resolveLink($type, $externalId, $actId, $actor['handle']);
-        $message = self::withCurrentActorHandle($message, $actor['handle']);
+        $message = $asPage
+            ? self::pageVoiceReplyMessage($externalId)
+            : self::withCurrentActorHandle($message, $actor['handle']);
 
         if ($type === NotificationType::DELEGATOR_GROUP_REMOVED && isset($removalNotices[$externalId])) {
             $message = $removalNotices[$externalId]['message'];
@@ -318,6 +332,38 @@ final class NotificationViewService
 
     /** The most a rendered message holds: PeepSo's column width, which it cuts stored messages to. */
     public const MESSAGE_MAX_LENGTH = 200;
+
+    /**
+     * F-578: does this bell speak as a PAGE rather than a person? A review
+     * reply on a card page's review: on that page's Reviews tab the reply
+     * can stand as the page's own response, so its bell names the page and
+     * shows no person (no actor, no @handle), on the bell list and in the
+     * digest alike. Decided by the target alone: the reviewer is not the
+     * request's user when the bell is written, so a per-viewer profile check
+     * cannot be asked there. A reply on a member's own profile review still
+     * names the member, who is the subject. Rationale: F-578 (private
+     * tracker).
+     */
+    public static function speaksAsPage(string $type, int $externalId): bool
+    {
+        return $type === NotificationType::REVIEW_REPLY
+            && $externalId > 0
+            && !\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($externalId);
+    }
+
+    /**
+     * F-578: the page-voice text of a review-reply bell: "{page} replied to
+     * your review.", or a neutral line when the page has no title. The
+     * dispatcher writes it and the readers re-render it, so the stored row
+     * and the shown text agree, old rows included.
+     */
+    public static function pageVoiceReplyMessage(int $pageId): string
+    {
+        $page = $pageId > 0 ? get_post($pageId) : null;
+        $name = $page instanceof \WP_Post ? trim((string) $page->post_title) : '';
+
+        return $name !== '' ? sprintf('%s replied to your review.', $name) : 'Your review got a reply.';
+    }
 
     /**
      * F-412: name a message's actor by their CURRENT @handle.
