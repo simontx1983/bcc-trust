@@ -72,6 +72,13 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
             'ghosts'   => [],
             'primed'   => [],
             'calls'    => [],
+            // F-472: registered hooks, the lookup to bail, and the ids a
+            // bail hands back from the previous statement's column.
+            'hooks'    => [],
+            'bail'     => null,
+            'query_before_bail' => false,
+            'requests' => [],
+            'stale'    => [],
         ];
         if (!class_exists('BCC\\Core\\Log\\Logger', false)) {
             eval('namespace BCC\\Core\\Log; final class Logger { public static array $lines = []; public static function error(string $m, array $c = []): void { self::$lines[] = $m . " " . json_encode($c); } public static function warning(string $m, array $c = []): void {} public static function info(string $m, array $c = []): void {} }');
@@ -94,15 +101,87 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
                 }
                 return true;
             }
+            /** The WP_User_Query a lookup builds; only `request` matters here. */
+            function msc_new_query(): object
+            {
+                return new class { public string $request = ''; };
+            }
+            function add_action(string $hook, callable $cb, int $priority = 10, int $accepted = 1): bool
+            {
+                $GLOBALS['__msc']['hooks'][$hook][] = $cb;
+                return true;
+            }
+            function remove_action(string $hook, callable $cb, int $priority = 10): bool
+            {
+                foreach ($GLOBALS['__msc']['hooks'][$hook] ?? [] as $i => $one) {
+                    if ($one === $cb) {
+                        unset($GLOBALS['__msc']['hooks'][$hook][$i]);
+                    }
+                }
+                return true;
+            }
             function get_users(array $args = []): array
             {
                 $GLOBALS['__msc']['calls'][] = $args;
                 $lookup = isset($args['search']) ? 'name' : (($args['meta_key'] ?? '') === 'bcc_handle' ? 'handle' : 'other');
-                // `users_pre_query` short-circuit (a plugin answering the lookup):
-                // no SQL runs, so last_error keeps whatever an earlier query left.
-                if (empty($GLOBALS['__msc']['pre_query']) && !msc_query($lookup)) {
+
+                // prepare_query(): the query object exists and
+                // `pre_user_query` fires (class-wp-user-query.php:772),
+                // BEFORE `request` is assembled. That ordering is what lets
+                // a caller capture the object and still learn, afterwards,
+                // whether a statement was ever built.
+                $query = msc_new_query();
+                foreach ($GLOBALS['__msc']['hooks']['pre_user_query'] ?? [] as $cb) {
+                    $cb($query);
+                }
+
+                // `users_pre_query` short-circuit (a plugin answering the lookup),
+                // applied at :820 BEFORE `request` is assembled: no SQL runs,
+                // `request` stays empty, and last_error keeps whatever an
+                // earlier query left.
+                if (!empty($GLOBALS['__msc']['pre_query'])) {
+                    return msc_matches($args, $lookup);
+                }
+
+                // query(): the statement is assembled. With
+                // `cache_results => false` the cache branch is skipped and
+                // :843-847 always reaches get_col(), so from here a
+                // statement either runs or the read did not happen.
+                $query->request = 'SELECT ID FROM wp_users /* ' . $lookup . ' */';
+                // Recorded so a test can reuse the exact string rather than
+                // restating it and drifting from this shim.
+                $GLOBALS['__msc']['requests'][$lookup] = $query->request;
+
+                // ⚠ The pre-flush bail: built, NOT executed, no error
+                // recorded, neither counter touched — and get_col() hands
+                // back the PREVIOUS statement's column, so the lookup
+                // answers with ids that are not its own.
+                if (($GLOBALS['__msc']['bail'] ?? null) === $lookup) {
+                    // ⚠ An UNRELATED statement between the caller's capture
+                    // and its check, when asked for. Without it both halves
+                    // of the caller's test are false and a mutant swapping
+                    // && for || still refuses -- it survived until this
+                    // existed. With it, a statement HAS run and it is not
+                    // this lookup, so each half is load-bearing on its own.
+                    if (!empty($GLOBALS['__msc']['query_before_bail'])) {
+                        $GLOBALS['wpdb']->num_queries++;
+                        $GLOBALS['wpdb']->last_query = 'SELECT 1 /* unrelated */';
+                    }
+
+                    return array_map('strval', $GLOBALS['__msc']['stale'] ?? []);
+                }
+
+                if (!msc_query($lookup)) {
                     return []; // what wpdb leaves after a failed query: no rows, and the error
                 }
+                $GLOBALS['wpdb']->num_queries++;
+                $GLOBALS['wpdb']->last_query = $query->request;
+
+                return msc_matches($args, $lookup);
+            }
+            /** @return list<string> */
+            function msc_matches(array $args, string $lookup): array
+            {
                 $out = [];
                 foreach ($GLOBALS['__msc']['users'] as $id => [$login, $display, $handle]) {
                     $hit = $lookup === 'name'
@@ -174,6 +253,148 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
         foreach ($GLOBALS['__msc']['calls'] as $args) {
             self::assertArrayNotHasKey('cache_results', $args);
         }
+    }
+
+    // ── F-472: a lookup whose statement never ran ───────────────────────
+    //
+    // `last_error` cannot see this and no variant of it could:
+    // `wpdb::query()` returns false ABOVE `flush()` on a failed reconnect
+    // and on an emptied `query` filter, recording no error. And `get_col()`
+    // never returns null, so the lookup answers with the PREVIOUS
+    // statement's column — ids that are not its own.
+    //
+    // ⚠ The counter is only consulted alongside a BUILT request. An unbuilt
+    // one means something answered through `users_pre_query`, which these
+    // MATCHING lookups accept; see verifiedUserIds()'s docblock, and
+    // testAnErrorLeftByAnEarlierQueryIsNotBlamedOnTheLookup above, which is
+    // what pins that branch.
+
+    public function testANameLookupThatDidNotRunThrowsRatherThanAnsweringWithAnotherStatementsIds(): void
+    {
+        $GLOBALS['__msc']['bail']  = 'name';
+        // What the previous statement's column would hand back.
+        $GLOBALS['__msc']['stale'] = [4242];
+
+        try {
+            MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+            self::fail('ids from another statement were answered as matches');
+        } catch (RepositoryReadFailure $e) {
+            self::assertStringContainsString('built but did not run', $e->getMessage());
+        }
+
+        // The premise, and why no error check could have caught it.
+        self::assertSame('', $GLOBALS['wpdb']->last_error, 'premise: the bail records no error');
+    }
+
+    public function testAHandleLookupThatDidNotRunThrows(): void
+    {
+        $GLOBALS['__msc']['bail']  = 'handle';
+        $GLOBALS['__msc']['stale'] = [4242];
+
+        $this->expectException(RepositoryReadFailure::class);
+        MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+    }
+
+    /**
+     * ⭐ The case where a statement DID run and it was not this lookup, so
+     * each half of the check is load-bearing on its own.
+     *
+     * This test exists because a mutation control demanded it: with nothing
+     * running between the capture and the check, BOTH halves are false, and
+     * a mutant swapping `&&` for `||` still refused — it survived. Here a
+     * statement has run, so only "it was not this lookup" refuses, and that
+     * mutant now dies.
+     *
+     * ⚠ The unbuilt-request branch is NOT reached here: `request` was
+     * assembled, so this is a built-and-unrun read, not a `users_pre_query`
+     * answer. The two must not be conflated — one is a fault, the other is
+     * a plugin doing something supported.
+     */
+    public function testALookupThatDidNotRunIsRefusedEvenWhenSomethingElseQueried(): void
+    {
+        $GLOBALS['__msc']['bail']              = 'name';
+        $GLOBALS['__msc']['stale']             = [4242];
+        $GLOBALS['__msc']['query_before_bail'] = true;
+
+        $before = (int) $GLOBALS['wpdb']->num_queries;
+
+        try {
+            MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+            self::fail('an unrelated statement masked a lookup that never ran');
+        } catch (RepositoryReadFailure $e) {
+            self::assertStringContainsString('built but did not run', $e->getMessage());
+            self::assertStringContainsString('a statement ran: yes', $e->getMessage());
+            self::assertStringContainsString('it was this lookup: no', $e->getMessage());
+        }
+
+        // The premise of this test: the counter really did move.
+        self::assertGreaterThan(
+            $before,
+            (int) $GLOBALS['wpdb']->num_queries,
+            'the premise: an unrelated statement ran'
+        );
+    }
+
+    /**
+     * ⭐ And the mirror case: the IDENTICAL statement ran just before, so
+     * the SQL comparison passes on its own and only the counter refuses.
+     *
+     * Also demanded by a mutation control — dropping the `$ran` requirement
+     * survived until this existed, because every other case here has both
+     * halves false or only the comparison false.
+     *
+     * Together with the test above, each half of the check is now pinned
+     * by a case where it is the ONLY thing refusing.
+     */
+    public function testALookupThatDidNotRunIsRefusedEvenWhenTheIdenticalStatementRanBefore(): void
+    {
+        // One successful pass, to learn the lookup's own SQL from the shim
+        // rather than restating it here.
+        self::assertSame([7, 8], self::sorted(
+            MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true)
+        ));
+        $nameRequest = (string) ($GLOBALS['__msc']['requests']['name'] ?? '');
+        self::assertNotSame('', $nameRequest, 'the premise: the shim recorded the name lookup');
+
+        // Now the preceding statement IS that identical SQL, and the lookup
+        // bails: the comparison passes, the counter does not move.
+        $GLOBALS['wpdb']->last_query = $nameRequest;
+        $GLOBALS['__msc']['bail']    = 'name';
+        $GLOBALS['__msc']['stale']   = [4242];
+        $before = (int) $GLOBALS['wpdb']->num_queries;
+
+        try {
+            MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+            self::fail('an identical earlier statement masked a lookup that never ran');
+        } catch (RepositoryReadFailure $e) {
+            self::assertStringContainsString('a statement ran: no', $e->getMessage());
+            self::assertStringContainsString('it was this lookup: yes', $e->getMessage());
+        }
+
+        self::assertSame(
+            $before,
+            (int) $GLOBALS['wpdb']->num_queries,
+            'the premise of this test: the counter did NOT move, which is what caught it'
+        );
+    }
+
+    /**
+     * The fail-SAFE arm is unchanged: the same unrun lookup answers as
+     * "nobody matched" rather than throwing, which is what the /members
+     * directory and the @-mention picker rely on.
+     *
+     * ⚠ It does NOT answer with the stale ids either — the matcher keeps
+     * only ids it can account for.
+     */
+    public function testByDefaultALookupThatDidNotRunStillAnswersWithoutThrowing(): void
+    {
+        $GLOBALS['__msc']['bail']  = 'name';
+        $GLOBALS['__msc']['stale'] = [4242];
+
+        $ids = MemberSearchCandidates::ids('ali');
+
+        self::assertNotContains(4242, $ids, 'another statement\'s id reached the answer');
+        self::assertSame([7], $ids, 'the handle lookup still answers; no throw');
     }
 
     /** @return array<string, array{string, string}> */
