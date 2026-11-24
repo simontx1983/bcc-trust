@@ -74,6 +74,22 @@ final class WalletSignupPendingEmailTest extends TestCase
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
 
+            /**
+             * ⚠ DECLARED, not left to be created on assignment.
+             *
+             * Real `wpdb` has this property, and the verified-read helpers
+             * (F-472) clear it before every read. Without the declaration
+             * that assignment creates a DYNAMIC property, which PHP 8.2
+             * deprecates and PHP 9 makes an error — the full suite reported
+             * one deprecation triggered by twelve tests in this file.
+             *
+             * Behaviour is unchanged either way: this double's `__call()`
+             * refuses `query()`, and the only caller on this path,
+             * `AuthSupport::linkedWalletCount()`, catches `\Throwable` by
+             * design because the prompt it feeds is advisory.
+             */
+            public string $last_error = '';
+
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
             {

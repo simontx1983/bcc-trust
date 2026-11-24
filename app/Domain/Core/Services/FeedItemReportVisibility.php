@@ -152,10 +152,12 @@ class FeedItemReportVisibility
         // includes a reply that no longer renders after a hand-over (its
         // author no longer answers for the page; only they still see it).
         // Reviews are never group-tagged, so the group rule does not apply.
+        // F-532: the review's page must also pass PageAccess for this viewer,
+        // so a reply on a SECRET page they may not see answers as missing.
         if ((int) ($activity->act_module_id ?? 0)
             === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
         ) {
-            return $this->isLive($activity) && $this->replyParentIsVisible($postId);
+            return $this->isLive($activity) && $this->replyParentIsVisible($postId, $viewerId);
         }
         // Only modules a feed or permalink can show at all: the SAME
         // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
@@ -211,8 +213,14 @@ class FeedItemReportVisibility
      * F-345: is the review a reply (backing post $postId) answers still
      * showable — active and not moderation-hidden? Fails CLOSED: a failed
      * read is "not visible", so a reply is never reportable on a guess.
+     *
+     * F-532: and may $viewerId see the review's page? PageAccess decides for
+     * a PeepSo page (a SECRET page admits its members, invitees, author and
+     * site admins; a failed read admits no one). A member's self-page is
+     * not a PeepSo page, so it has no page rule. Rationale: F-532 (private
+     * tracker).
      */
-    private function replyParentIsVisible(int $postId): bool
+    private function replyParentIsVisible(int $postId, int $viewerId): bool
     {
         $voteId = (int) get_post_meta($postId, '_bcc_activity_sidecar_id', true);
         if ($voteId <= 0) {
@@ -220,10 +228,17 @@ class FeedItemReportVisibility
         }
         $this->votes ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
         try {
-            return $this->votes->findReviewForReply($voteId) !== null;
+            $review = $this->votes->findReviewForReply($voteId);
         } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
             return false;
         }
+        if ($review === null) {
+            return false;
+        }
+
+        $pageId = (int) $review->page_id;
+        return MemberSelfPageService::isSelfPage($pageId)
+            || \BCC\Trust\Core\Support\PageAccess::viewerMaySeeId($pageId, $viewerId);
     }
 
     /**

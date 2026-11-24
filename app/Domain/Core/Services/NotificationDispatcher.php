@@ -258,14 +258,16 @@ final class NotificationDispatcher
             return;
         }
         try {
-            $actorHandle = self::resolveHandle($replierId);
-            if (MemberSelfPageService::isSelfPage($pageId)) {
-                $message = sprintf('@%s replied to your review.', $actorHandle);
+            // F-578: on a card page the reply can stand as the page's own
+            // response, so its bell speaks as the page and names no one
+            // (NotificationViewService::speaksAsPage(), which the bell list
+            // and the digest also follow). The replier stays the row's sender,
+            // so PeepSo's block suppression and the bell list's blocked-actor
+            // filter still apply; the readers never show them.
+            if (NotificationViewService::speaksAsPage(NotificationType::REVIEW_REPLY, $pageId)) {
+                $message = NotificationViewService::pageVoiceReplyMessage($pageId);
             } else {
-                $pageName = self::resolvePageName($pageId);
-                $message  = $pageName !== ''
-                    ? sprintf('@%s replied to your review of %s.', $actorHandle, $pageName)
-                    : sprintf('@%s replied to your review.', $actorHandle);
+                $message = sprintf('@%s replied to your review.', self::resolveHandle($replierId));
             }
 
             $this->dispatch(

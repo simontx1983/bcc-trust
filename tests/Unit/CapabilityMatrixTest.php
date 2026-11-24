@@ -55,18 +55,18 @@ final class CapabilityMatrixTest extends TestCase
     private const DAY = 86400;
 
     /**
-     * @param bool $writeReview  writeReviewGate() verdict
+     * @param bool|null $writeReview writeReviewGate() verdict (null = the tier could not be read, F-469)
      * @param \Throwable|null $attestationThrows attestationGate() behavior
      * @param bool $notSuspended notSuspended() verdict
      * @param bool $ownsPage     ownsPage() verdict
      * @param ?string $rank      rank_state rank_slug (null = New Member / no row)
-     * @param string $tier       current reputation tier slug
+     * @param string $tier       current reputation tier slug ('unknown' = could not be read, F-469)
      * @param bool $inRecovery   §14.2 recovery pause (rank_state 'grace')
      * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null $custody
      *                           custody facts (null = fresh under-cap default)
      */
     private function resolver(
-        bool $writeReview = false,
+        ?bool $writeReview = false,
         ?\Throwable $attestationThrows = null,
         bool $notSuspended = true,
         bool $ownsPage = false,
@@ -87,7 +87,7 @@ final class CapabilityMatrixTest extends TestCase
              * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}|null $fakeCustody
              */
             public function __construct(
-                private readonly bool $fakeWriteReview,
+                private readonly ?bool $fakeWriteReview,
                 private readonly ?\Throwable $fakeAttestationThrows,
                 private readonly bool $fakeNotSuspended,
                 private readonly bool $fakeOwnsPage,
@@ -99,7 +99,7 @@ final class CapabilityMatrixTest extends TestCase
             ) {
             }
 
-            protected function writeReviewGate(int $userId): bool
+            protected function writeReviewGate(int $userId): ?bool
             {
                 return $this->fakeWriteReview;
             }
@@ -133,6 +133,14 @@ final class CapabilityMatrixTest extends TestCase
 
             protected function tierAtLeast(int $userId, string $tierSlug): bool
             {
+                return $this->tierAtLeastOrUnknown($userId, $tierSlug) === true;
+            }
+
+            protected function tierAtLeastOrUnknown(int $userId, string $tierSlug): ?bool
+            {
+                if ($this->fakeTier === 'unknown') {
+                    return null;
+                }
                 $ord = ['risky' => 0, 'caution' => 1, 'neutral' => 2, 'trusted' => 3, 'elite' => 4];
                 return ($ord[$this->fakeTier] ?? 2) >= ($ord[$tierSlug] ?? 2);
             }
@@ -233,6 +241,34 @@ final class CapabilityMatrixTest extends TestCase
         self::assertTrue($denied->isDenied());
         self::assertSame('feature_gate', $denied->reason);
         self::assertSame('feature_access', $denied->source);
+    }
+
+    /**
+     * F-469: a standing that could not be read is `unavailable` (the F-503
+     * reason callers answer with 503), never feature_gate and never allowed.
+     */
+    public function testAnUnreadableStandingIsUnavailableForBothWriteActions(): void
+    {
+        foreach ([CapabilityCatalog::WRITE_REVIEW, CapabilityCatalog::CAST_DISPUTE_VOTE] as $key) {
+            $decision = $this->resolver(writeReview: null)->can(7, $key);
+            self::assertTrue($decision->isDenied(), "key {$key}");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
+    }
+
+    /** F-469: every tier-gated capability answers `unavailable` on an unreadable tier. */
+    public function testAnUnreadableTierIsUnavailableForEveryTierGatedCapability(): void
+    {
+        foreach ([
+            CapabilityCatalog::CREATE_COMMUNITY      => 'veteran',
+            CapabilityCatalog::RECEIVE_COMMUNITY     => 'veteran',
+            CapabilityCatalog::POST_RANKED_HALL_FEED => 'journeyman',
+            CapabilityCatalog::LIST_AS_MENTOR        => 'veteran',
+        ] as $key => $rank) {
+            $decision = $this->resolver(rank: $rank, tier: 'unknown')->can(7, $key);
+            self::assertTrue($decision->isDenied(), "key {$key}");
+            self::assertSame('unavailable', $decision->reason, "key {$key}");
+        }
     }
 
     public function testSuspendedMemberIsDeniedBothWriteActions(): void
@@ -519,6 +555,54 @@ final class CapabilityMatrixTest extends TestCase
 
             self::assertSame('unavailable', $decision->reason, "receiver status: {$label}");
         }
+    }
+
+    /**
+     * ⭐⭐ F-469: THE SAME, DURING A TIER FAULT. An unreadable trust tier is
+     * `unavailable` too, so it is read up front on RECEIVE like the count.
+     * Read after the status gates, a suspended, New Member or in-recovery
+     * receiver would answer its own reason (→ 403 receiver_ineligible) while
+     * an eligible one answered `unavailable` (→ 503): the same probe.
+     *
+     * Asserts SAMENESS across every status variant, not only `unavailable`
+     * on each.
+     */
+    public function testDuringATierFaultEveryReceiverGetsTheSameReason(): void
+    {
+        $eligible = $this->resolver(rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+        self::assertSame('unavailable', $eligible->reason);
+        self::assertFalse($eligible->isAllowed());
+
+        $variants = [
+            'suspended'   => ['ok' => false, 'rank' => 'journeyman', 'rec' => false],
+            'new member'  => ['ok' => true,  'rank' => null,         'rec' => false],
+            'in recovery' => ['ok' => true,  'rank' => 'journeyman', 'rec' => true],
+        ];
+
+        foreach ($variants as $label => $v) {
+            $decision = $this->resolver(
+                notSuspended: $v['ok'],
+                rank: $v['rank'],
+                tier: 'unknown',
+                inRecovery: $v['rec']
+            )->can(7, CapabilityCatalog::RECEIVE_COMMUNITY);
+
+            self::assertSame(
+                $eligible->reason,
+                $decision->reason,
+                "a tier fault lets the giver tell a receiver who is {$label} from an eligible one"
+            );
+        }
+    }
+
+    /** F-469: and CREATE still keeps its documented order during a tier fault. */
+    public function testCreateKeepsItsDocumentedGateOrderDuringATierFault(): void
+    {
+        $decision = $this->resolver(notSuspended: false, rank: 'journeyman', tier: 'unknown')
+            ->can(7, CapabilityCatalog::CREATE_COMMUNITY);
+
+        self::assertSame('suspended', $decision->reason, "create's documented gate order changed");
     }
 
     /**

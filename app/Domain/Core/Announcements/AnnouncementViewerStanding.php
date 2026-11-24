@@ -182,9 +182,20 @@ final class AnnouncementViewerStanding
     private static function isInGoodStanding(int $viewerId): bool
     {
         try {
-            $tier = Plugin::instance()->reputationRepository()->getTier($viewerId);
+            // F-469: getTier() never threw on a failed read (it answered
+            // 'neutral', i.e. "in good standing"), so the fail-closed catch
+            // below never fired for it. The tri-state reader makes the
+            // documented intent true: unknown denies.
+            $tier = Plugin::instance()->reputationRepository()->getTierOrUnknown($viewerId);
+            if ($tier === null) {
+                Logger::warning('[AnnouncementViewerStanding] tier could not be read; failing closed', [
+                    'user_id' => $viewerId,
+                ]);
 
-            return UserViewService::isInGoodStanding((string) $tier);
+                return false;
+            }
+
+            return UserViewService::isInGoodStanding($tier);
         } catch (\Throwable $e) {
             // ⚠ FAIL CLOSED — the deliberate divergence from
             // AuthSupport::resolveInGoodStanding(), which fails OPEN because it

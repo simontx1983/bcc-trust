@@ -418,9 +418,10 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
                 'UserViewService::isInGoodStanding(',
                 'the tier-to-standing mapping has exactly one owner',
             ],
+            // F-469: the tri-state reader, so an unreadable tier denies.
             'the tier itself from the reputation repository' => [
-                'reputationRepository()->getTier(',
-                'the tier has exactly one source',
+                'reputationRepository()->getTierOrUnknown(',
+                'the tier has exactly one source, and unknown must be visible to it',
             ],
         ];
     }

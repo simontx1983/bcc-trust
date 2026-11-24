@@ -185,6 +185,13 @@ final class AttestationScoreSynthesis
      * The bounded attestation_bonus for one target (read-time synthesis). Pure
      * of side effects; resolves the live tuning + elite-attestor set + entity
      * card age, then delegates the arithmetic to {@see computeBonus}.
+     *
+     * F-469: throws when the attestors' tiers could not be read, so
+     * recomputeFor() writes nothing. Both of its callers record the failure
+     * as an `attestation_synthesis` metric, and the daily decay sweep
+     * re-synthesizes every target.
+     *
+     * @throws \RuntimeException when the attestor tiers could not be read
      */
     public function synthesize(string $targetKind, int $targetId, ?\DateTimeInterface $now = null): float
     {
@@ -200,7 +207,10 @@ final class AttestationScoreSynthesis
         foreach ($rows as $r) {
             $attestorIds[(int) $r->attestor_user_id] = true;
         }
-        $tiers    = $this->reputationRepo->getTiersForUsers(array_keys($attestorIds));
+        $tiers = $this->reputationRepo->getTiersForUsersOrUnknown(array_keys($attestorIds));
+        if ($tiers === null) {
+            throw new \RuntimeException('attestor tiers could not be read');
+        }
         $eliteIds = [];
         foreach ($tiers as $uid => $tier) {
             if ($tier === 'elite') {

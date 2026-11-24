@@ -119,7 +119,16 @@ final class ContributionScoreService
         return self::rawWindowPoints($posts, $reviews, $comments, $reports);
     }
 
-    /** R4: usefulness multiplier from trust-weighted reaction engagement. */
+    /**
+     * R4: usefulness multiplier from trust-weighted reaction engagement.
+     *
+     * F-469: throws when the reactors' tiers could not be read, so no bonus
+     * is computed from Neutral defaults. The daily evaluator counts it as a
+     * failed evaluation (`contribution_recovery` metric) and retries on its
+     * next run.
+     *
+     * @throws \RuntimeException when the reactor tiers could not be read
+     */
     private function engagementUsefulness(int $userId, string $since): float
     {
         $reactorCounts = $this->reactionRepo->getReactorCountsForOwnerSince(
@@ -131,7 +140,10 @@ final class ContributionScoreService
             return 1.0;
         }
 
-        $tiers    = $this->reputationRepo->getTiersForUsers(array_keys($reactorCounts));
+        $tiers = $this->reputationRepo->getTiersForUsersOrUnknown(array_keys($reactorCounts));
+        if ($tiers === null) {
+            throw new \RuntimeException('reactor tiers could not be read');
+        }
         $weighted = 0.0;
         foreach ($reactorCounts as $reactorId => $count) {
             $tier      = $tiers[$reactorId] ?? 'neutral';

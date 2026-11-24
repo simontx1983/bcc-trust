@@ -105,6 +105,29 @@ final class ListingPrivacyClausesTest extends TestCase
     }
 
     /**
+     * F-518 / F-519: the ONE answer every listing gives on the legacy key
+     * (this search, and the fragment the public index and the directory
+     * share). It stays true until the done-marker reads as set, so a missing
+     * or falsy marker keeps honouring the legacy key (the fail-closed side).
+     * The runner stores time().
+     */
+    public function testTheLegacyOptOutIsStillReadUntilTheFoldMarkerIsSet(): void
+    {
+        self::assertTrue(PrivacySettings::legacyOptOutStillRead(), 'no marker: the fold is not done');
+
+        foreach ([0, '0', '', false] as $falsy) {
+            $GLOBALS['__bcc_lp']['options'][PrivacySettings::FOLD_DONE_OPTION] = $falsy;
+            self::assertTrue(
+                PrivacySettings::legacyOptOutStillRead(),
+                'a falsy marker is not a done fold: ' . var_export($falsy, true)
+            );
+        }
+
+        $GLOBALS['__bcc_lp']['options'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
+        self::assertFalse(PrivacySettings::legacyOptOutStillRead(), 'the marker the runner writes');
+    }
+
+    /**
      * Admins must be able to find a hidden member in member search —
      * the one job the "admins exempt" rule exists for.
      */

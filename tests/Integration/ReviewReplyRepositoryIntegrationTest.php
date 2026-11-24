@@ -391,4 +391,109 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
 
         self::assertFalse($this->canReport($act));
     }
+
+    // ── F-532: a reply on a page's review follows the page's privacy ────
+
+    private const PAGE_MEMBER = 987200;
+    private const PEEPSO_PAGE = 993401;
+
+    /**
+     * A PeepSo page with one privacy row, and PAGE_MEMBER a member of it.
+     * The reviews below are of THIS page, not of the owner's self-page.
+     */
+    private function onPeepSoPage(string $privacy): int
+    {
+        require_once dirname(__DIR__) . '/Stubs/post-row-integration-stubs.php';
+        global $wpdb;
+        self::assertNotFalse($wpdb->query(
+            "CREATE TABLE IF NOT EXISTS `{$wpdb->prefix}peepso_page_members` (
+                pm_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                pm_user_id BIGINT UNSIGNED NOT NULL,
+                pm_page_id BIGINT UNSIGNED NOT NULL,
+                pm_user_status VARCHAR(32) NOT NULL DEFAULT 'member',
+                PRIMARY KEY (pm_id)
+            )"
+        ), $wpdb->last_error);
+
+        // ⚠ Below MemberSelfPageService::ID_BASE: an id above it IS a member
+        // self-page, which has no page rule, and the case would pass for the
+        // wrong reason.
+        $page = self::PEEPSO_PAGE;
+        if ((int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE ID = %d", $page)) > 0) {
+            self::markTestSkipped("{$wpdb->posts}.ID={$page} already exists; refusing to overwrite a real row");
+        }
+        self::assertNotFalse($wpdb->insert($wpdb->posts, [
+            'ID' => $page, 'post_type' => 'peepso-page', 'post_status' => 'publish', 'post_author' => self::OWNER,
+        ]), $wpdb->last_error);
+        $this->posts[] = $page;
+        self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $page, 'meta_key' => 'peepso_page_privacy', 'meta_value' => $privacy]));
+        self::assertNotFalse($wpdb->insert($wpdb->prefix . 'peepso_page_members', [
+            'pm_user_id' => self::PAGE_MEMBER, 'pm_page_id' => $page, 'pm_user_status' => 'member',
+        ]), $wpdb->last_error);
+        $this->pageMemberRows[] = (int) $wpdb->insert_id;
+
+        $this->page = $page;
+        return $page;
+    }
+
+    /** @var list<int> */
+    private array $pageMemberRows = [];
+
+    private function canReportAs(int $act, int $viewer): bool
+    {
+        $row = PeepSoActivityRepository::getById($act);
+        self::assertNotNull($row, 'fixture activity must load');
+        return $this->visibility()->canSee($viewer, $row);
+    }
+
+    private function forgetPageMembers(): void
+    {
+        global $wpdb;
+        foreach ($this->pageMemberRows as $id) {
+            $wpdb->delete($wpdb->prefix . 'peepso_page_members', ['pm_id' => $id]);
+        }
+    }
+
+    public function testAReplyOnASecretPagesReviewIsReportableOnlyByThoseThePageAdmits(): void
+    {
+        $this->onPeepSoPage('2');
+        [, $act] = $this->post('review_reply', $this->vote(), 'reply on a secret page');
+
+        try {
+            self::assertFalse($this->canReportAs($act, self::VOTER + 50), 'a stranger gets what a missing item gets');
+            self::assertFalse($this->canReportAs($act, 0), 'and so does anonymous');
+            self::assertTrue($this->canReportAs($act, self::PAGE_MEMBER), 'a member of the page may report it');
+            self::assertTrue($this->canReportAs($act, self::OWNER), 'and so may its author');
+        } finally {
+            $this->forgetPageMembers();
+        }
+    }
+
+    public function testAReplyOnAnOpenPagesReviewIsReportableByAnyone(): void
+    {
+        $this->onPeepSoPage('0');
+        [, $act] = $this->post('review_reply', $this->vote(), 'reply on an open page');
+
+        try {
+            self::assertTrue($this->canReportAs($act, self::VOTER + 50));
+        } finally {
+            $this->forgetPageMembers();
+        }
+    }
+
+    /** The page's privacy could not be read: nobody but its author may report the reply. */
+    public function testAFailedPagePrivacyReadMakesTheReplyUnreportable(): void
+    {
+        $this->onPeepSoPage('0');
+        [, $act] = $this->post('review_reply', $this->vote(), 'reply');
+        $GLOBALS['wpdb']->failQueriesMatching = "/meta_key = 'peepso_page_privacy'/";
+
+        try {
+            self::assertFalse($this->canReportAs($act, self::VOTER + 50));
+            self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the privacy read');
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+            $this->forgetPageMembers();
+        }
+    }
 }

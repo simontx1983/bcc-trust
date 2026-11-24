@@ -127,7 +127,7 @@ final class NftSpamContractRepository
         global $wpdb;
         $table = self::table();
 
-        $rule = $wpdb->get_var($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT rule
                FROM {$table}
               WHERE chain_id = %d
@@ -135,23 +135,34 @@ final class NftSpamContractRepository
               LIMIT 1",
             $chainId,
             $contractLc
-        ));
+        );
 
         // ⚠⚠ A FAILED READ MUST NOT BE CACHED.
         //
-        // `get_var()` returns null for no-such-row AND for a failed query,
+        // `get_var()` returned null for no-such-row AND for a failed query,
         // and the old code cached that null — so ONE transient fault
         // poisoned the request-scoped cache for that key, and every later
         // caller in the request got "no rule" WITHOUT RUNNING A QUERY.
         // They could not have detected the failure even if they checked,
-        // because no query of theirs ever ran. That is the amplification
-        // this guard removes: detect first, cache only a real answer.
-        if ($failClosed) {
-            // Logs and throws. Nothing is cached, so the next caller in
-            // this request gets a fresh attempt rather than a stale null.
-            self::guardReadOrThrow('getRuleOrThrow');
-        } elseif (self::readFailed('getRule')) {
-            // Logged by the guard. The ambiguous null is still returned,
+        // because no query of theirs ever ran.
+        //
+        // ⚠ THIS SITE IS NOT A SWAP, and it is the only one.
+        // `runReadVar(..., failClosed: false)` answers null on a failure —
+        // precisely the value this method must never cache. So the read is
+        // made fail-CLOSED either way and the caller's policy is applied to
+        // the exception instead. The caching decision needs the VERDICT,
+        // and only the throwing form carries one.
+        try {
+            $rule = self::runReadVar(
+                $sql,
+                $failClosed ? 'getRuleOrThrow' : 'getRule',
+                true
+            );
+        } catch (RepositoryReadFailure $e) {
+            if ($failClosed) {
+                throw $e;
+            }
+            // Logged inside the read. The ambiguous null is still returned,
             // because changing that is a suppression-policy decision — but
             // it is NOT cached, so the fault stays visible to the next
             // caller instead of being silently frozen in for the request.

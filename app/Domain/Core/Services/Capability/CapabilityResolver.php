@@ -72,7 +72,14 @@ class CapabilityResolver
                 // dispute-vote live gate (DisputeVoteService) additionally
                 // enforces §18 party exclusion + fraud hard-block per
                 // dispute — this key answers the feature-level question.
-                return $this->writeReviewGate($userId)
+                // F-469: a standing that could not be read is `unavailable`
+                // (the F-503 convention callers answer with 503), never
+                // feature_gate.
+                $gate = $this->writeReviewGate($userId);
+                if ($gate === null) {
+                    return CapabilityDecision::denied('unavailable', 'feature_access');
+                }
+                return $gate
                     ? CapabilityDecision::allowed('feature_access')
                     : CapabilityDecision::denied('feature_gate', 'feature_access');
 
@@ -115,7 +122,9 @@ class CapabilityResolver
                 // close, open for the length of the fault. Reading the
                 // count FIRST makes `unavailable` independent of the
                 // receiver: during a fault every receiver gets the same
-                // 503, whatever their status.
+                // 503, whatever their status. (F-469: the trust TIER is read
+                // up front for the same reason, since it too can answer
+                // `unavailable`.)
                 //
                 // ⚠ Create keeps its own order, which the contract
                 // documents as the gate sequence. There is no third party
@@ -168,9 +177,19 @@ class CapabilityResolver
         // is false, so CREATE's order is unchanged and every other caller
         // keeps the documented sequence.
         $custody = null;
+        $tierOk  = null;
         if ($countBeforeStatusGates) {
             $custody = $this->custodyState($userId);
             if ($custody === null) {
+                return CapabilityDecision::denied('unavailable', 'community_custody');
+            }
+            // F-469: the TIER too, for the same reason. An unreadable tier is
+            // `unavailable`, and read after the status gates it would again
+            // depend on the receiver (a suspended or New Member receiver
+            // answers its own reason first). Read here, the value is reused
+            // at the documented position below.
+            $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+            if ($tierOk === null) {
                 return CapabilityDecision::denied('unavailable', 'community_custody');
             }
         }
@@ -185,7 +204,13 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'apprentice')) {
             return CapabilityDecision::denied('new_member', 'community_custody');
         }
-        if (!$this->tierAtLeast($userId, 'neutral')) {
+        // F-469: an unreadable tier is `unavailable` (503), not below_neutral.
+        // Already read above on RECEIVE; CREATE reads it here, in order.
+        $tierOk ??= $this->tierAtLeastOrUnknown($userId, 'neutral');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'community_custody');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_neutral', 'community_custody');
         }
         if ($this->inRecovery($userId)) {
@@ -259,7 +284,11 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'journeyman')) {
             return CapabilityDecision::denied('below_journeyman', 'ranked_hall');
         }
-        if (!$this->tierAtLeast($userId, 'neutral')) {
+        $tierOk = $this->tierAtLeastOrUnknown($userId, 'neutral');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'ranked_hall');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_neutral', 'ranked_hall');
         }
         if ($this->inRecovery($userId)) {
@@ -287,7 +316,11 @@ class CapabilityResolver
         if (!$this->rankAtLeast($userId, 'veteran')) {
             return CapabilityDecision::denied('below_veteran', 'mentor_listing');
         }
-        if (!$this->tierAtLeast($userId, 'trusted')) {
+        $tierOk = $this->tierAtLeastOrUnknown($userId, 'trusted');
+        if ($tierOk === null) {
+            return CapabilityDecision::denied('unavailable', 'mentor_listing');
+        }
+        if (!$tierOk) {
             return CapabilityDecision::denied('below_trusted', 'mentor_listing');
         }
         if ($this->inRecovery($userId)) {
@@ -369,14 +402,21 @@ class CapabilityResolver
      * (§20.1). Replaced the legacy Level-2 FeatureAccessService gate at
      * the atomic cutover.
      */
-    protected function writeReviewGate(int $userId): bool
+    protected function writeReviewGate(int $userId): ?bool
     {
         // Rank-presence (Apprentice+, New Members excluded) AND tier
         // Neutral+, composed from the shared credibility atoms.
         // Deliberately no suspension / fraud / recovery gate here — that
         // asymmetry (enforced instead at the REST layer, §20.1) is
         // unchanged by the atom consolidation.
-        return $this->hasRankState($userId) && $this->tierAtLeast($userId, 'neutral');
+        //
+        // F-469: NULL when the tier could not be read (can() answers
+        // `unavailable`). A New Member is refused before the tier is read.
+        if (!$this->hasRankState($userId)) {
+            return false;
+        }
+
+        return $this->tierAtLeastOrUnknown($userId, 'neutral');
     }
 
     /** @throws AttestationException when ineligible */

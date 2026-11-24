@@ -83,7 +83,8 @@ class TierSnapshotService
      *   - a completed day is recorded, so a second trigger the same day is
      *     a no-op, and the retention purge runs once, at completion;
      *   - the cursor advances only after recordDays() succeeds; a write
-     *     failure or a failed read (listUserIdsAfter is fail-closed) throws
+     *     failure or a failed read (listUserIdsAfter is fail-closed, and
+     *     since F-469 so is the tier read) throws
      *     to RankScheduler, which records `rank_scoring.tier_snapshot_failed`,
      *     and the cursor stays for the retry.
      */
@@ -119,7 +120,14 @@ class TierSnapshotService
                     break;
                 }
 
-                $tiers = $this->reputation->getTiersForUsers($userIds);
+                // F-469: rows are INSERT IGNORE, first write for a day wins,
+                // so a batch whose tiers could not be read is never written
+                // as the Neutral default. It throws like a failed write: the
+                // cursor stays, and the retry writes the real tiers.
+                $tiers = $this->reputation->getTiersForUsersOrUnknown($userIds);
+                if ($tiers === null) {
+                    throw new \RuntimeException('reputation tier batch read failed');
+                }
 
                 $batch = [];
                 foreach ($userIds as $userId) {
@@ -210,9 +218,19 @@ class TierSnapshotService
         if ($userId <= 0 || isset(self::$todayMemo[$userId])) {
             return;
         }
-        self::$todayMemo[$userId] = true;
+        // F-469: a tier that could not be read writes nothing. The row is
+        // INSERT IGNORE, so a default written now would stand for the whole
+        // day; a missing row is a non-qualifying day (fail-safe strict), and
+        // the sweep or a later call writes the real one. Not memoised.
+        $tier = $this->reputation->getTierOrUnknown($userId);
+        if ($tier === null) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] rank tier snapshot: tier could not be read; today\'s row not written', [
+                'user_id' => $userId,
+            ]);
+            return;
+        }
 
-        $tier = $this->reputation->getTier($userId);
+        self::$todayMemo[$userId] = true;
         $this->tierDays->recordDay($userId, gmdate('Y-m-d'), $this->config->tierOrdFor($tier));
     }
 

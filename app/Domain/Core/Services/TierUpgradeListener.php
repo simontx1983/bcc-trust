@@ -25,7 +25,7 @@
  * shipping into this listener don't get retroactively "promoted."
  *
  * Single-source-of-trust per §A4: this listener does NOT compute tiers.
- * It calls ReputationRepository::getTier() and compares strings. The
+ * It calls ReputationRepository::getTierOrUnknown() and compares strings. The
  * scoring math stays in the trust services.
  *
  * @package BCC\Trust\Core\Services
@@ -77,8 +77,12 @@ final class TierUpgradeListener
      * Single entry point — every subscribed activity event funnels here.
      *
      * Cheap by design: one user-meta read, one tier lookup (cached
-     * inside ReputationRepository::getTier), one usermeta write on
-     * transition. Safe to call from request-path subscribers.
+     * inside ReputationRepository), one usermeta write on transition.
+     * Safe to call from request-path subscribers.
+     *
+     * F-469: a tier that could not be read is no transition. Nothing is
+     * written and nothing is announced; the member's next activity event
+     * compares again.
      */
     public function onActivityEvent(int $userId): void
     {
@@ -86,7 +90,10 @@ final class TierUpgradeListener
             return;
         }
 
-        $current = $this->reputationRepo->getTier($userId);
+        $current = $this->reputationRepo->getTierOrUnknown($userId);
+        if ($current === null) {
+            return;
+        }
         $currentOrder = self::TIER_ORDER[$current] ?? null;
         if ($currentOrder === null) {
             // Drift between ReputationRepository and TIER_ORDER —

@@ -488,6 +488,105 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
         );
     }
 
+    /**
+     * F-520: whether the post is already attached is read through
+     * PostGroupFactsRepository. When that read cannot be trusted it can say
+     * neither "attached" nor "not attached", so the publish takes the same
+     * refusal path as a refused gate: back to draft, sidecar kept, nothing
+     * notified. The author is still a member, so only the read refuses.
+     */
+    public function testAnUnreadableGroupReadAtPublishRevertsToDraft(): void
+    {
+        global $wpdb;
+
+        $postId = $this->insertParkedDraft(self::SECRET_GROUP, 'members_only');
+
+        $GLOBALS['__bcc_transitions'] = [];
+        $GLOBALS['__bcc_actions'] = [];
+        $GLOBALS['__bcc_current_user'] = self::AUTHOR;
+
+        $real = $wpdb;
+        $GLOBALS['wpdb'] = new class ($real) {
+            public string $last_error = '';
+
+            public function __construct(private object $inner)
+            {
+            }
+
+            public function __get(string $name): mixed
+            {
+                return $this->inner->$name;
+            }
+
+            /** @param mixed ...$args */
+            public function __call(string $name, array $args): mixed
+            {
+                $sql = $args[0] ?? '';
+
+                // The post's group-facts read, and only that one, failing
+                // where wpdb fails: when the statement RUNS.
+                if ($name !== 'prepare' && is_string($sql)
+                    && str_contains($sql, 'SELECT meta_key, meta_value') && str_contains($sql, 'peepso_group_id')
+                ) {
+                    $this->last_error = 'WordPress database error: simulated failure';
+
+                    return $name === 'query' ? false : [];
+                }
+
+                $out = $this->inner->$name(...$args);
+                $this->last_error = (string) ($this->inner->last_error ?? '');
+
+                return $out;
+            }
+        };
+
+        try {
+            wp_update_post(['ID' => $postId, 'post_status' => 'publish']);
+        } finally {
+            $GLOBALS['wpdb'] = $real;
+        }
+
+        $after = get_post($postId);
+        self::assertInstanceOf(\WP_Post::class, $after);
+        self::assertSame('draft', $after->post_status, 'an unreadable group read must not leave the post published');
+        self::assertSame('', (string) get_post_meta($postId, 'peepso_group_id', true), 'never attached');
+        self::assertSame(
+            (string) self::SECRET_GROUP,
+            (string) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true),
+            'the parked target survives'
+        );
+        self::assertSame(0, $this->countAction('peepso_groups_new_post'), 'the group was not notified');
+        self::assertNotContains($postId, $this->blogIdsFor(self::NON_MEMBER));
+    }
+
+    /**
+     * F-520: a stale sidecar on a blog that IS attached. The republish reads
+     * the attachment from the table, clears the sidecar and notifies nobody
+     * a second time.
+     */
+    public function testAStaleSidecarOnAnAttachedBlogDoesNotNotifyTwice(): void
+    {
+        $postId = $this->insertParkedDraft(self::SECRET_GROUP, 'members_only');
+
+        $GLOBALS['__bcc_transitions'] = [];
+        $GLOBALS['__bcc_actions'] = [];
+        $GLOBALS['__bcc_current_user'] = self::AUTHOR;
+
+        wp_update_post(['ID' => $postId, 'post_status' => 'publish']);
+        self::assertSame(1, $this->countAction('peepso_groups_new_post'), 'control: the first publish notifies once');
+
+        // Unpublish, and leave a stale sidecar behind.
+        wp_update_post(['ID' => $postId, 'post_status' => 'draft']);
+        update_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, (string) self::SECRET_GROUP);
+
+        wp_update_post(['ID' => $postId, 'post_status' => 'publish']);
+
+        self::assertSame('publish', get_post($postId)->post_status);
+        self::assertSame((string) self::SECRET_GROUP, (string) get_post_meta($postId, 'peepso_group_id', true));
+        self::assertSame('', (string) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true), 'the stale sidecar is cleared');
+        self::assertSame(1, $this->countAction('peepso_groups_new_post'), 'still exactly one group notification');
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     /**

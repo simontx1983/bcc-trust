@@ -1332,7 +1332,14 @@ final class AttestationRepository
      * (for the elite-source cap + diversity count). Both kinds (vouch +
      * stand_behind) contribute; revoked rows are excluded.
      *
+     * F-469: FAIL-CLOSED. `[]` is an ANSWER here: the target has no active
+     * attestations, so its bonus is 0 and recomputeFor() writes 0. A read
+     * that did not run throws instead, so nothing is written; both of
+     * recomputeFor()'s callers record an `attestation_synthesis` metric, and
+     * the daily decay sweep re-synthesizes.
+     *
      * @return list<object{attestor_user_id: int, weight_at_time: float, created_at: string, reaffirmed_at: ?string}>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function listActiveForSynthesis(string $targetKind, int $targetId): array
     {
@@ -1353,13 +1360,14 @@ final class AttestationRepository
         /** @phpstan-ignore-next-line argument.type */
         $prepared = $wpdb->prepare($sql, $targetKind, $targetId, self::SYNTHESIS_MAX_ROWS);
         if (!is_string($prepared)) {
-            return [];
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
 
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
-        }
+        // F-469: get_results() hands back [] on a failed query, which read as
+        // "no attestations" and wrote a zero bonus. runRead() checks query()'s
+        // own return as well as last_error, so wpdb's silent failure paths
+        // throw too.
+        $rows = self::runRead($prepared, __FUNCTION__, true);
 
         $out = [];
         foreach ($rows as $row) {
@@ -1466,10 +1474,18 @@ final class AttestationRepository
      * is an ANSWER ("has not vouched for any pages yet", or zeroed stats).
      * A read that did not run throws instead, and each route answers 503.
      *
+     * $excludePageIds (F-571): card pages whose vouches this read leaves
+     * out, in SQL, so LIMIT returns a full page of what the viewer may see
+     * (the SECRET pages the viewer may not see; findSecretPageIdsVouchedBy()
+     * + PageAccess::hiddenAmong()). It applies to card targets only: a
+     * `user_profile` target_id is a USER id, which may share a number with
+     * a page.
+     *
+     * @param list<int> $excludePageIds
      * @return list<object{id: int, target_kind: string, target_id: int, weight_at_time: float, context_note: ?string, created_at: string}>
      * @throws RepositoryReadFailure when the read did not run
      */
-    public function listActiveVouchesByAttestor(int $attestorUserId, int $limit = 20): array
+    public function listActiveVouchesByAttestor(int $attestorUserId, int $limit = 20, array $excludePageIds = []): array
     {
         if ($attestorUserId <= 0) {
             return [];
@@ -1480,16 +1496,29 @@ final class AttestationRepository
         global $wpdb;
         $table = TableRegistry::trustAttestations();
 
+        $exclude = [];
+        foreach ($excludePageIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $exclude[$id] = $id;
+            }
+        }
+        $exclude = array_values($exclude);
+        $notIn   = $exclude === []
+            ? ''
+            : " AND (target_kind = 'user_profile' OR target_id NOT IN (" . implode(',', array_fill(0, count($exclude), '%d')) . '))';
+
         $sql = "SELECT id, target_kind, target_id, weight_at_time, context_note, created_at"
             . " FROM `{$table}`"
             . ' WHERE attestor_user_id = %d'
             . " AND kind = 'vouch'"
             . ' AND revoked_at IS NULL'
+            . $notIn
             . ' ORDER BY created_at DESC, id DESC'
             . ' LIMIT %d';
 
         /** @phpstan-ignore-next-line argument.type */
-        $prepared = $wpdb->prepare($sql, $attestorUserId, $limit);
+        $prepared = $wpdb->prepare($sql, ...[$attestorUserId, ...$exclude, $limit]);
         if (!is_string($prepared)) {
             throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
@@ -1518,6 +1547,64 @@ final class AttestationRepository
             ];
         }
         return $out;
+    }
+
+    /**
+     * The SECRET card pages this member has an active vouch for, each once
+     * (F-571). bcc-core's shared rule decides what is secret
+     * (PeepSoPagePrivacy::notSecretSql()), so this agrees with PageAccess.
+     * `user_profile` targets are members, never pages, and are not read.
+     *
+     * The member's Vouches tab passes these through PageAccess::hiddenAmong()
+     * for a viewer other than the member and leaves the ones that viewer may
+     * not see out of the list in SQL (listActiveVouchesByAttestor()).
+     *
+     * ⚠ FAILS CLOSED: a read that did not run THROWS, and so does a member
+     * with more than PageAccess::HIDDEN_LIST_CAP secret pages
+     * (PageAccess::refuseOverCap(): logged and counted). The tab answers
+     * 503. An empty answer would list every vouch.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public function findSecretPageIdsVouchedBy(int $attestorUserId): array
+    {
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table     = TableRegistry::trustAttestations();
+        $notSecret = \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('a.target_id');
+
+        $prepared = $wpdb->prepare(
+            "SELECT DISTINCT a.target_id
+               FROM `{$table}` a
+              WHERE a.attestor_user_id = %d
+                AND a.kind = 'vouch'
+                AND a.revoked_at IS NULL
+                AND a.target_kind <> 'user_profile'
+                AND NOT ({$notSecret})
+              LIMIT %d",
+            $attestorUserId,
+            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
+        );
+        if (!is_string($prepared)) {
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
+        }
+        $rows = self::runRead($prepared, __FUNCTION__, true);
+
+        if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $attestorUserId);
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $id = is_object($row) ? (int) ($row->target_id ?? 0) : 0;
+            if ($id > 0) {
+                $out[$id] = $id;
+            }
+        }
+        return array_values($out);
     }
 
     /**

@@ -507,6 +507,12 @@ final class AuthSupport
      * tier-lookup failure — worst-case the chrome stamp shows on a user
      * who's technically not in good standing, which is recoverable on
      * next login.
+     *
+     * ⛔ DISPLAY ONLY (F-469, security's condition). The frontend uses this
+     * field for the footer stamp and nothing else. It must NEVER become an
+     * input to a server-side decision: not a trusted token claim, not a
+     * gate, not a filter. Anything that decides by standing reads
+     * ReputationRepository::getTierOrUnknown() and refuses on unknown.
      */
     public static function resolveInGoodStanding(int $userId): bool
     {
