@@ -558,6 +558,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\PageClaimRolePolicy' => $baseDir . '/app/Domain/Onchain/Services/PageClaimRolePolicy.php',
     'BCC\\Trust\\Onchain\\Services\\PageOwnershipAligner' => $baseDir . '/app/Domain/Onchain/Services/PageOwnershipAligner.php',
     'BCC\\Trust\\Onchain\\Services\\PieceBuilderException' => $baseDir . '/app/Domain/Onchain/Services/PieceBuilderException.php',
+    'BCC\\Trust\\Onchain\\Services\\RelationshipLogHealthCheck' => $baseDir . '/app/Domain/Onchain/Services/RelationshipLogHealthCheck.php',
     'BCC\\Trust\\Onchain\\Services\\RelationshipLogVerifier' => $baseDir . '/app/Domain/Onchain/Services/RelationshipLogVerifier.php',
     'BCC\\Trust\\Onchain\\Services\\RelationshipLogWriter' => $baseDir . '/app/Domain/Onchain/Services/RelationshipLogWriter.php',
     'BCC\\Trust\\Onchain\\Services\\RelationshipRefusal' => $baseDir . '/app/Domain/Onchain/Services/RelationshipRefusal.php',

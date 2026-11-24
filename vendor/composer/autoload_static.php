@@ -714,6 +714,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\PageClaimRolePolicy' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/PageClaimRolePolicy.php',
         'BCC\\Trust\\Onchain\\Services\\PageOwnershipAligner' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/PageOwnershipAligner.php',
         'BCC\\Trust\\Onchain\\Services\\PieceBuilderException' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/PieceBuilderException.php',
+        'BCC\\Trust\\Onchain\\Services\\RelationshipLogHealthCheck' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/RelationshipLogHealthCheck.php',
         'BCC\\Trust\\Onchain\\Services\\RelationshipLogVerifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/RelationshipLogVerifier.php',
         'BCC\\Trust\\Onchain\\Services\\RelationshipLogWriter' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/RelationshipLogWriter.php',
         'BCC\\Trust\\Onchain\\Services\\RelationshipRefusal' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/RelationshipRefusal.php',
