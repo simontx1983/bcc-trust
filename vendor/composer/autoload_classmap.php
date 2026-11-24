@@ -204,6 +204,7 @@ return array(
     'BCC\\Trust\\Core\\Security\\FraudDetector' => $baseDir . '/app/Domain/Core/Security/FraudDetector.php',
     'BCC\\Trust\\Core\\Security\\FraudWhitelist' => $baseDir . '/app/Domain/Core/Security/FraudWhitelist.php',
     'BCC\\Trust\\Core\\Security\\IpResolver' => $baseDir . '/app/Domain/Core/Security/IpResolver.php',
+    'BCC\\Trust\\Core\\Security\\PeepSoDataExportQueue' => $baseDir . '/app/Domain/Core/Security/PeepSoDataExportQueue.php',
     'BCC\\Trust\\Core\\Security\\RateLimiter' => $baseDir . '/app/Domain/Core/Security/RateLimiter.php',
     'BCC\\Trust\\Core\\Security\\RestRouteAllowlist' => $baseDir . '/app/Domain/Core/Security/RestRouteAllowlist.php',
     'BCC\\Trust\\Core\\Security\\SuspendedWriteGate' => $baseDir . '/app/Domain/Core/Security/SuspendedWriteGate.php',

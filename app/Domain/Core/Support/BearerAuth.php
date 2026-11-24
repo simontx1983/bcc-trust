@@ -160,7 +160,25 @@ final class BearerAuth
      */
     public static function requireAdmin(): bool
     {
-        return current_user_can('manage_options');
+        return current_user_can(self::ADMIN_CAPABILITY);
+    }
+
+    /**
+     * The capability the admin routes require. One constant, so the gate
+     * (requireAdmin) and the display flag (userIsAdmin → the auth responses'
+     * `can_moderate`) cannot drift apart.
+     */
+    public const ADMIN_CAPABILITY = 'manage_options';
+
+    /**
+     * requireAdmin()'s check, for a given user rather than the current one:
+     * the auth responses compute `can_moderate` with it, for the user they
+     * are about. DISPLAY ONLY there; the admin routes still enforce with
+     * requireAdmin() (and their in-handler adminGate()).
+     */
+    public static function userIsAdmin(int $userId): bool
+    {
+        return $userId > 0 && user_can($userId, self::ADMIN_CAPABILITY);
     }
 
     /**

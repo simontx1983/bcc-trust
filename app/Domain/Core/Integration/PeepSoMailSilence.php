@@ -33,6 +33,9 @@ if (!defined('ABSPATH')) {
  *         PeepSo's own password-changed message reached members alongside
  *         BCC's.
  *     The veto runs late (priority 999) so it is the final answer.
+ *     It also stops the `peepso_mailqueue_add` action, which add_message()
+ *     fires only after the filter allows: nothing listens to it today, but
+ *     a PeepSo add-on that hooked it would be silenced too.
  *
  * ⚠ SCOPE. Only PeepSo's queue. Nothing here touches wp_mail() or any of its
  * filters, so BCC's own mail is unaffected. PeepSoMailSilenceTest pins both

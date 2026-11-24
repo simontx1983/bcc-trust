@@ -82,7 +82,10 @@ namespace {
     if (!class_exists('WP_REST_Server', false)) {
         class WP_REST_Server
         {
-            public const READABLE = 'GET';
+            public const READABLE  = 'GET';
+            // HallsEndpoint::register() also adds its write routes.
+            public const CREATABLE = 'POST';
+            public const DELETABLE = 'DELETE';
         }
     }
 
