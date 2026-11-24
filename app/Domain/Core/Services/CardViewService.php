@@ -2515,7 +2515,7 @@ final class CardViewService
                 'can_watch'          => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
                 'can_review'         => $isSelf
                     ? self::deny(null, 'self_action_blocked')
-                    : $this->writeReviewPermission($viewerId),
+                    : $this->writeReviewPermission($viewerId, \BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview($prefetched, $viewerId)),
                 // §4.4 can_open_dispute — members are full trust subjects:
                 // a member viewing their OWN self-page can open a dispute
                 // when the self-page carries a contestable active downvote
@@ -2695,11 +2695,16 @@ final class CardViewService
      * requirement. It says so (the attestation entries' sentence), with
      * the `unavailable` reason code, never the "keep your standing" hint.
      *
+     * The decision depends on the viewer alone, so a list of member cards
+     * passes the one its prefetch computed for the page
+     * (MemberCardPrefetcher::viewerWriteReview()); without it, it is read
+     * here.
+     *
      * @return Permission
      */
-    private function writeReviewPermission(int $viewerId): array
+    private function writeReviewPermission(int $viewerId, ?\BCC\Trust\Core\ValueObjects\CapabilityDecision $decided = null): array
     {
-        $decision = $this->capabilityResolver->can($viewerId, 'write_review');
+        $decision = $decided ?? $this->capabilityResolver->can($viewerId, 'write_review');
         if ($decision->isAllowed()) {
             return self::allow();
         }
