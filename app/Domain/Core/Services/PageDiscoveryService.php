@@ -218,21 +218,9 @@ class PageDiscoveryService {
         $post_id  = (int) $row->ID;
         $owner_id = (int) $row->owner_id;
 
-        // Avatar and cover (still need PeepSo API).
-        $avatar = '';
-        $cover  = '';
-
-        if (class_exists('PeepSoPagePhoto')) {
-            $photo = \PeepSoPagePhoto::get_instance();
-            if ($photo) {
-                $avatar = $photo->get_page_avatar_url($post_id) ?: '';
-                $cover  = $photo->get_page_cover_url($post_id) ?: '';
-            }
-        }
-
-        if (!$avatar) {
-            $avatar = get_the_post_thumbnail_url($post_id, 'thumbnail') ?: '';
-        }
+        // Avatar and cover. Both resolvers are below.
+        $avatar = $this->resolvePageAvatarUrl($post_id);
+        $cover  = $this->resolvePageCoverUrl($post_id);
 
         $claimer = $claimsMap[$post_id] ?? null;
 
@@ -385,20 +373,8 @@ class PageDiscoveryService {
         }
 
         // Avatar and cover.
-        $avatar = '';
-        $cover  = '';
-
-        if (class_exists('PeepSoPagePhoto')) {
-            $photo = \PeepSoPagePhoto::get_instance();
-            if ($photo) {
-                $avatar = $photo->get_page_avatar_url($post_id) ?: '';
-                $cover  = $photo->get_page_cover_url($post_id) ?: '';
-            }
-        }
-
-        if (!$avatar) {
-            $avatar = get_the_post_thumbnail_url($post_id, 'thumbnail') ?: '';
-        }
+        $avatar = $this->resolvePageAvatarUrl($post_id);
+        $cover  = $this->resolvePageCoverUrl($post_id);
 
         // Page type from meta.
         $page_type = get_post_meta($post_id, '_bcc_page_type', true);
@@ -445,6 +421,84 @@ class PageDiscoveryService {
         ];
     }
 
+    /**
+     * A page's avatar URL, or '' when it has none.
+     *
+     * ⚠⚠ REPLACES A BRANCH THAT NEVER RAN. Both call sites previously
+     * read the avatar and cover through `PeepSoPagePhoto`, guarded by
+     * `class_exists('PeepSoPagePhoto')` — and NO SUCH CLASS EXISTS.
+     * `peepso-pages` is installed and defines `PeepSoPage`; a grep of
+     * the whole plugin tree finds that name only in those two calls, and
+     * `get_page_avatar_url()` / `get_page_cover_url()` exist on nothing.
+     * So the guard was always false, both values stayed '', and page
+     * discovery served no avatar and no cover.
+     *
+     * ⚠ It was latent-fatal as well as dead: anything defining a
+     * `PeepSoPagePhoto` WITHOUT those two methods would have turned both
+     * lines into `Call to undefined method`. PHPStan could see neither
+     * problem, because an unknown class has no methods to check.
+     *
+     * ── WHY THE ACCESSOR IS GATED BY THE UPLOAD HASH ────────────────
+     *
+     * `PeepSoPage::get_avatar_url()` never returns empty: with no avatar
+     * file it answers `get_default_avatar_url()`. Calling it
+     * unconditionally would make the post-thumbnail fallback below
+     * unreachable, so pages showing their WP featured image today would
+     * switch to PeepSo's generic default — a visible change this fix has
+     * no mandate for.
+     *
+     * It also costs a `file_exists()` per page and calls
+     * `set_avatar_custom_flag()`, whose short-circuit compares
+     * `0 == $current_val` against an ABSENT meta (`''`). Under PHP 8
+     * `0 == ''` is FALSE, so that short-circuit does not fire for exactly
+     * the pages that have no avatar — i.e. a write attempt on a read
+     * path, in a bounded loop, in the common case.
+     *
+     * ⇒ `peepso_page_avatar_hash` is written by the UPLOAD path
+     * (pageajax), never by the getter, so a non-empty hash means a real
+     * uploaded avatar. Only then is the accessor consulted; pages
+     * without one keep exactly today's behaviour.
+     *
+     * ⚠ Known gap, stated rather than hidden: an avatar predating
+     * hashing has no hash and is still missed. That is strictly better
+     * than today, where every page is missed, and it fails to the same
+     * fallback rather than to an error.
+     */
+    private function resolvePageAvatarUrl(int $postId): string
+    {
+        $hash = get_post_meta($postId, 'peepso_page_avatar_hash', true);
+
+        if (is_string($hash) && $hash !== '' && class_exists('PeepSoPage')) {
+            $page = new \PeepSoPage($postId);
+            $url  = $page->get_avatar_url();
+            if (is_string($url) && $url !== '') {
+                return $url;
+            }
+        }
+
+        // Unchanged fallback: the page's WP featured image.
+        return get_the_post_thumbnail_url($postId, 'thumbnail') ?: '';
+    }
+
+    /**
+     * A page's cover URL, or '' when it has none.
+     *
+     * ⚠⚠ THE META, NOT `PeepSoPage::get_cover_url()`. That accessor
+     * starts from `get_cover_default()` and overwrites it only when the
+     * meta is non-empty, so it never reports "no cover": every page
+     * would get PeepSo's default image and no caller could tell a real
+     * cover from a placeholder. `page_cover_photo` is the only signal
+     * that separates them, and it is what the accessor itself reads.
+     *
+     * Fail-safe: anything that is not a non-empty string reads as "no
+     * cover", never as an error.
+     */
+    private function resolvePageCoverUrl(int $postId): string
+    {
+        $cover = get_post_meta($postId, 'page_cover_photo', true);
+
+        return is_string($cover) ? $cover : '';
+    }
     /**
      * Build a deterministic cache key from query parameters.
      *

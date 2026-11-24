@@ -268,9 +268,65 @@ if (!class_exists('PeepSoPagesShortcode')) {
 }
 
 if (!class_exists('PeepSoPage')) {
+    /**
+     * ⚠ CORRECTED 2026-11-24. This stub said
+     * `__construct(string $slug = '')`, which the real class has never
+     * had: peepso-pages/classes/models/page.php:92 is
+     * `__construct($id = NULL, $data = NULL)` — an ID. The wrong
+     * signature made PHPStan reject a CORRECT `new PeepSoPage($post_id)`
+     * and, worse, would have accepted an incorrect slug call.
+     *
+     * ⚠⚠ A stub is an assertion about someone else's code. An inaccurate
+     * one does not merely fail to catch mistakes, it invents them and
+     * blesses the real ones — so only members that have been READ in the
+     * plugin source belong here, with their real shapes.
+     */
     class PeepSoPage {
         public int $id = 0;
-        public function __construct(string $slug = '') {}
+
+        /**
+         * @param int|string|null                 $id
+         * @param array<string, mixed>|object|null $data
+         */
+        public function __construct($id = null, $data = null) {}
+
+        /**
+         * ⚠ NEVER EMPTY: with no avatar file the real one answers
+         * `get_default_avatar_url()` (page.php:502-520). Callers that
+         * need to know whether a page HAS an avatar must check the
+         * `peepso_page_avatar_hash` meta instead.
+         *
+         * ⚠⚠ UNTYPED ON PURPOSE, and `mixed` rather than `string`.
+         * The real one is `get_avatar_url($full = TRUE)` with NO return
+         * type (page.php:502), and the value it returns is assembled
+         * from `get_image_dir()` / `get_image_url()` (page.php:889, :901),
+         * which are untyped too. PeepSo's docblock says string; nothing
+         * in the code enforces it.
+         *
+         * Declaring `: string` here asserted a guarantee the plugin does
+         * not make, and PHPStan then reported a caller's `is_string()`
+         * guard as always-true — i.e. the wrong stub was arguing for the
+         * removal of a guard that protects a `string` return from a
+         * TypeError under `strict_types`. `mixed` states what is
+         * actually known.
+         *
+         * @param mixed $full
+         * @return mixed
+         */
+        public function get_avatar_url($full = true) { return ''; }
+
+        /**
+         * ⚠ NEVER EMPTY either: it starts from `get_cover_default()` and
+         * overwrites it only when `page_cover_photo` is set
+         * (page.php:722-732). Read that meta to tell a real cover from
+         * the default.
+         *
+         * Also untyped in the real class (`get_cover_url()`, page.php:722)
+         * — same reasoning as the avatar accessor above.
+         *
+         * @return mixed
+         */
+        public function get_cover_url() { return ''; }
     }
 }
 
