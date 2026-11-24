@@ -462,6 +462,36 @@ namespace BCC\Core\Repositories {
 }
 
 namespace BCC\Core\PeepSo {
+    // ⚠ ADDED WHEN THE UN-REPOST TRASH WAS PINNED. A trash is a post
+    // write, so RepostEndpoint::removeRepost() routes it through
+    // pinOnly() now — and without this fake the endpoint suite dies
+    // with "Class PeepSoAddPostGuard not found" before any assertion
+    // runs. The guard itself is bcc-core's; this suite does not autoload
+    // bcc-core, which is why every collaborator here is a local double.
+    //
+    // ⚠⚠ IT MUST ACTUALLY INVOKE THE WRITE. A fake that recorded the
+    // call and returned without calling $write would leave the post
+    // UN-TRASHED while each test still passed its own assertion about
+    // the response envelope — green, with the feature silently not
+    // happening. The trace line is what lets a test see that the write
+    // went THROUGH the pin rather than around it.
+    if (!class_exists('BCC\Core\PeepSo\PeepSoAddPostGuard', false)) {
+        final class PeepSoAddPostGuard
+        {
+            /**
+             * @param array<string, mixed> $intended
+             * @param callable(): mixed    $write
+             * @return mixed
+             */
+            public static function pinOnly(array $intended, callable $write)
+            {
+                \bcc_repost_trace('pinned_write', $intended);
+
+                return $write();
+            }
+        }
+    }
+
     if (!class_exists('BCC\Core\PeepSo\PeepSoStatusWriter', false)) {
         final class PeepSoStatusWriter
         {

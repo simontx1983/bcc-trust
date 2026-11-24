@@ -40,6 +40,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\DB\AdvisoryLock;
 use BCC\Core\Log\Logger;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\PostEngagementRepository;
@@ -337,7 +338,23 @@ final class RepostEndpoint
                 // `post_status = 'publish'`) while PeepSo's own delete would
                 // cascade `act_repost_id` and take OTHER members' reposts of
                 // the same root with it.
-                $trashed = wp_trash_post($row['post_id']);
+                // ⚠⚠ F-361 — PINNED, AND A TRASH IS NOT EXEMPT.
+                // `wp_trash_post()` calls `wp_update_post()` in its own
+                // body, which calls `wp_insert_post()`, which fires the
+                // `wp_insert_post` action — where third-party listeners
+                // run. A trash LOOKS like a delete and is a post write.
+                //
+                // ⚠ The write is INSIDE the arrow fn, not a bare
+                // argument: a bare argument is evaluated BEFORE the pin
+                // is applied and would not be covered.
+                //
+                // Same call shape as `PostsService::deletePost()`, which
+                // trashes the same way — kept identical rather than
+                // re-derived, so the two cannot drift.
+                $trashed = PeepSoAddPostGuard::pinOnly(
+                    [], // un-reposting drives nothing through the request
+                    static fn () => wp_trash_post($row['post_id'])
+                );
                 if ($trashed === false || $trashed === null) {
                     Logger::error('[RepostEndpoint] un-repost trash failed', [
                         'act_id'  => $row['act_id'],
