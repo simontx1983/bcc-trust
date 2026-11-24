@@ -462,6 +462,7 @@ return array(
     'BCC\\Trust\\Onchain\\Admin\\Views\\NftSpamContractsView' => $baseDir . '/app/Domain/Onchain/Admin/Views/NftSpamContractsView.php',
     'BCC\\Trust\\Onchain\\Admin\\WebhooksPage' => $baseDir . '/app/Domain/Onchain/Admin/WebhooksPage.php',
     'BCC\\Trust\\Onchain\\CLI\\BackfillValidatorPagesCommand' => $baseDir . '/app/Domain/Onchain/CLI/BackfillValidatorPagesCommand.php',
+    'BCC\\Trust\\Onchain\\CLI\\ClaimRevokeUserCommand' => $baseDir . '/app/Domain/Onchain/CLI/ClaimRevokeUserCommand.php',
     'BCC\\Trust\\Onchain\\CLI\\HallOwnershipRepairCommand' => $baseDir . '/app/Domain/Onchain/CLI/HallOwnershipRepairCommand.php',
     'BCC\\Trust\\Onchain\\CLI\\SolanaGateIdentityRepairCommand' => $baseDir . '/app/Domain/Onchain/CLI/SolanaGateIdentityRepairCommand.php',
     'BCC\\Trust\\Onchain\\CLI\\ValidatorMsgQueueCommand' => $baseDir . '/app/Domain/Onchain/CLI/ValidatorMsgQueueCommand.php',
