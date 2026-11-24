@@ -11,6 +11,7 @@ use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\PageOwnerResolver;
 use BCC\Trust\Core\Services\ReviewReplyService;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -295,6 +296,82 @@ final class ReviewReplyServiceTest extends TestCase
 
         self::assertNull($bundle['reply'], 'not shown to a viewer the author is hidden from');
         self::assertFalse($bundle['can_reply']['allowed'], 'and the stranger still may not reply');
+    }
+
+    /**
+     * The page's own Reviews tab ($pageMayAnswer). PeepSo's profile ladder
+     * (profile-access-stubs.php) and bcc-core's REAL block read over a
+     * recording $wpdb, for a stranger reading a validator page whose
+     * operator's profile is "only me".
+     */
+    private function pageAttributionWorld(): void
+    {
+        require_once __DIR__ . '/../Stubs/profile-access-stubs.php';
+        require_once __DIR__ . '/../Stubs/profile-level-block-wpdb.php';
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoBlockRepository.php');
+
+        $GLOBALS['__bcc_profile_access'] = [
+            'viewer_id' => self::STRANGER,
+            'levels'    => [self::OPERATOR => 40],
+            'verdicts'  => [10 => true, 20 => true, 40 => false],
+        ];
+        $GLOBALS['__bcc_fv_viewer'] = self::STRANGER;
+        $GLOBALS['wpdb']            = new \BccProfileLevelBlockWpdb();
+
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'the operator answers');
+        unset($GLOBALS['__bcc_fv']['visible'][self::OPERATOR]);
+    }
+
+    public function testOnThePagesTabAReplyHiddenOnlyByItsAuthorsProfileLevelIsKeptAsThePages(): void
+    {
+        $this->pageAttributionWorld();
+
+        $bundles = self::service()->forReviews(self::STRANGER, self::rows(self::VOTE), true);
+
+        self::assertSame('the operator answers', $bundles[self::VOTE]['reply']['body'] ?? null);
+        self::assertTrue($bundles[self::VOTE]['reply']['as_page'] ?? false, 'marked for the page shaper');
+        self::assertSame([], ReviewReplyService::replyAuthorIds($bundles), 'its author is never prefetched');
+        self::assertSame('not_author', $bundles[self::VOTE]['reply']['permissions']['can_edit']['reason_code']);
+        self::assertSame('not_author', $bundles[self::VOTE]['reply']['permissions']['can_delete']['reason_code']);
+    }
+
+    public function testTheMembersTabNeverKeepsAHiddenAuthorsReply(): void
+    {
+        $this->pageAttributionWorld();
+
+        self::assertNull(self::service()->forReviews(self::STRANGER, self::rows(self::VOTE))[self::VOTE]['reply']);
+        self::assertSame([], $GLOBALS['wpdb']->queries, 'nor reads anything to decide');
+    }
+
+    /** @return array<string, array{string}> */
+    public static function otherReasons(): array
+    {
+        return [
+            'the viewer blocked the author' => ['blocked'],
+            'the author blocked the viewer' => ['blocker'],
+            'the block read failed'         => ['block_read_failed'],
+            'the author is suspended'       => ['suspended'],
+            'the author is banned'          => ['banned'],
+            'the profile level admits the viewer (dropped for another reason)' => ['public'],
+        ];
+    }
+
+    #[DataProvider('otherReasons')]
+    public function testOnThePagesTabEveryOtherReasonStillHidesTheReply(string $reason): void
+    {
+        $this->pageAttributionWorld();
+        match ($reason) {
+            'blocked'           => $GLOBALS['wpdb']->blocks = [[self::STRANGER, self::OPERATOR]],
+            'blocker'           => $GLOBALS['wpdb']->blocks = [[self::OPERATOR, self::STRANGER]],
+            'block_read_failed' => $GLOBALS['wpdb']->fail = true,
+            'suspended'         => \ReplyWorld::$suspended[self::OPERATOR] = true,
+            'banned'            => $GLOBALS['__bcc_profile_access']['roles'] = [self::OPERATOR => 'ban'],
+            'public'            => $GLOBALS['__bcc_profile_access']['levels'] = [self::OPERATOR => 10],
+        };
+
+        self::assertNull(self::service()->forReviews(self::STRANGER, self::rows(self::VOTE), true)[self::VOTE]['reply']);
     }
 
     /** One visibility batch per page, constrained to the shown replies' authors, not a search. */

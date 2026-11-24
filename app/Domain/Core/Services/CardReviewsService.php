@@ -29,6 +29,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\PageAccess;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -58,6 +59,9 @@ final class CardReviewsService
     }
 
     /**
+     * @param string|null $cardKind `validator` / `project` / `creator` for a
+     *        card page's tab, whose replies may be shown as the page's own
+     *        (see withReply()); null for a member's received reviews
      * @return array{
      *   items: list<array<string, mixed>>,
      *   pagination: array{
@@ -72,7 +76,8 @@ final class CardReviewsService
         int $pageId,
         int $viewerId,
         int $page = 1,
-        int $perPage = self::DEFAULT_PAGE_SIZE
+        int $perPage = self::DEFAULT_PAGE_SIZE,
+        ?string $cardKind = null
     ): array {
         $page    = max(1, $page);
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
@@ -105,6 +110,9 @@ final class CardReviewsService
 
         // F-345: each review's reply and the viewer's can_reply, one batched
         // read for the page. Reply authors join the same author prefetch.
+        // A card page's reply whose author's profile is closed to this viewer
+        // is shown as the page's own response ($cardKind: the three card
+        // kinds only; a member's received reviews pass null).
         $replies = Plugin::instance()->reviewReplyService()->forReviews(
             $viewerId,
             array_map(
@@ -114,11 +122,15 @@ final class CardReviewsService
                     'voter_user_id' => (int) $row->voter_user_id,
                 ],
                 $rows
-            )
+            ),
+            $cardKind !== null
         );
         foreach (ReviewReplyService::replyAuthorIds($replies) as $replyAuthorId) {
             $authorIds[] = $replyAuthorId;
         }
+        $pageIdentity = $cardKind !== null && self::anyAsPage($replies)
+            ? self::pageIdentity($cardKind, $pageId, $viewerId)
+            : null;
 
         $authorIds  = array_values(array_unique($authorIds));
         $prefetched = $authorIds === [] ? null : MemberSummaryPrefetcher::primeFor($authorIds);
@@ -144,7 +156,8 @@ final class CardReviewsService
                 self::shapeReview($row, $author, $now),
                 $replies[(int) $row->id] ?? null,
                 $viewerId,
-                $prefetched
+                $prefetched,
+                $pageIdentity
             );
         }
 
@@ -164,16 +177,27 @@ final class CardReviewsService
      * (the viewer's own reply after a hand-over, else null) and
      * `permissions.can_reply` to a shaped review row.
      *
+     * A reply forReviews() marked `as_page` is shown as the PAGE's response
+     * (ReviewReplyService::asPage()), with $page, the reviewed page as its
+     * Card shows it. Without $page (the member's tab, or a page that did not
+     * resolve) it is not shown.
+     *
      * @param array<string, mixed> $item
-     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
+     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>, as_page?: true}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
      * @param array<string, mixed>|null $prefetched
+     * @param array{id: int, card_kind: string, name: string, handle: string, avatar_url: string}|null $page
      * @return array<string, mixed>
      */
-    public static function withReply(array $item, ?array $bundle, int $viewerId, ?array $prefetched): array
+    public static function withReply(array $item, ?array $bundle, int $viewerId, ?array $prefetched, ?array $page = null): array
     {
-        $reply = $bundle !== null && $bundle['reply'] !== null
-            ? Plugin::instance()->reviewReplyService()->withAuthor($bundle['reply'], $viewerId, $prefetched)
-            : null;
+        $reply = null;
+        if ($bundle !== null && $bundle['reply'] !== null) {
+            if (isset($bundle['reply']['as_page'])) {
+                $reply = $page !== null ? ReviewReplyService::asPage($bundle['reply'], $page) : null;
+            } else {
+                $reply = Plugin::instance()->reviewReplyService()->withAuthor($bundle['reply'], $viewerId, $prefetched);
+            }
+        }
 
         $item['reply']              = $reply;
         $item['viewer_stale_reply'] = $bundle !== null && $bundle['viewer_stale_reply'] !== null
@@ -184,6 +208,48 @@ final class CardReviewsService
                 ?? ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_applicable'],
         ];
         return $item;
+    }
+
+    /**
+     * @param array<int, array{reply: array{as_page?: true}|null}> $replies
+     */
+    private static function anyAsPage(array $replies): bool
+    {
+        foreach ($replies as $bundle) {
+            if ($bundle['reply'] !== null && isset($bundle['reply']['as_page'])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The reviewed page as its own Card shows it to this viewer: the `page`
+     * of a reply shown as the page's response. Read from the Card itself,
+     * once per list, so it cannot differ from the card the tab sits on.
+     * Null (the reply is then not shown) when the viewer may not see the
+     * page or its card does not resolve.
+     *
+     * @return array{id: int, card_kind: string, name: string, handle: string, avatar_url: string}|null
+     */
+    private static function pageIdentity(string $cardKind, int $pageId, int $viewerId): ?array
+    {
+        if ($pageId <= 0 || !PageAccess::viewerMaySeeId($pageId, $viewerId)) {
+            return null;
+        }
+        $card = Plugin::instance()->cardViewService()->getCard($cardKind, (string) $pageId, $viewerId);
+        if ($card === null) {
+            return null;
+        }
+        $crest = is_array($card['crest'] ?? null) ? $card['crest'] : [];
+
+        return [
+            'id'         => (int) ($card['id'] ?? 0),
+            'card_kind'  => (string) ($card['card_kind'] ?? $cardKind),
+            'name'       => (string) ($card['name'] ?? ''),
+            'handle'     => (string) ($card['handle'] ?? ''),
+            'avatar_url' => is_string($crest['image_url'] ?? null) ? $crest['image_url'] : '',
+        ];
     }
 
     /**

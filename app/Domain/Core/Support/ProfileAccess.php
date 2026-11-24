@@ -329,9 +329,88 @@ final class ProfileAccess
             return false;
         }
 
+        return self::profileLevelAdmitsOrUnknown($ownerId) === true;
+    }
+
+    /**
+     * Of $ownerIds, the members the CURRENT viewer may not see ONLY because
+     * of the level they chose for their profile ("Members only", "Only
+     * me"): who a page-attributed review reply stands in for (on the page's
+     * Reviews tab, such a reply is shown as the page's response).
+     *
+     * Every other reason a list drops a member must be ruled out by a read
+     * that ran, or the member is left out:
+     *   - a block in either direction (one batched read);
+     *   - suspension (the same suspensionState() canViewProfile() asks);
+     *   - a PeepSo role that lists never show (banned, unvalidated).
+     * The viewer themselves and site admins see every profile, so they are
+     * never returned.
+     *
+     * ⚠ CURRENT VIEWER ONLY, as canViewProfile().
+     *
+     * @param list<int> $ownerIds
+     * @return list<int> in input order, each once
+     */
+    public static function hiddenOnlyByProfileLevel(array $ownerIds): array
+    {
+        if (!class_exists('\\PeepSoUser') || !class_exists('\\BCC\\Core\\Permissions\\Permissions')) {
+            return [];
+        }
+        $viewerId = (int) get_current_user_id();
+
+        $ids = [];
+        foreach ($ownerIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0 && $id !== $viewerId) {
+                $ids[$id] = $id;
+            }
+        }
+        if ($ids === [] || self::viewerIsExemptFromVisibility()) {
+            return [];
+        }
+
+        $blocked = $viewerId > 0
+            ? \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, array_values($ids))
+            : [];
+        if ($blocked === null) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($ids as $id) {
+            if (isset($blocked[$id])) {
+                continue;
+            }
+            // false = known NOT suspended; true (suspended) and null
+            // (unreadable) both leave the member out.
+            if (\BCC\Core\Permissions\Permissions::suspensionState($id) !== false) {
+                continue;
+            }
+            // (string): PeepSo answers '' for a row it cannot read, and a
+            // non-string must count as unreadable too.
+            $role = (string) \PeepSoUser::get_instance($id)->get_user_role();
+            if (in_array($role, ['', 'ban', 'register', 'verified'], true)) {
+                continue;
+            }
+            if (self::profileLevelAdmitsOrUnknown($id) === false) {
+                $out[] = $id;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Does $ownerId's PROFILE LEVEL admit the current viewer? Null when the
+     * level cannot be read. canViewProfile()'s privacy rung, on its own.
+     */
+    private static function profileLevelAdmitsOrUnknown(int $ownerId): ?bool
+    {
+        if (!class_exists('\\PeepSoUser')) {
+            return null;
+        }
         $acc = \PeepSoUser::get_instance($ownerId)->get_profile_accessibility();
         if (!is_numeric($acc)) {
-            return false;
+            return null;
         }
 
         // Snapped to a canonical rung first — see
