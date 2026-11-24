@@ -7,6 +7,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 use BCC\Trust\Core\Security\WordPressSignInGate;
 use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Tests\Support\BootFileScope;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -212,40 +213,11 @@ final class WordPressSignInGateTest extends TestCase
      */
     public function testTheGateRegistersAtBootBeforeInit(): void
     {
-        $tokens = token_get_all((string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php'));
-
-        $stack   = [];   // one entry per open brace: 'scope' (function, closure, class) or 'block'
-        $pending = false;
-        $found   = [];
-        $count   = count($tokens);
-        for ($i = 0; $i < $count; $i++) {
-            $t    = $tokens[$i];
-            $id   = is_array($t) ? $t[0] : null;
-            $text = is_array($t) ? $t[1] : $t;
-
-            if (in_array($id, [T_FUNCTION, T_FN, T_CLASS, T_TRAIT, T_INTERFACE, T_ENUM], true)) {
-                $pending = true;
-            } elseif ($text === '{' || $id === T_CURLY_OPEN || $id === T_DOLLAR_OPEN_CURLY_BRACES) {
-                $stack[] = ($pending && $text === '{') ? 'scope' : 'block';
-                $pending = false;
-            } elseif ($text === '}') {
-                array_pop($stack);
-            } elseif ($text === ';') {
-                $pending = false;   // an abstract method or `fn` arrow ends here
-            }
-
-            // PHP 8 reads the fully qualified class name as one token.
-            if ($id === T_NAME_FULLY_QUALIFIED && $text === '\\BCC\\Trust\\Core\\Security\\WordPressSignInGate') {
-                $j = $i + 1;
-                while ($j < $count && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
-                    $j++;
-                }
-                if (($tokens[$j][1] ?? $tokens[$j]) === '::' && ($tokens[$j + 1][1] ?? null) === 'register') {
-                    $found[] = !in_array('scope', $stack, true);
-                }
-            }
-        }
-        self::assertSame([true], $found, 'exactly one register() call, at file scope');
+        self::assertSame(
+            [true],
+            BootFileScope::calls('bcc-trust.php', '\\BCC\\Trust\\Core\\Security\\WordPressSignInGate', 'register'),
+            'exactly one register() call, at file scope'
+        );
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
