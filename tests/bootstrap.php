@@ -45,6 +45,7 @@ spl_autoload_register(static function (string $class): void {
     $files = [
         'BCC\\Core\\Repositories\\ProbesReads'  => 'src/Repositories/ProbesReads.php',
         'BCC\\Core\\Feed\\GroupSyndicationGate' => 'src/Feed/GroupSyndicationGate.php',
+        'BCC\\Core\\Crypto\\Bech32'           => 'src/Crypto/Bech32.php',
     ];
     if (isset($files[$class])) {
         require_once \BCC\Trust\Tests\Support\CoreSibling::require($files[$class]);

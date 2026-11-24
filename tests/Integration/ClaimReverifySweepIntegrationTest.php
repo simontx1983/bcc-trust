@@ -7,7 +7,7 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\ClaimReverifySweepService;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;

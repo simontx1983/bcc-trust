@@ -742,7 +742,6 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\AlchemyEndpoint' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/AlchemyEndpoint.php',
         'BCC\\Trust\\Onchain\\Support\\ApiRetry' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ApiRetry.php',
         'BCC\\Trust\\Onchain\\Support\\Base58' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/Base58.php',
-        'BCC\\Trust\\Onchain\\Support\\Bech32' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/Bech32.php',
         'BCC\\Trust\\Onchain\\Support\\ChainSupport' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ChainSupport.php',
         'BCC\\Trust\\Onchain\\Support\\CosmosEndpointVerifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/CosmosEndpointVerifier.php',
         'BCC\\Trust\\Onchain\\Support\\EndpointDescriptor' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/EndpointDescriptor.php',

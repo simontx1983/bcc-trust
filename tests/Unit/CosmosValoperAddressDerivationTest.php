@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -37,7 +37,7 @@ use PHPUnit\Framework\TestCase;
  *
  * ⚠⚠ EVERY ADDRESS HERE IS REAL, read from each chain's own LCD validator
  * list, and every derived form (account spelling, the old broken output, the
- * conventional spelling) was COMPUTED with Support\Bech32 rather than typed.
+ * conventional spelling) was COMPUTED with bcc-core's Crypto\Bech32 rather than typed.
  * A hand-typed bech32 fixture is a guess with a checksum on it.
  *
  * ── MUTATION CONTROLS (run out of tree: killed=4 survived=1 broken=0) ──
@@ -54,7 +54,7 @@ use PHPUnit\Framework\TestCase;
  * pretends to; the strict regex is kept because stating the precondition
  * out loud is worth more than the byte it costs.
  *
- * @see \BCC\Trust\Onchain\Support\Bech32
+ * @see \BCC\Core\Crypto\Bech32
  */
 #[CoversClass(CosmosFetcher::class)]
 final class CosmosValoperAddressDerivationTest extends TestCase
@@ -105,7 +105,7 @@ final class CosmosValoperAddressDerivationTest extends TestCase
      * fingerprint and a refusal reason, and this method reads exactly one
      * property. Bypassing it keeps the test pure -- no network, no
      * WordPress, no endpoint policy -- while still exercising the real
-     * method and the real Support\Bech32.
+     * method and the real bcc-core Crypto\Bech32.
      */
     private function resolve(string $address, ?string $bech32Prefix): string
     {

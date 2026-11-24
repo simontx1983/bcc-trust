@@ -8,7 +8,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\REST\PagesEndpoint;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Services\ClaimService;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;

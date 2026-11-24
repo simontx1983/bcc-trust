@@ -13,7 +13,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\ValueObjects\DelegatorCount;
@@ -2636,8 +2636,8 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $address;
         }
 
-        $bytes = Bech32::decodeToBytes($address);
-        if ($bytes === null || $bytes === '') {
+        $bytes = $decoded['bytes'];
+        if ($bytes === '') {
             return $address;
         }
 
@@ -2735,7 +2735,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return substr($operatorAddress, 0, $pos) . 'valcons';
     }
 
-    // ── Bech32 encoding/decoding (delegates to shared Support\Bech32) ───
+    // ── Bech32 encoding/decoding (delegates to bcc-core's strict Crypto\Bech32) ───
 
     private function bech32Encode(string $hrp, string $data): string
     {
@@ -2787,7 +2787,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     private function bech32Decode(string $bech32): ?string
     {
-        return Bech32::decodeToBytes($bech32);
+        return Bech32::decode($bech32)['bytes'] ?? null;
     }
 
     /** Bonded validators requested per LCD page. */

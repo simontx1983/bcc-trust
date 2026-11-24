@@ -53,6 +53,8 @@
 
 namespace BCC\Trust\Onchain\Support;
 
+use BCC\Core\Crypto\Bech32;
+
 if (!defined('ABSPATH')) {
     exit;
 }
