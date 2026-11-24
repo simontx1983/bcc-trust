@@ -54,7 +54,16 @@ final class GroupJoinVerdictTest extends TestCase
             public function getScore(int $userId): float
             {
                 $GLOBALS['__bcc_gjr']['score_reads']++;
-                return (float) $GLOBALS['__bcc_gjr']['score'];
+                return (float) ($GLOBALS['__bcc_gjr']['score'] ?? 50.0);
+            }
+
+            // F-469: the verdict reads the tri-state; a null score = unreadable.
+            public function getScoreOrUnknown(int $userId): ?float
+            {
+                $GLOBALS['__bcc_gjr']['score_reads']++;
+                $score = $GLOBALS['__bcc_gjr']['score'];
+
+                return $score === null ? null : (float) $score;
             }
         });
     }
@@ -130,6 +139,23 @@ final class GroupJoinVerdictTest extends TestCase
 
         self::assertSame('auth_required', $f['can_join']['reason_code']);
         self::assertNull($f['viewer_membership_status']);
+    }
+
+    /**
+     * F-469: a score that could not be read is `unavailable`, never a
+     * verdict computed from a default score. It is not memoised: the next
+     * group in the list reads again.
+     */
+    public function testAnUnreadableScoreIsUnavailableAndReadAgain(): void
+    {
+        $GLOBALS['__bcc_gjr']['score'] = null;
+
+        $f = $this->fields(self::ctx(PeepSoPrivacy::Open), null, 50);
+        self::assertFalse($f['can_join']['allowed']);
+        self::assertSame('unavailable', $f['can_join']['reason_code']);
+
+        $this->fields(self::ctx(PeepSoPrivacy::Open), null, 50);
+        self::assertSame(2, $GLOBALS['__bcc_gjr']['score_reads'], 'not memoised');
     }
 
     public function testTheViewersScoreIsReadOnceForAWholeList(): void

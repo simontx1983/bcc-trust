@@ -98,6 +98,38 @@ final class UnclaimedPageAttestationPermissionTest extends TestCase
         );
     }
 
+    /**
+     * F-469 (review agent 2's Low 2): a viewer whose standing could not be
+     * read is allowed nothing, and the hint says it could not be checked,
+     * never "Reach Neutral standing…" (which would tell a good member they
+     * are below Neutral). Runs computeViewerActionPermissions() itself, not
+     * the seeded cache above.
+     */
+    public function testAnUnreadableStandingAllowsNothingAndSaysItCouldNotBeChecked(): void
+    {
+        $attestation = (new \ReflectionClass(AttestationService::class))->newInstanceWithoutConstructor();
+        $reputation  = new class extends \BCC\Trust\Core\Repositories\ReputationRepository {
+            public function __construct()
+            {
+            }
+
+            public function getTierOrUnknown(int $userId): ?string
+            {
+                return null;
+            }
+        };
+        (new ReflectionObject($attestation))->getProperty('reputationRepo')->setValue($attestation, $reputation);
+
+        $perms = (new ReflectionMethod(AttestationService::class, 'computeViewerActionPermissions'))
+            ->invoke($attestation, self::VIEWER, self::OWNER);
+
+        foreach (['can_vouch', 'can_stand_behind', 'can_report'] as $key) {
+            self::assertFalse($perms[$key]['allowed'], $key);
+            self::assertStringContainsString('could not be checked', (string) $perms[$key]['unlock_hint'], $key);
+            self::assertStringNotContainsString('Reach Neutral', (string) $perms[$key]['unlock_hint'], $key);
+        }
+    }
+
     public function testAnUnclaimedPageHidesVouchBackAndReportForASignedInViewer(): void
     {
         $p = $this->perms(self::VIEWER, 0);

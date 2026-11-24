@@ -252,9 +252,17 @@ final class MyGroupsEndpoint
             );
         }
         if ($trustMin > 0) {
-            $viewerScore = (int) round(
-                Plugin::instance()->reputationRepository()->getScore($userId)
-            );
+            // F-469: a score that could not be read refuses the join
+            // (retryable) before any write, never the neutral 50.
+            $score = Plugin::instance()->reputationRepository()->getScoreOrUnknown($userId);
+            if ($score === null) {
+                return ApiResponse::error(
+                    'bcc_unavailable',
+                    'We couldn\'t check your reputation just now. Please try again.',
+                    503
+                );
+            }
+            $viewerScore = (int) round($score);
             if ($viewerScore < $trustMin) {
                 return ApiResponse::error(
                     'bcc_permission_denied',
@@ -731,8 +739,8 @@ final class MyGroupsEndpoint
      * The create gate's refusal, as a response.
      *
      * ⚠⚠ `unavailable` is RETRYABLE and must not be a 403. It means the
-     * ownership count could not be READ (F-503), not that the member is
-     * ineligible — a 403 tells them to stop trying, and the generic copy
+     * ownership count (F-503) or, since F-469, the trust tier could not be
+     * READ, not that the member is ineligible — a 403 tells them to stop trying, and the generic copy
      * ("You can't create a community right now.") reads as a permanent no
      * for what is a transient server fault. Everything else here IS a
      * property of their account and stays a 403 with its stable
@@ -751,7 +759,7 @@ final class MyGroupsEndpoint
         if ($reason === 'unavailable') {
             return ApiResponse::error(
                 'bcc_unavailable',
-                'We couldn\'t check your communities just now. Please try again.',
+                'We couldn\'t check whether you can create a community just now. Please try again.',
                 503,
                 ['reason' => $reason]
             );

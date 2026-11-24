@@ -926,8 +926,18 @@ final class GroupsService
         if ($trustGateMin > 0) {
             // Memoized per request: a list of trust-gated groups reads the
             // viewer's score once, not once per item.
-            $viewerScore = $this->viewerScoreMemo[$viewerId]
-                ??= (int) round($this->reputationRepo->getScore($viewerId));
+            //
+            // F-469: a score that could not be read is not memoised, and the
+            // verdict is `unavailable` (the reason code a failed membership
+            // read already answers), never the neutral 50.
+            if (!isset($this->viewerScoreMemo[$viewerId])) {
+                $score = $this->reputationRepo->getScoreOrUnknown($viewerId);
+                if ($score === null) {
+                    return ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unavailable'];
+                }
+                $this->viewerScoreMemo[$viewerId] = (int) round($score);
+            }
+            $viewerScore = $this->viewerScoreMemo[$viewerId];
             if ($viewerScore < $trustGateMin) {
                 return [
                     'allowed'     => false,

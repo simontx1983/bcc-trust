@@ -619,6 +619,13 @@ final class PostsService
         $decision = \BCC\Trust\Core\Plugin::instance()
             ->capabilityResolver()
             ->can($authorId, 'write_review');
+        if ($decision->reason === 'unavailable') {
+            // F-469: the author's standing could not be read. Retryable.
+            return [
+                'error'   => 'bcc_unavailable',
+                'message' => 'Review could not be saved. Try again.',
+            ];
+        }
         if (!$decision->isAllowed()) {
             return [
                 'error'   => 'bcc_forbidden',
@@ -2738,6 +2745,13 @@ final class PostsService
             $decision = Plugin::instance()
                 ->capabilityResolver()
                 ->can($authorId, 'post_ranked_hall_feed');
+            if ($decision->reason === 'unavailable') {
+                // F-469: the author's standing could not be read. Retryable.
+                return [
+                    'error'   => 'bcc_unavailable',
+                    'message' => 'Post could not be saved. Try again.',
+                ];
+            }
             if (!$decision->isAllowed()) {
                 return [
                     'error'   => 'bcc_forbidden',
