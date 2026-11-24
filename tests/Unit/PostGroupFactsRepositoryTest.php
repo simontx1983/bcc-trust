@@ -61,7 +61,10 @@ final class PostGroupFactsRepositoryTest extends TestCase
             ['_bcc_post_visibility', 'members_only'],
             ['peepso_group_id', '12'],
             ['_bcc_post_group_privacy_at_post', '1'],
-            ['_bcc_post_visibility', 'public_all'], // a later duplicate: the first wins, as get_post_meta(…, true)
+            // ⚠ A LATER DUPLICATE, and the STRICTEST wins — not the first.
+            // Here they coincide ('members_only' is both), so this case cannot
+            // tell the two rules apart; the pair below is what does.
+            ['_bcc_post_visibility', 'public_all'],
         ]);
 
         self::assertSame([
@@ -162,5 +165,114 @@ final class PostGroupFactsRepositoryTest extends TestCase
         self::assertNotNull($facts);
         self::assertSame('9', $facts['group_raw']);
         self::assertSame('public_group', $facts['visibility']);
+    }
+    // ── duplicate rows fold STRICTEST-WINS (F-461 security LOW) ──────────
+
+    /**
+     * ⛔ THE BUG, in the order that exposes it. `$visibility ??= $value` kept
+     * the FIRST row by meta_id, so a stray leading `public_all` published a
+     * post every later row says is members-only.
+     *
+     * `public_all` is the PERMISSIVE value: it is the one that lets a
+     * group-tagged post syndicate OUTSIDE its group.
+     *
+     * ⚠ This is the mirror of `testTheFactsAreBuiltFromThePostsRows`, which
+     * has the same two values the other way round. That one passes under
+     * EITHER rule; only this one separates them.
+     */
+    public function testAPermissiveVisibilityFirstDoesNotWin(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_visibility', 'public_all'],
+            ['_bcc_post_visibility', 'members_only'],
+        ]);
+
+        $facts = PostGroupFactsRepository::forPost(self::POST);
+
+        self::assertNotSame(
+            'public_all',
+            $facts['visibility'] ?? null,
+            'one disagreeing row withholds public_all, whatever the meta_id order'
+        );
+        self::assertSame('members_only', $facts['visibility'] ?? null);
+    }
+
+    /** And it IS public_all when every row says so — the fold is not a blanket refusal. */
+    public function testVisibilityIsPublicAllOnlyWhenEveryRowSaysSo(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_visibility', 'public_all'],
+            ['_bcc_post_visibility', 'public_all'],
+        ]);
+
+        self::assertSame('public_all', PostGroupFactsRepository::forPost(self::POST)['visibility']);
+    }
+
+    /**
+     * ⛔ The same bug on privacy-at-post, where THE PERMISSIVE ANSWER IS
+     * "NON-OPEN" — which reads backwards until you follow it through.
+     *
+     * A post recorded as made while its group was ALREADY closed or secret is
+     * a DELIBERATE syndication, so `GroupSyndicationGate::allows()` admits it
+     * early and keeps it public after the group closes. A stray leading '1'
+     * therefore kept a post public that every later row says was made while
+     * the group was open.
+     */
+    public function testAPermissiveNonOpenPrivacyFirstDoesNotWin(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_group_privacy_at_post', '1'],
+            ['_bcc_post_group_privacy_at_post', '0'],
+        ]);
+
+        $facts = PostGroupFactsRepository::forPost(self::POST);
+
+        self::assertNotContains(
+            $facts['privacy_at_post'] ?? null,
+            ['1', '2'],
+            'one open row withholds the made-while-non-open record'
+        );
+        self::assertSame('0', $facts['privacy_at_post'] ?? null);
+    }
+
+    /** Non-open survives when every row agrees, including a mix of 1 and 2. */
+    public function testPrivacyAtPostStaysNonOpenWhenEveryRowAgrees(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_group_privacy_at_post', '1'],
+            ['_bcc_post_group_privacy_at_post', '2'],
+        ]);
+
+        self::assertContains(
+            PostGroupFactsRepository::forPost(self::POST)['privacy_at_post'],
+            ['1', '2'],
+            'closed and secret both mean non-open, so agreeing rows keep the record'
+        );
+    }
+
+    /**
+     * ⚠ A single row is unchanged by the fold. Worth pinning: duplicate rows
+     * should not exist at all — `attachToGroup()` is the single writer — so
+     * the ordinary one-row case is what runs in production, and a fold that
+     * quietly altered it would be a regression nothing else would catch.
+     */
+    public function testTheOrdinarySingleRowCaseIsUntouched(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_visibility', 'public_all'],
+            ['_bcc_post_group_privacy_at_post', '1'],
+        ]);
+
+        self::assertSame([
+            'group_raw'       => '7',
+            'group_ids'       => [7],
+            'visibility'      => 'public_all',
+            'privacy_at_post' => '1',
+        ], PostGroupFactsRepository::forPost(self::POST));
     }
 }
