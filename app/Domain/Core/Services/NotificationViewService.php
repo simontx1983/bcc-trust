@@ -518,6 +518,13 @@ final class NotificationViewService
             // manage view, so neither notice deep-links to it.
             NotificationType::ANNOUNCEMENT_HIDDEN   => '/',
             NotificationType::ANNOUNCEMENT_RESTORED => '/',
+            // Validator relationships: administrators land on the admin
+            // page view; the member on the validator page itself.
+            NotificationType::VALIDATOR_OWNER_LINKED,
+            NotificationType::VALIDATOR_OWNER_REVOKED,
+            NotificationType::VALIDATOR_OWNER_LINK_CANCELLED => '/admin/validators/' . $externalId,
+            NotificationType::VALIDATOR_OWNERSHIP_GRANTED,
+            NotificationType::VALIDATOR_OWNERSHIP_REMOVED => self::resolvePageLink($externalId),
             default                       => '/',
         };
     }

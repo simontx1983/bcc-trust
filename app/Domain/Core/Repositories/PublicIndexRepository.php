@@ -48,7 +48,7 @@ final class PublicIndexRepository
      * own name for it) and banned ('ban'). The same set PeepSo's own user
      * search excludes (peepso/classes/usersearch.php).
      */
-    private const UNLISTED_ROLES = ['register', 'verified', 'ban'];
+    public const UNLISTED_ROLES = ['register', 'verified', 'ban'];
 
     /**
      * The highest `usr_profile_acc` an anonymous viewer may read. ProfileAccess

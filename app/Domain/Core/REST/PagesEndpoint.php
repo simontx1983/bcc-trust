@@ -522,18 +522,25 @@ final class PagesEndpoint
             throw new \RuntimeException('Onchain ClaimService not autoloaded');
         }
 
-        $result = ClaimService::claim($userId, $entityType, $entityId);
+        $result = ClaimService::claim($userId, $entityType, $entityId, $pageId);
 
         if (!$result['success']) {
             return self::mapClaimFailure($result);
         }
 
         // Mirror to entity_type='page' so CardViewService sees is_claimed.
-        // Best-effort: if the mirror fails, the underlying claim (and
-        // its trust-scoring event) is already in place — log and
-        // continue rather than rolling back.
+        // A VALIDATOR claim was mirrored by ClaimService::claim() itself, in
+        // the same run as the claim and its relationship log rows (and is
+        // never written here, outside that lock order). A collection claim is
+        // mirrored here. Either way the mirror is a wallet claim, like the
+        // claim it mirrors (claim() only writes wallet claims). Best-effort:
+        // if the mirror fails, the underlying claim (and its trust-scoring
+        // event) is already in place — log and continue rather than rolling
+        // back.
         $role       = (string) ($result['role'] ?? 'operator');
-        $underlying = ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
+        $underlying = $entityType === 'validator'
+            ? null
+            : ClaimRepository::getUserClaim($userId, $entityType, $entityId, PageClaimRolePolicy::ENTITY_CLAIM_ROLES);
         if ($underlying !== null) {
             $mirror = ClaimRepository::createExclusiveClaim(
                 $userId,

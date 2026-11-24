@@ -44,6 +44,17 @@ final class WalletDisconnectRevokesClaimsTest extends TestCase
         );
     }
 
+    /** L4: a deactivated chain still scopes the unlink to that chain. */
+    public function testADeactivatedChainStillScopesTheUnlink(): void
+    {
+        $GLOBALS['__f521']['chain_id']     = null; // not among the active chains
+        $GLOBALS['__f521']['chain_id_any'] = 9;    // but known
+
+        BonusService::handleWalletDisconnect(5, 'retired-chain', 'cosmos1abc');
+
+        self::assertSame(['revokeAllForUser', 5, 'wallet_unlinked', 'cosmos1abc', 9], $GLOBALS['__f521']['calls'][0]);
+    }
+
     public function testAnUnresolvedChainRevokesByWalletAlone(): void
     {
         $GLOBALS['__f521']['chain_id'] = null;

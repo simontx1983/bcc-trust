@@ -88,16 +88,6 @@ final class DegradationMetricsCoreMapTest extends TestCase
      */
     private const NOT_EMITTED = [
         'collection_persist.watermark_withheld' => ['2026-11-24', 'declared by #221 with no writer (the only withholding is the incomplete walk in HoldingsService); CollectionPersistMetricsTest pins the absence'],
-        'validator_relationships.claim_lock_unavailable' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (ValidatorRelationshipService, not yet merged)'],
-        'validator_relationships.followup_failed' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (ValidatorRelationshipService, not yet merged)'],
-        'validator_relationships.page_owner_locked' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (PageOwnershipAligner, not yet merged)'],
-        'validator_relationships.page_owner_unknown' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (PageOwnershipAligner, not yet merged)'],
-        'validator_relationships.page_owner_misaligned' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (PageOwnershipAligner, not yet merged)'],
-        'validator_relationships.align_backlog_full' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (PageOwnershipAligner, not yet merged)'],
-        'validator_relationships.deletion_revoke_failed' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (the account-deletion purge, not yet merged)'],
-        'validator_relationships.log_chain_broken' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (RelationshipLogHealthCheck, not yet merged)'],
-        'validator_relationships.log_verify_incomplete' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (RelationshipLogHealthCheck, not yet merged)'],
-        'validator_relationships.log_anchor_missing' => ['2026-11-24', 'registered by bcc-core #179 ahead of C1b (RelationshipLogHealthCheck, not yet merged)'],
     ];
 
     /**
