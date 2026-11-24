@@ -909,14 +909,28 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertTrue($data['ok']);
     }
 
+    /**
+     * "Available now": exactly $reason, at an instant bracketed by two clock
+     * reads. Not assertSame(['at' => time(), …]): that time() is read BEFORE
+     * the call, and the code's own read can land in the next second (F-577).
+     */
+    private static function assertAvailableNow(string $reason): void
+    {
+        $before       = time();
+        $availability = AccountCredentialCheck::recoveryEmailAvailability(self::USER);
+        $after        = time();
+
+        self::assertSame(['at', 'reason'], array_keys($availability));
+        self::assertSame($reason, $availability['reason']);
+        self::assertGreaterThanOrEqual($before, $availability['at']);
+        self::assertLessThanOrEqual($after, $availability['at']);
+    }
+
     public function testAvailabilityIsNowForTheSignupWallet(): void
     {
         self::newWalletAccount(600);
 
-        self::assertSame(
-            ['at' => time(), 'reason' => 'signup_wallet'],
-            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
-        );
+        self::assertAvailableNow('signup_wallet');
     }
 
     public function testAvailabilityWaitsFor48HoursOnANewWallet(): void
@@ -924,10 +938,11 @@ final class AccountWalletConfirmTest extends TestCase
         // A placeholder account whose only wallet (not a signup wallet)
         // was verified an hour ago, before this sign-in.
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
-        self::verifiedAgo(1, 3600);
+        // Derived from the stamped instant, not a fresh time() (F-577).
+        $verifiedAt = self::verifiedAgo(1, 3600);
 
         self::assertSame(
-            ['at' => time() - 3600 + 48 * 3600, 'reason' => 'wallet_age'],
+            ['at' => $verifiedAt + 48 * 3600, 'reason' => 'wallet_age'],
             AccountCredentialCheck::recoveryEmailAvailability(self::USER)
         );
     }
@@ -936,10 +951,7 @@ final class AccountWalletConfirmTest extends TestCase
     {
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
 
-        self::assertSame(
-            ['at' => time(), 'reason' => 'wallet_age'],
-            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
-        );
+        self::assertAvailableNow('wallet_age');
     }
 
     public function testAvailabilityTakesTheEarliestQualifyingWallet(): void

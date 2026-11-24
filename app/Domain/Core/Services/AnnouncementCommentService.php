@@ -208,6 +208,13 @@ final class AnnouncementCommentService
             // behaviour without the dead check.
             $reason = $decision['reason_code'] ?? null;
 
+            // F-469: a standing that could not be READ is retryable, not a
+            // refusal: 503 `bcc_unavailable`, the same reason code on the
+            // wire, and nothing written.
+            if ($reason === Caps::REASON_STANDING_UNREADABLE) {
+                return self::fail(self::ERR_UNAVAILABLE, Caps::STANDING_UNREADABLE_HINT, 503, $reason);
+            }
+
             return self::fail(self::ERR_FORBIDDEN, 'Not permitted.', 403, $reason);
         }
 

@@ -15,12 +15,14 @@ use BCC\Trust\Core\Services\GroupsService;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/PeepSoActivitiesTable.php';
+require_once __DIR__ . '/PeepSoBlocksTableFixture.php';
 
 /**
  * F-345: the reads behind review replies, against real MySQL/MariaDB.
@@ -46,6 +48,8 @@ require_once __DIR__ . '/PeepSoActivitiesTable.php';
 #[CoversClass(FeedItemReportVisibility::class)]
 final class ReviewReplyRepositoryIntegrationTest extends TestCase
 {
+    use PeepSoBlocksTableFixture;
+
     private const OWNER     = 987100;
     private const NEW_OWNER = 987101;
     private const VOTER     = 987001;
@@ -69,7 +73,23 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // The reply report arm asks PeepSo who the reporter may see
+        // (ProfileAccess): PeepSoUserSearch and the CURRENT user from
+        // filter-visible-stubs (declared BEFORE the moderation stubs' fixed
+        // 0), the profile ladder and suspension from profile-access-stubs.
+        // Both are subprocess-only, as this suite is. By default every
+        // fixture member is visible and every profile open.
+        require_once dirname(__DIR__) . '/Stubs/filter-visible-stubs.php';
+        require_once dirname(__DIR__) . '/Stubs/profile-access-stubs.php';
         require_once dirname(__DIR__) . '/Stubs/moderation-integration-stubs.php';
+        $GLOBALS['__bcc_fv'] = [
+            'visible'     => array_fill_keys([self::OWNER, self::NEW_OWNER, self::VOTER + 50, self::PAGE_MEMBER], true),
+            'admin'       => false,
+            'constructed' => [],
+        ];
+        $GLOBALS['__bcc_profile_access'] = [
+            'verdicts' => [10 => true, 20 => true, 40 => false],
+        ];
         $GLOBALS['__bcc_test_actions']      = [];
         $GLOBALS['__bcc_test_object_cache'] = [];
 
@@ -103,6 +123,7 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
     {
         global $wpdb;
         $wpdb->clearFaultInjection();
+        $this->removePeepSoBlocksTable();
         foreach ($this->voteIds as $voteId) {
             $wpdb->delete($wpdb->prefix . 'bcc_trust_votes', ['id' => $voteId]);
         }
@@ -347,9 +368,14 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
 
     private function canReport(int $act): bool
     {
-        $row = PeepSoActivityRepository::getById($act);
-        self::assertNotNull($row, 'fixture activity must load');
-        return $this->visibility()->canSee(self::VOTER + 50, $row);
+        return $this->canReportAs($act, self::VOTER + 50);
+    }
+
+    /** The request's user, for WordPress and for PeepSo's ladder alike. */
+    private function signInAs(int $userId): void
+    {
+        $GLOBALS['__bcc_fv_viewer']                   = $userId;
+        $GLOBALS['__bcc_profile_access']['viewer_id'] = $userId;
     }
 
     public function testALiveReplyOnAVisibleReviewIsReportableThoughNoFeedShowsIt(): void
@@ -439,10 +465,12 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
     /** @var list<int> */
     private array $pageMemberRows = [];
 
+    /** $viewer reports in their own request (they are the current user). */
     private function canReportAs(int $act, int $viewer): bool
     {
         $row = PeepSoActivityRepository::getById($act);
         self::assertNotNull($row, 'fixture activity must load');
+        $this->signInAs($viewer);
         return $this->visibility()->canSee($viewer, $row);
     }
 
@@ -495,5 +523,141 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
             $GLOBALS['wpdb']->clearFaultInjection();
             $this->forgetPageMembers();
         }
+    }
+
+    // ── a reply is reportable exactly where its Reviews tab shows it ────
+
+    /**
+     * A member's Reviews tab answers 403 to a viewer who may not open their
+     * profile (CardReviewsEndpoint), so a reply on a review of that member
+     * is not reportable by them. PeepSo's member search still lists the
+     * author here, so only the profile gate refuses.
+     */
+    public function testAReplyOnAMembersReviewIsReportableOnlyByThoseWhoMayOpenTheirProfile(): void
+    {
+        [, $act] = $this->post('review_reply', $this->vote(), 'the member answers');
+
+        self::assertTrue($this->canReportAs($act, self::VOTER + 50), 'control: an open profile');
+
+        $GLOBALS['__bcc_profile_access']['levels'] = [self::OWNER => 40];
+        self::assertFalse($this->canReportAs($act, self::VOTER + 50), 'a profile closed to the reporter');
+
+        $GLOBALS['__bcc_profile_access']['levels']    = [];
+        $GLOBALS['__bcc_profile_access']['suspended'] = [self::OWNER => true];
+        self::assertFalse($this->canReportAs($act, self::VOTER + 50), 'a suspended member');
+    }
+
+    /** The member's profile opens, but the reporter may not see them as the reply's author (a block). */
+    public function testOnAMembersReviewAReplyWhoseAuthorTheReporterMayNotSeeIsNotReportable(): void
+    {
+        [, $act] = $this->post('review_reply', $this->vote(), 'the member answers');
+        $this->ensurePeepSoBlocksTable();
+        $this->seedBlock(self::VOTER + 50, self::OWNER);
+
+        self::assertTrue($this->canReportAs($act, self::VOTER + 50), 'control: PeepSo still lists the author');
+
+        unset($GLOBALS['__bcc_fv']['visible'][self::OWNER]);
+        self::assertFalse($this->canReportAs($act, self::VOTER + 50));
+    }
+
+    /**
+     * On a page's review, a reply whose author is hidden from the reporter
+     * ONLY by the level they chose for their profile is shown as the page's
+     * response, so it stays reportable.
+     */
+    private function onAPageWithAProfileLevelHiddenAuthor(): int
+    {
+        $this->onPeepSoPage('0');
+        [, $act] = $this->post('review_reply', $this->vote(), 'the page answers');
+        $this->ensurePeepSoBlocksTable();
+        unset($GLOBALS['__bcc_fv']['visible'][self::OWNER]);
+        $GLOBALS['__bcc_profile_access']['levels'] = [self::OWNER => 40];
+        return $act;
+    }
+
+    public function testOnAPagesReviewAReplyShownAsThePagesStaysReportable(): void
+    {
+        $act = $this->onAPageWithAProfileLevelHiddenAuthor();
+
+        try {
+            self::assertTrue($this->canReportAs($act, self::VOTER + 50));
+        } finally {
+            $this->forgetPageMembers();
+        }
+    }
+
+    /** @return array<string, array{string}> */
+    public static function hiddenAuthorReasons(): array
+    {
+        return [
+            'the reporter blocked the author' => ['blocked'],
+            'the author blocked the reporter' => ['blocker'],
+            'the block read failed'           => ['block_read_failed'],
+            'the author is suspended'         => ['suspended'],
+            'the author is banned'            => ['banned'],
+        ];
+    }
+
+    /** Every other reason the tab shows no reply refuses the report too. */
+    #[DataProvider('hiddenAuthorReasons')]
+    public function testOnAPagesReviewABlockedSuspendedOrBannedAuthorsReplyIsNotReportable(string $reason): void
+    {
+        $act = $this->onAPageWithAProfileLevelHiddenAuthor();
+        match ($reason) {
+            'blocked'           => $this->seedBlock(self::VOTER + 50, self::OWNER),
+            'blocker'           => $this->seedBlock(self::OWNER, self::VOTER + 50),
+            'block_read_failed' => $GLOBALS['wpdb']->failQueriesMatching = '/peepso_blocks/',
+            'suspended'         => $GLOBALS['__bcc_profile_access']['suspended'] = [self::OWNER => true],
+            'banned'            => $GLOBALS['__bcc_profile_access']['roles'] = [self::OWNER => 'ban'],
+        };
+
+        try {
+            self::assertFalse($this->canReportAs($act, self::VOTER + 50));
+            if ($reason === 'block_read_failed') {
+                self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the block read');
+            }
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+            $this->forgetPageMembers();
+        }
+    }
+
+    /**
+     * ⚠ The HAND-OVER carve-out stays (contract v1.159, user decision
+     * 2026-11-18): after the page changes hands, the old author's reply no
+     * longer shows on the tab, yet it stays reportable while it is live.
+     * "Reportable where the tab shows it" is about who may be seen, not
+     * about who answers for the page now.
+     */
+    public function testAReplyWhoseAuthorNoLongerAnswersForThePageStaysReportable(): void
+    {
+        $page    = $this->onPeepSoPage('0');
+        [, $act] = $this->post('review_reply', $this->vote(), 'the old owner answered');
+
+        global $wpdb;
+        self::assertNotFalse($wpdb->update($wpdb->posts, ['post_author' => self::NEW_OWNER], ['ID' => $page]), $wpdb->last_error);
+
+        try {
+            self::assertTrue($this->canReportAs($act, self::VOTER + 50));
+        } finally {
+            $this->forgetPageMembers();
+        }
+    }
+
+    /**
+     * PeepSo answers who may be seen for the CURRENT user only, so a viewer
+     * who is not the request's user is refused rather than answered as them.
+     */
+    public function testOnlyTheRequestsOwnUserIsAnswered(): void
+    {
+        [, $act] = $this->post('review_reply', $this->vote(), 'reply');
+        $row     = PeepSoActivityRepository::getById($act);
+        self::assertNotNull($row);
+
+        $this->signInAs(self::VOTER + 50);
+        self::assertTrue($this->visibility()->canSee(self::VOTER + 50, $row), 'control: the reporter in their own request');
+
+        $this->signInAs(self::PAGE_MEMBER);
+        self::assertFalse($this->visibility()->canSee(self::VOTER + 50, $row));
     }
 }

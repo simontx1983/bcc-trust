@@ -77,9 +77,9 @@ if (!defined('ABSPATH')) {
 final class AnnouncementViewerStanding
 {
     /**
-     * The five keys `AnnouncementCapabilityResolver::forRow()` reads.
+     * The six keys `AnnouncementCapabilityResolver::forRow()` reads.
      *
-     * ⚠ ALL FIVE ARE ALWAYS PRESENT. The resolver fails closed on an absent
+     * ⚠ ALL SIX ARE ALWAYS PRESENT. The resolver fails closed on an absent
      * key, which is correct of it, but it means a partial array silently
      * denies — exactly the defect this class replaces. Returning a complete
      * array is the whole point, so there is no early return that omits keys.
@@ -89,7 +89,13 @@ final class AnnouncementViewerStanding
      * self-report rung needs it to compare against the row's author. It is
      * reported as `0` for an anonymous viewer, which matches no author.
      *
-     * @return array{authenticated: bool, suspended: bool, fraud_locked: bool, good_standing: bool, user_id: int}
+     * ⚠ `standing_known` (F-469) says whether `good_standing` is an answer.
+     * FALSE means the tier could not be read: the resolver then refuses with
+     * its own retryable reason (`unavailable`) instead of the `suspended` it
+     * reports for a member below Neutral. Like every flag, its absence
+     * denies.
+     *
+     * @return array{authenticated: bool, suspended: bool, fraud_locked: bool, good_standing: bool, standing_known: bool, user_id: int}
      */
     public static function forViewer(int $viewerId): array
     {
@@ -99,21 +105,26 @@ final class AnnouncementViewerStanding
             // resolver's order checks `authenticated` before standing, so the
             // reason a visitor sees is `auth_required` — "sign in" — rather
             // than an alarming `suspended` for an account that does not exist.
+            // No standing was read for a visitor, so it is not known.
             return [
-                'authenticated' => false,
-                'suspended'     => false,
-                'fraud_locked'  => false,
-                'good_standing' => false,
-                'user_id'       => 0,
+                'authenticated'  => false,
+                'suspended'      => false,
+                'fraud_locked'   => false,
+                'good_standing'  => false,
+                'standing_known' => false,
+                'user_id'        => 0,
             ];
         }
 
+        $standing = self::isInGoodStanding($viewerId);
+
         return [
-            'authenticated' => true,
-            'suspended'     => self::isSuspended($viewerId),
-            'fraud_locked'  => self::isFraudLocked($viewerId),
-            'good_standing' => self::isInGoodStanding($viewerId),
-            'user_id'       => $viewerId,
+            'authenticated'  => true,
+            'suspended'      => self::isSuspended($viewerId),
+            'fraud_locked'   => self::isFraudLocked($viewerId),
+            'good_standing'  => $standing === true,
+            'standing_known' => $standing !== null,
+            'user_id'        => $viewerId,
         ];
     }
 
@@ -178,8 +189,13 @@ final class AnnouncementViewerStanding
      * ⚠ The tier list is NOT restated here. `UserViewService::isInGoodStanding()`
      * owns it and says so in its own docblock; duplicating the `in_array` would
      * be the §11 violation that docblock exists to prevent.
+     *
+     * F-469: tri-state. NULL means the tier could not be read (the
+     * tri-state reader answered unknown, or the lookup threw). That is
+     * never good standing, and forViewer() reports it as `standing_known:
+     * false`, so the refusal says it could not be checked.
      */
-    private static function isInGoodStanding(int $viewerId): bool
+    private static function isInGoodStanding(int $viewerId): ?bool
     {
         try {
             // F-469: getTier() never threw on a failed read (it answered
@@ -192,7 +208,7 @@ final class AnnouncementViewerStanding
                     'user_id' => $viewerId,
                 ]);
 
-                return false;
+                return null;
             }
 
             return UserViewService::isInGoodStanding($tier);
@@ -205,7 +221,7 @@ final class AnnouncementViewerStanding
                 'error'   => $e->getMessage(),
             ]);
 
-            return false;
+            return null;
         }
     }
 }

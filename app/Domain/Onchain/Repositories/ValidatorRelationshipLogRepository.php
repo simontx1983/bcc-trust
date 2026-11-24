@@ -257,12 +257,14 @@ final class ValidatorRelationshipLogRepository
             throw new \InvalidArgumentException('Relationship log payload is too large.');
         }
         $note = isset($event['evidence_note']) ? (string) $event['evidence_note'] : null;
-        if ($note !== null && mb_strlen($note) > self::MAX_EVIDENCE_NOTE_LENGTH) {
-            throw new \InvalidArgumentException('Evidence note is too long.');
+        if ($note !== null && (!mb_check_encoding($note, 'UTF-8') || mb_strlen($note) > self::MAX_EVIDENCE_NOTE_LENGTH)) {
+            // Invalid UTF-8 could be altered on the way into the column, and
+            // the stored text would then no longer match its digest.
+            throw new \InvalidArgumentException('Evidence note must be valid UTF-8 within the length limit.');
         }
         $ref = isset($event['evidence_ref']) ? (string) $event['evidence_ref'] : null;
-        if ($ref !== null && mb_strlen($ref) > self::MAX_EVIDENCE_REF_LENGTH) {
-            throw new \InvalidArgumentException('Evidence reference is too long.');
+        if ($ref !== null && (!mb_check_encoding($ref, 'UTF-8') || mb_strlen($ref) > self::MAX_EVIDENCE_REF_LENGTH)) {
+            throw new \InvalidArgumentException('Evidence reference must be valid UTF-8 within the length limit.');
         }
 
         return [

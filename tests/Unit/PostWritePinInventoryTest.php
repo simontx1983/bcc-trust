@@ -1394,7 +1394,7 @@ final class PostWritePinInventoryTest extends TestCase
             }
         }
 
-                // SEVEN in-scope receiver shapes, each a separate way of holding a
+        // SEVEN in-scope receiver shapes, each a separate way of holding a
         // model, and each one a fixture LINE rather than a claim:
         //   a property, a method-return variable, a nullsafe property,
         //   a STATIC property, an indexed property, an indexed variable,
@@ -1403,7 +1403,7 @@ final class PostWritePinInventoryTest extends TestCase
         // Excluded, also fixture lines: the two wpdb spellings, an INDEXED
         // wpdb (the same base rule), and a true call result -- the one gap
         // left, and it is named in updateIsNotOnWpdb().
-self::assertCount(
+        self::assertCount(
             7,
             $updates,
             'the property, method-return and NULLSAFE receivers must all be'
@@ -1445,13 +1445,13 @@ self::assertCount(
             );
         }
 
-                // TWO writes, and both must be unpinned: the impostor pins one by
+        // TWO writes, and both must be unpinned: the impostor pins one by
         // its SHORT NAME and the other through `self::`. The second is the
         // case the namespace requirement exists for. This rule was already
         // correct here while bcc-core had only the class check -- and NEITHER
         // fixture exercised it, so no mutant could kill either. Found by
         // hashing each rule function across the twins and diffing.
-self::assertCount(
+        self::assertCount(
             2,
             $rows,
             'only the real write may be reported; a method that merely shares a'

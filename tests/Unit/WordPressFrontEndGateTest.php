@@ -50,7 +50,7 @@ final class WordPressFrontEndGateTest extends TestCase
                 ['the_generator', [WordPressFrontEndGate::class, 'noGenerator'], PHP_INT_MAX, 2],
                 ['wp_sitemaps_enabled', [WordPressFrontEndGate::class, 'noSitemaps'], PHP_INT_MAX, 1],
                 ['404_template', [WordPressFrontEndGate::class, 'bareNotFoundTemplate'], PHP_INT_MAX, 1],
-                ['wp', [WordPressFrontEndGate::class, 'sendPeepSoPagesToTheApp'], -1000, 1],
+                ['wp', [WordPressFrontEndGate::class, 'sendFrontEndToTheApp'], -1000, 1],
             ],
             $GLOBALS['__bcc_sig']['hooks']
         );
@@ -503,103 +503,132 @@ final class WordPressFrontEndGateTest extends TestCase
         self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 
-    // ── PeepSo's own pages send non-admins to the app ─────────────────────
+    // ── cms has no public front end: non-admins go to the app ────────────
 
-    /** A singular page with this content, requested at this host by this user (0 = signed out). */
-    private static function peepsoPage(string $content, string $host = 'cms.bcc-origin.test', int $user = 0, bool $isPage = true): void
+    /** One front-end request at this host by this user (0 = signed out). */
+    private static function frontEndRequest(string $host = 'cms.bcc-origin.test', int $user = 0, bool $robots = false): void
     {
-        $post               = new \WP_Post();
-        $post->post_content = $content;
-        $GLOBALS['__bcc_sig']['queried']       = $post;
-        $GLOBALS['__bcc_sig']['singular_page'] = $isPage;
-        $GLOBALS['__bcc_sig']['current']       = $user;
-        $_SERVER['HTTP_HOST']                  = $host;
+        $GLOBALS['__bcc_sig']['current'] = $user;
+        $GLOBALS['__bcc_sig']['robots']  = $robots;
+        $_SERVER['HTTP_HOST']            = $host;
     }
 
-    /** @return iterable<string, array{0: string}> */
-    public static function peepsoPages(): iterable
+    /** @return iterable<string, array{0: int}> */
+    public static function nonAdmins(): iterable
     {
-        yield 'profile'          => ['[peepso_profile]'];
-        yield 'activity, inline' => ['<p>Intro</p>[peepso_activity]'];
-        yield 'register'         => ['[peepso_register]'];
-        yield 'any case'         => ['[PeepSo_Members]'];
+        yield 'signed out'       => [0];
+        yield 'a signed-in member' => [7];
     }
 
-    #[DataProvider('peepsoPages')]
-    public function testAPeepSoPageSendsANonAdminToTheApp(string $content): void
+    /**
+     * Whatever the request is (a page, a post, an archive, a feed, a 404: the
+     * rule never asks), a non-admin gets no-cache headers and a 302 to the
+     * app's front page.
+     */
+    #[DataProvider('nonAdmins')]
+    public function testANonAdminsFrontEndRequestGoesToTheApp(int $user): void
     {
-        self::peepsoPage($content);
+        self::frontEndRequest('cms.bcc-origin.test', $user);
 
         try {
-            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            WordPressFrontEndGate::sendFrontEndToTheApp();
             self::fail('redirected');
         } catch (\SignInGateHalt) {
         }
 
         self::assertSame(['https://cms.example.test/', 302], $GLOBALS['__bcc_sig']['redirect']);
         self::assertSame('BCC', $GLOBALS['__bcc_sig']['redirect_by']);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false, 'no-cache headers on the redirect');
     }
 
-    public function testASignedInMemberIsSentToo(): void
+    public function testAnAdminKeepsTheFrontEnd(): void
     {
-        self::peepsoPage('[peepso_profile]', 'cms.bcc-origin.test', 7);
+        self::frontEndRequest('cms.bcc-origin.test', 1); // 'admins' => [1]
+
+        WordPressFrontEndGate::sendFrontEndToTheApp();
+
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testRobotsTxtIsStillServed(): void
+    {
+        self::frontEndRequest('cms.bcc-origin.test', 0, true);
+
+        WordPressFrontEndGate::sendFrontEndToTheApp();
+
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /** @return iterable<string, array{0: array<string, string>}> */
+    public static function peepsoCronTriggers(): iterable
+    {
+        // PeepSo's four external-cron triggers (PeepSo::check_query,
+        // peepso.php 9.0.5.5), written out: no list in the gate exempts them.
+        yield 'mail queue'             => [['peepso_process_mailqueue' => '1']];
+        yield 'maintenance'            => [['peepso_process_maintenance' => '1']];
+        yield 'ranking'                => [['peepso_process_ranking' => '1']];
+        yield 'inactive-user removal'  => [['peepso_process_remove_inactive_users' => '1']];
+        yield 'with an empty value'    => [['peepso_process_mailqueue' => '']];
+        yield 'among other parameters' => [['p' => '5', 'peepso_process_maintenance' => '1']];
+    }
+
+    /**
+     * PeepSo's external-cron GET triggers are redirected like any request,
+     * before PeepSo's own `wp` handler (-1) could run the job: no PeepSo job
+     * runs from a public URL.
+     *
+     * @param array<string, string> $get
+     */
+    #[DataProvider('peepsoCronTriggers')]
+    public function testAPeepSoCronTriggerIsRedirectedLikeAnyRequest(array $get): void
+    {
+        self::frontEndRequest();
+        $_GET = $get;
 
         try {
-            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            WordPressFrontEndGate::sendFrontEndToTheApp();
             self::fail('redirected');
         } catch (\SignInGateHalt) {
         }
 
-        self::assertSame(302, $GLOBALS['__bcc_sig']['redirect'][1] ?? null);
+        self::assertSame(['https://cms.example.test/', 302], $GLOBALS['__bcc_sig']['redirect']);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false, 'no-cache headers on the redirect');
     }
 
-    public function testAnAdminKeepsPeepSosPages(): void
+    /** The gate keeps no exemption list a later change could add a trigger back to. */
+    public function testTheGateExemptsNoGetParameter(): void
     {
-        self::peepsoPage('[peepso_profile]', 'cms.bcc-origin.test', 1); // 'admins' => [1]
+        $constants = (new \ReflectionClass(WordPressFrontEndGate::class))->getConstants();
 
-        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
-
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
-        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('PEEPSO_CRON_TRIGGERS', $constants);
+        foreach ($constants as $name => $value) {
+            if (is_array($value)) {
+                foreach ($value as $item) {
+                    self::assertFalse(is_string($item) && str_starts_with($item, 'peepso_process'), $name . ' lists a PeepSo trigger');
+                }
+            }
+        }
     }
 
-    /** @return iterable<string, array{0: string, 1: bool}> */
-    public static function notPeepSoPages(): iterable
+    /** @return iterable<string, array{0: string}> */
+    public static function thisSameHost(): iterable
     {
-        yield 'a page without a PeepSo shortcode' => ['[gallery ids="1,2"] Hello', true];
-        yield 'a post with one (not a page)'      => ['[peepso_profile]', false];
-        yield "a word, not a shortcode"           => ['We use peepso_profile here', true];
+        yield 'the same host'              => ['cms.example.test'];
+        yield 'any case'                   => ['CMS.Example.Test'];
+        yield 'with a port (review NIT)'   => ['cms.example.test:8443'];
+        yield 'with a port, any case'      => ['CMS.EXAMPLE.TEST:80'];
     }
 
-    #[DataProvider('notPeepSoPages')]
-    public function testAnythingElseIsNotRedirected(string $content, bool $isPage): void
+    /** Home on this same host (ports aside) would loop: a bare 403 instead. */
+    #[DataProvider('thisSameHost')]
+    public function testHomeOnThisHostAnswersABare403(string $host): void
     {
-        self::peepsoPage($content, 'cms.bcc-origin.test', 0, $isPage);
-
-        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
-
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
-        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
-    }
-
-    public function testNoQueriedPostIsNotRedirected(): void
-    {
-        $GLOBALS['__bcc_sig']['singular_page'] = true;
-        $GLOBALS['__bcc_sig']['queried']       = (object) ['post_content' => '[peepso_profile]'];
-
-        WordPressFrontEndGate::sendPeepSoPagesToTheApp();
-
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
-    }
-
-    /** Home on this same host would loop: a bare 403 instead. */
-    #[DataProvider('peepsoPages')]
-    public function testHomeOnThisHostAnswersABare403(string $content): void
-    {
-        self::peepsoPage($content, 'CMS.Example.Test');
+        self::frontEndRequest($host);
 
         try {
-            WordPressFrontEndGate::sendPeepSoPagesToTheApp();
+            WordPressFrontEndGate::sendFrontEndToTheApp();
             self::fail('refused');
         } catch (\SignInGateHalt) {
         }
@@ -607,5 +636,40 @@ final class WordPressFrontEndGateTest extends TestCase
         self::assertSame(403, $GLOBALS['__bcc_sig']['status'] ?? null);
         self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false);
         self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+    }
+
+    /** @return iterable<string, array{0: string, 1: string}> */
+    public static function requestHosts(): iterable
+    {
+        yield 'a host'                 => ['cms.example.test', 'cms.example.test'];
+        yield 'a host and a port'      => ['cms.example.test:8443', 'cms.example.test'];
+        yield 'upper case'             => ['CMS.Example.Test:80', 'cms.example.test'];
+        yield 'an IPv6 literal'        => ['[::1]', '[::1]'];
+        yield 'an IPv6 literal, port'  => ['[::1]:8080', '[::1]'];
+        yield 'empty'                  => ['', ''];
+    }
+
+    #[DataProvider('requestHosts')]
+    public function testTheRequestHostDropsAnyPort(string $httpHost, string $expected): void
+    {
+        $_SERVER['HTTP_HOST'] = $httpHost;
+        $read = new \ReflectionMethod(WordPressFrontEndGate::class, 'requestHost');
+        $read->setAccessible(true);
+
+        self::assertSame($expected, $read->invoke(null));
+    }
+
+    /** A request whose host differs only in being another host still goes to the app. */
+    public function testAnotherHostThatMerelyContainsHomeIsNotTheSameHost(): void
+    {
+        self::frontEndRequest('cms.example.test.evil.test');
+
+        try {
+            WordPressFrontEndGate::sendFrontEndToTheApp();
+            self::fail('redirected');
+        } catch (\SignInGateHalt) {
+        }
+
+        self::assertSame(302, $GLOBALS['__bcc_sig']['redirect'][1] ?? null);
     }
 }
