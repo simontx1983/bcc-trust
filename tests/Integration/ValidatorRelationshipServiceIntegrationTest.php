@@ -202,6 +202,20 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         self::assertSame('UNCLAIMED', ClaimRepository::resolveVerifiedOperatorForPageStrict(self::PAGE)['state']);
     }
 
+    public function testARevokeSpendsAStepUpBoundToThatRevoke(): void
+    {
+        $linkId = $this->link(self::OWNER)['link_id'];
+
+        foreach ([self::stepUp('cancel_link', self::OWNER), self::stepUp('revoke_owner', self::OTHER)] as $wrong) {
+            self::assertSame('step_up_invalid', Service::revokeOwnerByStaff(self::STAFF, self::PAGE, $linkId, 'linked_in_error', '', $wrong, self::CODE)['reason']);
+        }
+        self::assertSame(self::OWNER, ClaimRepository::resolveVerifiedOperatorForPageStrict(self::PAGE)['user_id'], 'still the owner');
+
+        $right = self::stepUp('revoke_owner', self::OWNER);
+        self::assertSame(['ok' => true], Service::revokeOwnerByStaff(self::STAFF, self::PAGE, $linkId, 'linked_in_error', '', $right, self::CODE));
+        self::assertNotNull(StepUps::find($right, self::STAFF)?->used_at, 'the step-up is spent');
+    }
+
     public function testStaffCannotRevokeOrCancelAWalletOwner(): void
     {
         $claimId = $this->seedOwner(self::OTHER, 'wallet');
