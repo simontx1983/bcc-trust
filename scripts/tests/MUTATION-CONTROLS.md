@@ -31,6 +31,20 @@ others are **manual**: run them when you change the code they cover.
 | `operator-resolver-meta-leg-mutation-controls.sh` | the verified-operator resolver's post_meta leg | yes | `mutation-controls-db` job |
 | `pr714-mutation-controls.sh` | NFT holder-community membership revocation fails safe (access control) | yes | `mutation-controls-revocation` job |
 
+⚠ **`pr714` control #2b was re-anchored on 2026-11-24 (F-472).** Its target
+read moved from `get_results()` + `guardReadOrThrow('getForUserOrThrow')` to
+`runRead($sql, <name>, $failClosed)` in `WalletRepository::getForUser()`, so
+the old anchor planted nothing. The script caught that itself — `control()`
+compares the file's md5 before and after and reports **broken** on a no-op,
+which is why this surfaced in CI instead of passing quietly. The mutant’s
+meaning is unchanged: force the third argument to `false`, so the repository
+logs and returns `[]` rather than throwing. Still killed by
+`testAFailedWalletQueryRemovesNobodyAndTheNextHealthyTickDoes`.
+
+⇒ Worth knowing when converting any read these scripts target: a control
+whose anchor is a GUARD CALL breaks when the guard moves inside the read.
+Anchor on the whole read where you can.
+
 ## Manual scripts: status
 
 Last verified **2026-11-12** against `main` at `5b0897d4`, one script at a
