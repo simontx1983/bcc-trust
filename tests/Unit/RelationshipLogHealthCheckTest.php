@@ -29,8 +29,10 @@ final class RelationshipLogHealthCheckTest extends TestCase
         require_once __DIR__ . '/../Stubs/relationship-log-health-stubs.php';
     }
 
-    public function testACleanAnchoredChainIsOkAndMailsNobody(): void
+    public function testACleanAnchoredChainIsOkAndMailsNobodyWhenExportedThisWeek(): void
     {
+        \HealthWorld::$options[H::HEAD_EXPORTED_AT] = time() - 6 * 86400;
+
         $result = H::run();
 
         self::assertSame(['ok', true, null], [$result['status'], $result['chain_ok'], $result['reason']]);
@@ -38,6 +40,38 @@ final class RelationshipLogHealthCheckTest extends TestCase
         self::assertSame([], \HealthWorld::$metrics);
         self::assertSame([], \HealthWorld::$anchored, 'the health check never writes the anchor');
         self::assertSame($result, H::lastResult(), 'kept for the health view');
+    }
+
+    public function testTheVerifiedHeadIsEmailedAtMostWeekly(): void
+    {
+        $first = H::run();
+        self::assertSame('ok', $first['status']);
+        self::assertSame(['admin1@example.org', 'admin2@example.org'], array_column(\HealthWorld::$mails, 0));
+        self::assertStringContainsString('weekly record', \HealthWorld::$mails[0][1]);
+        self::assertGreaterThan(0, \HealthWorld::$options[H::HEAD_EXPORTED_AT] ?? 0);
+
+        H::run();
+        self::assertCount(2, \HealthWorld::$mails, 'not again within the week');
+
+        \HealthWorld::$options[H::HEAD_EXPORTED_AT] = time() - 7 * 86400 - 1;
+        H::run();
+        self::assertCount(4, \HealthWorld::$mails, 'again after a week');
+    }
+
+    public function testAHeadNewerThanTheVerifiedOneIsNotExported(): void
+    {
+        \HealthWorld::$head = ['seq' => 4, 'row_hash' => 'bbbb'];
+
+        self::assertSame('ok', H::run()['status']);
+        self::assertSame([], \HealthWorld::$mails, 'only the head the walk verified is sent');
+        self::assertArrayNotHasKey(H::HEAD_EXPORTED_AT, \HealthWorld::$options);
+    }
+
+    public function testNoWeeklyRecordOnAWarningOrABreak(): void
+    {
+        \HealthWorld::$anchor = null;
+        H::run();
+        self::assertSame([], \HealthWorld::$mails);
     }
 
     public function testRowsWithoutAnAnchorAreAWarning(): void

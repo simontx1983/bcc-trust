@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Onchain\Repositories\ValidatorRelationshipLogRepository as Log;
 use BCC\Trust\Onchain\Support\RelationshipLogAnchor;
 
 if (!defined('ABSPATH')) {
@@ -16,7 +17,9 @@ if (!defined('ABSPATH')) {
  * Re-walks the chain (RelationshipLogVerifier) and stores the result for the
  * admin health view, with one of four statuses:
  *
- *  - ok:         the chain verified and the anchor is in place.
+ *  - ok:         the chain verified and the anchor is in place. At most
+ *                once a week, the verified head is emailed to every
+ *                administrator: a record of it outside the database.
  *  - warning:    the chain verified, but the log has rows and NO anchor (the
  *                option was deleted): rows removed from the end could no
  *                longer be seen. A metric, no email; the next append sets a
@@ -32,6 +35,11 @@ final class RelationshipLogHealthCheck
 {
     public const HOOK   = 'bcc_validator_relationship_log_health';
     public const RESULT = 'bcc_vrl_health';
+
+    /** When the verified head was last emailed to the administrators (unix time). */
+    public const HEAD_EXPORTED_AT = 'bcc_vrl_head_exported_at';
+
+    private const HEAD_EXPORT_INTERVAL = 7 * 86400;
 
     /** Verifier reasons that mean "could not finish", not "broken". */
     private const INCOMPLETE_REASONS = ['read_failed', 'row_limit_reached'];
@@ -80,9 +88,42 @@ final class RelationshipLogHealthCheck
                 . 'Entries verified before it: ' . $verdict['rows_checked'] . "\n\n"
                 . 'Nothing was changed. Investigate before any further validator relationship change.'
             );
+        } elseif ($verdict['head_seq'] > 0) {
+            self::exportHeadWeekly($verdict['head_seq']);
         }
 
         return $result;
+    }
+
+    /**
+     * At most once a week, after a clean walk, email every administrator the
+     * verified head (seq, row_hash): a copy kept OUTSIDE the database, so the
+     * history as it stood can be checked later against the log. Only the head
+     * the walk just verified is sent (a row appended since then waits for the
+     * next run). A failure here never changes the run's result.
+     */
+    private static function exportHeadWeekly(int $verifiedHeadSeq): void
+    {
+        try {
+            $last = (int) get_option(self::HEAD_EXPORTED_AT, 0);
+            if ($last > 0 && time() - $last < self::HEAD_EXPORT_INTERVAL) {
+                return;
+            }
+            $head = Log::head();
+            if ($head['seq'] !== $verifiedHeadSeq) {
+                return;
+            }
+            update_option(self::HEAD_EXPORTED_AT, time(), false);
+            self::mailAdmins(
+                'Validator relationship log: weekly record',
+                "The validator relationship history verified cleanly.\n\n"
+                . 'Entries: ' . $head['seq'] . "\n"
+                . 'Latest entry hash: ' . $head['row_hash'] . "\n\n"
+                . 'Keep this email: it records the history as it stood today.'
+            );
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] validator relationship log weekly record failed', ['error' => $e->getMessage()]);
+        }
     }
 
     /**
