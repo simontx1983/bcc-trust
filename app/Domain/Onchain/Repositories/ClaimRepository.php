@@ -638,16 +638,39 @@ class ClaimRepository {
     }
 
     /**
+     * The verified OPERATOR claims that make a user the owner of a page
+     * (both binding legs, exactly as the resolvers see them), with each
+     * claim's id and verification method. Read fail-closed. More than one
+     * distinct user here is the AMBIGUOUS state.
+     *
+     * @return list<array{claim_id: int, user_id: int, verification_method: string}>
+     * @throws RepositoryReadFailure
+     */
+    public static function ownerClaimsForPageStrict(int $pageId): array {
+        if ($pageId <= 0) {
+            return [];
+        }
+        $claims = [];
+        self::resolveOperators([$pageId], true, $claims);
+
+        return $claims[$pageId] ?? [];
+    }
+
+    /**
      * The resolution behind both variants. Reads go through runRead(), so a
      * failed read (including wpdb's pre-flush bail, which would otherwise
      * hand back a previous query's rows) is never read as rows: it answers
-     * no rows, or throws when $failClosed.
+     * no rows, or throws when $failClosed. $claims, when passed, receives
+     * the claim rows per page.
      *
      * @param array<int|string> $pageIds
+     * @param array<int, list<array{claim_id: int, user_id: int, verification_method: string}>>|null $claims
+     * @param-out array<int, list<array{claim_id: int, user_id: int, verification_method: string}>> $claims
      * @return array<int, array{state: string, user_id: int|null}>
      * @throws RepositoryReadFailure when $failClosed and a read fails
      */
-    private static function resolveOperators(array $pageIds, bool $failClosed): array {
+    private static function resolveOperators(array $pageIds, bool $failClosed, ?array &$claims = null): array {
+        $claims = [];
         if ($pageIds === []) {
             return [];
         }
@@ -669,9 +692,9 @@ class ClaimRepository {
         $wallets    = \BCC\Core\DB\DB::table('wallet_links');
         $ph         = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<object{page_id: string, user_id: string}> $rows */
+        /** @var list<object{page_id: string, user_id: string, claim_id: string, verification_method: string}> $rows */
         $rows = self::runRead($wpdb->prepare(
-            "SELECT w.post_id AS page_id, cl.user_id
+            "SELECT w.post_id AS page_id, cl.user_id, cl.id AS claim_id, cl.verification_method
              FROM {$table} cl
              JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
              JOIN {$wallets} w ON w.id = v.wallet_link_id
@@ -685,6 +708,7 @@ class ClaimRepository {
         $byPage = [];
         foreach ($rows as $row) {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+            $claims[(int) $row->page_id][] = ['claim_id' => (int) $row->claim_id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
         }
 
         // ── ⚠⚠ SECOND LEG: the post_meta page<->validator binding ──────────
@@ -739,9 +763,9 @@ class ClaimRepository {
             // AMBIGUOUS into RESOLVED, handing one of two rival claimants
             // sole authority. Bounded by the 100-id IN-list above instead.
             // CAST per the collation note on findMissingPlaceholderPage.
-            /** @var list<object{page_id: string, user_id: string}> $metaRows */
+            /** @var list<object{page_id: string, user_id: string, claim_id: string, verification_method: string}> $metaRows */
             $metaRows = self::runRead($wpdb->prepare(
-                "SELECT pm.post_id AS page_id, cl.user_id
+                "SELECT pm.post_id AS page_id, cl.user_id, cl.id AS claim_id, cl.verification_method
                  FROM {$wpdb->postmeta} pm
                  JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
                  JOIN {$table} cl ON cl.entity_id = v.id AND cl.entity_type = 'validator'
@@ -754,6 +778,7 @@ class ClaimRepository {
 
             foreach ($metaRows as $row) {
                 $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+                $claims[(int) $row->page_id][] = ['claim_id' => (int) $row->claim_id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
             }
         }
 

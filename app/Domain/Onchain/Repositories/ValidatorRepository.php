@@ -278,6 +278,32 @@ final class ValidatorRepository
      */
     public static function findFirstByPageId(int $pageId): ?object
     {
+        return self::firstByPageId($pageId, false);
+    }
+
+    /**
+     * FAIL-CLOSED {@see findFirstByPageId()}: a failed read throws instead
+     * of reading as "no validator". For relationship changes, which must not
+     * mistake "could not read" for "not a validator page".
+     *
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
+     * @throws RepositoryReadFailure
+     */
+    public static function findFirstByPageIdStrict(int $pageId): ?object
+    {
+        return self::firstByPageId($pageId, true);
+    }
+
+    /**
+     * The two-leg resolution behind both variants, read through runRead()
+     * (a failed read, including wpdb's pre-flush bail, is never read as a
+     * row): no row, or a throw when $failClosed.
+     *
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
+     * @throws RepositoryReadFailure when $failClosed and a read fails
+     */
+    private static function firstByPageId(int $pageId, bool $failClosed): ?object
+    {
         if ($pageId <= 0) {
             return null;
         }
@@ -287,8 +313,8 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
-        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
+        /** @var list<object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT v.id AS validator_id, c.slug AS chain_slug,
                     c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$table} v
@@ -297,17 +323,17 @@ final class ValidatorRepository
               WHERE w.post_id = %d
               LIMIT 1",
             $pageId
-        ));
+        ), __FUNCTION__, $failClosed);
 
-        if ($row !== null) {
-            return $row;
+        if ($rows !== []) {
+            return $rows[0];
         }
 
         // Fallback: placeholder pages minted by ValidatorPageMinter have
         // no wallet_link yet — the page<->validator binding lives in
         // post_meta until a real claim creates a wallet_link.
-        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
+        /** @var list<object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT v.id AS validator_id, c.slug AS chain_slug,
                     c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$wpdb->postmeta} pm
@@ -317,9 +343,9 @@ final class ValidatorRepository
                 AND pm.post_id  = %d
               LIMIT 1",
             $pageId
-        ));
+        ), __FUNCTION__, $failClosed);
 
-        return $row;
+        return $rows[0] ?? null;
     }
 
     /**
