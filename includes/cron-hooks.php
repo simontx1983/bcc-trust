@@ -62,6 +62,7 @@ return [
         'bcc_onchain_claim_reverify_sweep'      => ['interval' => 'bcc_weekly',                   'description' => 'F-14 weekly re-verify of verified validator/collection claims (report mode by default)'],
         'bcc_validator_page_owner_align_sweep'  => ['interval' => 'bcc_five_minutes',             'description' => 'validator page ownership align: bounded retry of pages still to align (PageOwnershipAligner::SWEEP_HOOK)'],
         'bcc_validator_step_up_purge'           => ['interval' => 'daily',                        'description' => 'validator staff step-ups: bounded purge of expired rows'],
+        'bcc_validator_relationship_log_health' => ['interval' => 'daily',                        'description' => 'validator relationship log: verify the hash chain, anchor it, alert admins on a break'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],

@@ -1148,6 +1148,9 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
     }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
+    }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
     // as the revoke sweep above: these two were scheduled only in
@@ -1310,6 +1313,13 @@ add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK, [\BCC\T
 add_action('bcc_validator_relationship_changed', static function (string $action, int $pageId, int $subjectUserId, ?int $actorId, int $linkId, array $replaced = []): void {
     \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onValidatorRelationshipChanged($action, $pageId, $subjectUserId, $actorId, $linkId, $replaced);
 }, 10, 6);
+add_action(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK, static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::run();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] relationship log health check failed', ['error' => $e->getMessage()]);
+    }
+});
 
 // Validator staff step-ups: purge rows that expired more than a day ago.
 add_action('bcc_validator_step_up_purge', static function (): void {
@@ -2496,6 +2506,9 @@ function bcc_trust_activate() {
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that
