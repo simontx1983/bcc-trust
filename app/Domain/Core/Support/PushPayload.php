@@ -177,7 +177,7 @@ final class PushPayload
             'body'  => $body,
             'url'   => $hallSlug !== ''
                 ? CardUrlMap::groupUrl(GroupType::Hall->value, $hallSlug)
-                : '/halls',
+                : CardUrlMap::HALLS_LIST_URL,
         ];
         if ($groupId > 0) {
             // Per-Hall OS-level tag — multiple Halls push concurrently
