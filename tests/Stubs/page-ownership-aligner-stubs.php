@@ -28,6 +28,8 @@ namespace {
         public static bool $existenceReadFails = false;
         /** @var list<string> advisory lock names held by someone else */
         public static array $busyLocks = [];
+        /** @var array<string, mixed> the request's option cache (get_option answers from it first) */
+        public static array $optionCache = [];
         public static bool $swapSkips = false;
         /** @var array<int, int> page => post_author */
         public static array $author = [];
@@ -52,6 +54,7 @@ namespace {
             self::$deletedUsers = [];
             self::$existenceReadFails = false;
             self::$busyLocks    = [];
+            self::$optionCache  = [];
             self::$swapSkips    = false;
             self::$author       = [];
             self::$options      = [];
@@ -94,12 +97,34 @@ namespace {
 
     function get_option(string $key, mixed $default = false): mixed
     {
+        if (array_key_exists($key, \AlignWorld::$optionCache)) {
+            return \AlignWorld::$optionCache[$key]; // the request-cached copy
+        }
         return \AlignWorld::$options[$key] ?? $default;
     }
 
     function update_option(string $key, mixed $value, mixed $autoload = null): bool
     {
-        \AlignWorld::$options[$key] = $value;
+        \AlignWorld::$options[$key]     = $value;
+        \AlignWorld::$optionCache[$key] = $value;
+        return true;
+    }
+
+    function wp_cache_delete(string $key, string $group = ''): bool
+    {
+        if ($group === 'options') {
+            unset(\AlignWorld::$optionCache[$key]);
+        }
+        return true;
+    }
+
+    function wp_cache_get(string $key, string $group = ''): mixed
+    {
+        return false;
+    }
+
+    function wp_cache_set(string $key, mixed $value, string $group = ''): bool
+    {
         return true;
     }
 }
