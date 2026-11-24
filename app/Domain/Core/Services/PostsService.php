@@ -397,7 +397,8 @@ final class PostsService
         int $groupId = 0,
         string $visibility = self::VISIBILITY_DEFAULT,
         string $hallFeed = self::HALL_FEED_MAIN,
-        int $targetPageId = 0
+        int $targetPageId = 0,
+        int $repostOfRootActId = 0
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -507,7 +508,23 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed, $groupId, $visibility);
+        // F-346 — a QUOTE repost is a status post that also carries
+        // `act_repost_id`. Routing it through THIS method rather than the
+        // repost endpoint is the whole point: the cap, the mention rules,
+        // the moderation hooks, the throttle and the §A3 event are all
+        // above this line already, and a second copy of them in a REST
+        // handler is what would drift.
+        //
+        // ⚠ 0 for an ordinary status, so every pre-existing caller is
+        // unchanged — `createSelfStatus` only touches `act_repost_id` when
+        // this is positive.
+        $result = PeepSoStatusWriter::createSelfStatus(
+            $authorId,
+            $trimmed,
+            $groupId,
+            $visibility,
+            $repostOfRootActId
+        );
         if ($result['ok'] === false) {
             return self::mapWriterError($result['reason']);
         }

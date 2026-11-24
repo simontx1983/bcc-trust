@@ -453,6 +453,158 @@ class FeedItemReportVisibility
     }
 
     /**
+     * Is this activity visible to EVERY member — the "public post" test
+     * F-346 reposting requires (user decision 2026-11-18, X's
+     * protected-post rule: only public posts can be reposted or quoted).
+     *
+     * ⚠⚠ THIS IS NOT "can the viewer see it". It takes no viewer, because
+     * the question is about the POST's own reach: reposting republishes to
+     * an audience the original author never chose, so the test has to be
+     * that nobody is excluded from the original in the first place.
+     *
+     * TWO HALVES, and both are needed:
+     *
+     * 1. GROUP. A group-tagged post must be marked `public_all` AND pass
+     *    the syndication gate. ⚠ `public_all` alone is NOT a free pass —
+     *    {@see syndicationAllows()} carries the rule and the reason, and
+     *    it fails CLOSED when the non-open group list cannot be proven.
+     *
+     * 2. §F-02. The EFFECTIVE level must be at most `ACCESS_MEMBERS` (20),
+     *    where effective is the STRICTER of the post's own `act_access`
+     *    and its AUTHOR's profile rung — the same "GREATEST" rule
+     *    `PeepSoActivityRepository::f02PostVisibilityClause()` applies in
+     *    SQL. 10 and 0 are public, 20 is every signed-in member, 30 is
+     *    friends-only and 40 is nobody; the last two are exactly what this
+     *    refuses.
+     *
+     * ⚠ `members_only` (20) PASSES, deliberately. It is the default post
+     * audience (§F-291), so refusing it would refuse almost everything,
+     * and every member can see it — which is what the decision asked for.
+     * Anonymous visibility (10) is a STRICTER test than the rule wanted.
+     *
+     * ⚠ FAILS CLOSED on an unreadable author rung: null from
+     * {@see ProfileAccess::canonicalProfileLevelFor()} means "cannot tell",
+     * and a post whose reach cannot be established is not republished.
+     *
+     * ⚠ THE RUNG SNAPPING IS NOT LOAD-BEARING FOR *THIS* COMPARISON, and
+     * saying so matters because an earlier version of this note claimed it
+     * was. Snapping sends 11-20 to 20 and 21-30 to 30, so it never moves a
+     * value ACROSS the <= 20 boundary: `raw <= 20` and `snapped <= 20` agree
+     * for every possible input, negatives included. Measured — a mutation
+     * reading the rung RAW survives this suite, and it survives because it
+     * is EQUIVALENT, not because the tests are thin.
+     *
+     * The call still goes through `canonicalProfileLevelFor()` for the two
+     * things that ARE load-bearing: it owns the PeepSo read and the
+     * null-means-cannot-tell contract above, and it hands back a canonical
+     * rung so that a future change to this comparison (an `=== 10`, say, or
+     * a check against `is_accessible_static()`, which has no `case 15`)
+     * cannot be bitten by an unvalidated column.
+     *
+     * ⛔⛔ THE CORE HELPER HAS LANDED, AND SWITCHING TO IT NAIVELY IS A
+     * FAIL-OPEN. This paragraph used to say "if a core helper for the
+     * effective level ever lands, delete this arithmetic and call it".
+     * bcc-core #145 landed exactly that — `BCC\Core\Feed\PostVisibilityLevel`
+     * — so the instruction is now live, and followed literally it
+     * REINTRODUCES the bug the refusal above exists to prevent:
+     *
+     *   PostVisibilityLevel::rung(?int $stored): int
+     *       $stored === null  →  PUBLIC
+     *
+     * and `effective()` passes straight through it. So handing the raw
+     * `usr_profile_acc` to the helper turns "I COULD NOT READ the author's
+     * rung" into "the author is PUBLIC" — the widest possible answer for
+     * the one input that must produce the narrowest. Core documents this on
+     * its own class ("NO ROW IS NOT COULD NOT READ"); the burden is on the
+     * CALLER, and this is the caller.
+     *
+     * ⭐ So the switch-over keeps the null check and replaces only the
+     * arithmetic:
+     *
+     *     $authorLevel = ProfileAccess::canonicalProfileLevelFor($authorId);
+     *     if ($authorLevel === null) {
+     *         return false;                        // ← MUST SURVIVE
+     *     }
+     *
+     *     return PostVisibilityLevel::effective(
+     *         (int) ($activity->act_access ?? 0),  // raw: rung() does the 0 → 10
+     *         $authorLevel                         // snapped: rung() is idempotent
+     *     ) <= PostVisibilityLevel::MEMBERS;
+     *
+     * That deletes `max()`, the `$postLevel <= 0` normalisation and the
+     * literal 20, and keeps the two things the helper deliberately does
+     * NOT own: the PeepSo read, and the contract that null means "cannot
+     * tell". `canonicalProfileLevelFor()` is what holds both.
+     *
+     * ⛔ The tempting one-liner —
+     * `PostVisibilityLevel::effective($activity->act_access, $rawUsrProfileAcc)`
+     * — is the wrong version, and it is wrong precisely because it looks
+     * like the tidy one.
+     *
+     * ⚠ SA6 owns the adoption and has this warning; it is restated here
+     * because this is where a maintainer reads it, and because the note
+     * that used to live in this spot is what would mislead them. Until
+     * then a test pins the arithmetic against the documented ladder, and
+     * `RepostPublicOnlyGateTest::testAnUnreadableAuthorRungRefuses` is the
+     * case that would go red on a naive switch.
+     *
+     * @param object $activity a PeepSoActivityRepository::getById() row
+     */
+    public static function isPublicToEveryMember(object $activity): bool
+    {
+        $postId   = (int) ($activity->act_external_id ?? 0);
+        $authorId = (int) ($activity->act_user_id ?? 0);
+        if ($postId <= 0 || $authorId <= 0) {
+            return false;
+        }
+
+        // 1. the group half.
+        //
+        // ⚠⚠ THROUGH PostGroupFactsRepository, NEVER get_post_meta(), and
+        // the difference is a fail-OPEN rather than a style preference.
+        // `update_meta_cache()` caches an EMPTY result for a FAILED meta
+        // read, so a group post whose meta could not be read comes back
+        // looking like a post with no group at all — and the no-group branch
+        // of this gate is the PERMISSIVE one. The failure would therefore
+        // publish a group post as repostable-by-anyone. F-461 moved this
+        // read onto the repository for exactly that reason: `forPost()`
+        // answers null when it cannot be trusted, and null refuses here.
+        //
+        // ⚠ ONE read for both halves of the group question (the
+        // `public_all` marker and the syndication gate), so they cannot
+        // disagree about the same post — and so a second probe cannot fail
+        // where the first succeeded.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
+            return false;
+        }
+
+        if ($groupFacts['group_ids'] !== []) {
+            if ($groupFacts['visibility'] !== self::GLOBAL_VISIBILITY) {
+                return false;
+            }
+            if (!self::syndicationAllows($groupFacts)) {
+                return false;
+            }
+        }
+
+        // 2. the §F-02 half. `act_access <= 0` normalises to 10 exactly as
+        // the SQL does — BCC's own writer stores 0, and PeepSo treats 0 as
+        // public.
+        $postLevel = (int) ($activity->act_access ?? 0);
+        if ($postLevel <= 0) {
+            $postLevel = 10;
+        }
+
+        $authorLevel = ProfileAccess::canonicalProfileLevelFor($authorId);
+        if ($authorLevel === null) {
+            return false;
+        }
+
+        return max($postLevel, $authorLevel) <= 20;
+    }
+
+    /**
      * May a `public_all` group post be served OUTSIDE its group right now?
      *
      * ⚠ MIRROR of the syndication tail of bcc-core

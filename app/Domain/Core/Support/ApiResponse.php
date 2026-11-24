@@ -115,4 +115,58 @@ final class ApiResponse
             '_meta' => ['version' => self::VERSION],
         ], $status);
     }
+
+    /**
+     * Forward a SERVICE's error array as an envelope, mapping its code to an
+     * HTTP status.
+     *
+     * The domain services answer `['error' => 'bcc_*', 'message' => '...']`
+     * with no status, because a status is a transport concern. Every REST
+     * caller therefore needs this translation, and before this it was a
+     * PRIVATE copy inside each endpoint that needed it.
+     *
+     * ⚠ The map is PostsEndpoint's, which is the SUPERSET of the two that
+     * existed. It is deliberately NOT applied to the other two copies in
+     * this PR: `BlogCoverImageEndpoint::statusForCode()` is a strict subset,
+     * so routing it here would change its answer for
+     * `bcc_permission_denied` and `bcc_feature_disabled` from 400 to 403 —
+     * a real behaviour change to an endpoint this PR has no business
+     * touching. Migrating those two is a follow-up of its own.
+     *
+     * @param array<string, mixed> $result a service result carrying 'error'
+     */
+    public static function fromServiceError(array $result): WP_REST_Response
+    {
+        $code    = (string) ($result['error'] ?? 'bcc_unavailable');
+        $message = (string) ($result['message'] ?? '');
+        /** @var array<string, mixed>|null $data */
+        $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
+
+        return self::error($code, $message, self::statusForServiceCode($code), $data);
+    }
+
+    /**
+     * Code → HTTP status for a domain-service error.
+     *
+     * `default => 400` is deliberate and matches what the endpoints already
+     * did: an unrecognised code is a caller problem until proven otherwise,
+     * and answering 500 for one would turn a new service error code into a
+     * paged alert.
+     */
+    public static function statusForServiceCode(string $code): int
+    {
+        return match ($code) {
+            'bcc_unauthorized'           => 401,
+            'bcc_forbidden'              => 403,
+            'bcc_permission_denied'      => 403,
+            'bcc_not_found'              => 404,
+            'bcc_invalid_request'        => 400,
+            'bcc_invalid_mention_target' => 400,
+            'bcc_too_many_mentions'      => 400,
+            'bcc_rate_limited'           => 429,
+            'bcc_unavailable'            => 503,
+            'bcc_feature_disabled'       => 403,
+            default                      => 400,
+        };
+    }
 }
