@@ -42,6 +42,7 @@
 namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Repositories\UserMetaRepository;
+use BCC\Trust\Core\Repositories\DbWriteCheck;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -185,7 +186,8 @@ final class PrivacySettings
      */
     public static function readAll(int $userId): array
     {
-        $flags = self::flagsOrClosed($userId);
+        // `discovery_optout` answers as search applies it (searchOptOut()).
+        $flags = self::flagsOrClosed($userId, true);
 
         $out = [];
         foreach (self::ALL_KEYS as $key) {
@@ -231,6 +233,10 @@ final class PrivacySettings
             if (!in_array($key, self::ALL_KEYS, true)) {
                 continue;
             }
+            if ($key === 'discovery_optout') {
+                self::writeSearchOptOut($userId, $value);
+                continue;
+            }
             // Store as "1" / "0" strings (matches WP's boolean meta convention
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
@@ -246,6 +252,37 @@ final class PrivacySettings
         if ($written !== []) {
             do_action('bcc_privacy_settings_changed', $userId, $written);
         }
+    }
+
+    /**
+     * Write the hide-from-search flag: `discovery_optout` here, `hide_from_search`
+     * on /me/profile-prefs. Both endpoints write it through this one method.
+     *
+     * Switching it OFF also writes the legacy opt-out '0'. While the legacy
+     * key is still read ({@see legacyOptOutStillRead()}) a legacy on row
+     * would keep the member out of search, and fold_discovery_optout_v1
+     * copies a legacy on row into the flag. With both at '0' the member is
+     * listed whatever the fold's state. Switching it ON leaves the legacy
+     * key alone: the flag alone hides.
+     *
+     * Each write is checked on its own ({@see DbWriteCheck}), because wpdb
+     * clears last_error on every statement: one check around both would read
+     * a failed first write as saved once the second succeeded. It stops at
+     * the first failure and answers whether every write landed. If one
+     * fails the member stays hidden (one on row is enough).
+     */
+    public static function writeSearchOptOut(int $userId, bool $hidden): bool
+    {
+        $flagWritten = DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::HIDE_FROM_LISTING_META, $hidden ? '1' : '0')
+        );
+        if (!$flagWritten || $hidden) {
+            return $flagWritten;
+        }
+
+        return DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::LEGACY_DISCOVERY_OPTOUT_META, '0')
+        );
     }
 
     /** Flag reads this request that could not be trusted and read as hidden. */
@@ -291,6 +328,8 @@ final class PrivacySettings
      * ON), the direction that hides rather than leaks. WordPress's
      * update_user_meta() rewrites every row, so they only diverge when
      * something called add_user_meta() directly.
+     *
+     * `discovery_optout` answers as search applies it: {@see searchOptOut()}.
      */
     public static function flagOrUnknown(int $userId, string $key): ?bool
     {
@@ -302,40 +341,86 @@ final class PrivacySettings
         if (!in_array($metaKey, $keys, true)) {
             $keys = [$metaKey];
         }
+        $isSearchOptOut = $key === 'discovery_optout';
+        if ($isSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
 
         $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             return null;
         }
 
-        return self::strictest($values[$userId][$metaKey] ?? []);
+        $byKey = $values[$userId] ?? [];
+
+        return $isSearchOptOut ? self::searchOptOut($byKey) : self::strictest($byKey[$metaKey] ?? []);
     }
 
     /**
      * Every public flag for one member, read once. An unreadable set reads
      * as ALL HIDDEN, as {@see flag()} does.
      *
+     * `$withSearchOptOut` also reads the legacy opt-out, so that
+     * `discovery_optout` answers as search applies it
+     * ({@see searchOptOut()}). Without it, as for {@see readProfile()},
+     * which never returns that key, the read stays the ALL_KEYS one that
+     * {@see prime()} batches.
+     *
      * @return array<string, bool> public key => hidden
      */
-    private static function flagsOrClosed(int $userId): array
+    private static function flagsOrClosed(int $userId, bool $withSearchOptOut = false): array
     {
         if ($userId <= 0) {
             return array_fill_keys(self::ALL_KEYS, false);
         }
 
-        $values = UserMetaRepository::valuesOrUnknown([$userId], self::metaKeys());
+        $keys = self::metaKeys();
+        if ($withSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
+        $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             self::$unreadReads++;
 
             return array_fill_keys(self::ALL_KEYS, true);
         }
 
+        $byKey = $values[$userId] ?? [];
         $flags = [];
         foreach (self::ALL_KEYS as $key) {
-            $flags[$key] = self::strictest($values[$userId][self::metaKey($key)] ?? []);
+            $flags[$key] = self::strictest($byKey[self::metaKey($key)] ?? []);
+        }
+        if ($withSearchOptOut) {
+            $flags['discovery_optout'] = self::searchOptOut($byKey);
         }
 
         return $flags;
+    }
+
+    /**
+     * `discovery_optout` (= /me/profile-prefs `hide_from_search`) as search
+     * applies it: the per-member form of
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}.
+     * Hidden when any row of the one flag reads as on, or, until the F-257
+     * fold has completed ({@see legacyOptOutStillRead()}), any row of the
+     * legacy opt-out does. So the setting a member is shown is what search
+     * does to them (F-519).
+     *
+     * Rows match exactly as the SQL matches them,
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn()}:
+     * the same set, nothing trimmed. The fold-done option is read only when
+     * the one flag is off and a legacy row is on.
+     *
+     * @param array<string, list<string>> $byKey
+     */
+    private static function searchOptOut(array $byKey): bool
+    {
+        if (\BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::HIDE_FROM_LISTING_META] ?? [])) {
+            return true;
+        }
+
+        return \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::LEGACY_DISCOVERY_OPTOUT_META] ?? [])
+            && self::legacyOptOutStillRead();
     }
 
     /** @param list<string> $rawValues */

@@ -60,7 +60,10 @@
  *                               user_meta, "1"/"0". PeepSo's user-search
  *                               joins on this key — "1" excludes the user
  *                               from the directory and member search results
- *                               (direct profile links still work).
+ *                               (direct profile links still work). READ as
+ *                               search applies it (F-519): any row on, plus
+ *                               the legacy opt-out until the F-257 fold is
+ *                               done; see PrivacySettings::flag().
  *   - default_post_audience  → `peepso_last_used_post_privacy` user_meta, int
  *                               10/20/40 matching PeepSo::ACCESS_*. Read by
  *                               PeepSo's posting UI to default the audience
@@ -529,7 +532,13 @@ final class MyProfilePrefsEndpoint
         }
         foreach ($meta as $metaKey => $value) {
             $field = self::META_FIELDS[$metaKey];
-            if (!self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value))) {
+            // F-519: hide_from_search goes through its one writer, which also
+            // writes the legacy opt-out '0' when it is switched off, and
+            // checks each of its writes on its own.
+            $ok = $metaKey === PrivacySettings::HIDE_FROM_LISTING_META
+                ? PrivacySettings::writeSearchOptOut($userId, $value === '1')
+                : self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value));
+            if (!$ok) {
                 return self::writeFailed($userId, $field, $saved);
             }
             $saved[] = $field;
@@ -632,7 +641,11 @@ final class MyProfilePrefsEndpoint
             ),
             'hide_birthday_year'    => self::flag($userId, 'peepso_hide_birthday_year', false),
             'hide_online'           => self::flag($userId, 'peepso_hide_online_status', false),
-            'hide_from_search'      => self::flag($userId, 'peepso_is_hide_profile_from_user_listing', false),
+            // F-519: the SAME reader as /me/privacy `discovery_optout`, its
+            // alias, so the switch shows what search does: any row that
+            // reads as on, and the legacy opt-out until the F-257 fold is
+            // done. Unreadable reads as on (hidden), as /me/privacy does.
+            'hide_from_search'      => PrivacySettings::flag($userId, 'discovery_optout'),
             // ⚠ POST_AUDIENCE_TOKENS, matching this field's WRITE path.
             // Read and write stay pinned to the SAME map, so a client can
             // never GET a token here that the write path would refuse.
