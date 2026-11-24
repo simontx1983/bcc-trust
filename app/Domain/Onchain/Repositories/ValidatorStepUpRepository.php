@@ -16,14 +16,17 @@ if (!defined('ABSPATH')) {
  *    and under the cap. It runs BEFORE a code is compared, and on its own
  *    (it commits even when the action later rolls back), so wrong codes are
  *    always counted.
+ *  - {@see markCodeVerified()} records that the right code was entered.
  *  - {@see consume()} sets used_at only when EVERY binding column matches
- *    and the step-up is verified, unused and unexpired. It runs inside the
- *    action's transaction, so the step-up is spent exactly when the change
- *    commits.
+ *    and the step-up is verified, unused and unexpired, and, when it carries
+ *    a code, only once that code was verified. It runs inside the action's
+ *    transaction, so the step-up is spent exactly when the change commits.
+ *  - {@see replaceCode()} never extends a step-up past MAX_LIFETIME_SECONDS
+ *    from its creation, and clears the code verification.
  *
  * Times are UTC strings computed by the caller in PHP, never MySQL NOW().
  *
- * @phpstan-type StepUpRow object{id: string, user_id: numeric-string, action: string, page_id: numeric-string, target_user_id: numeric-string, role: string, code_hash: string|null, credential_verified: numeric-string, attempts: numeric-string, created_at: string, expires_at: string, resend_after: string|null, used_at: string|null}
+ * @phpstan-type StepUpRow object{id: string, user_id: numeric-string, action: string, page_id: numeric-string, target_user_id: numeric-string, role: string, code_hash: string|null, credential_verified: numeric-string, attempts: numeric-string, created_at: string, expires_at: string, resend_after: string|null, used_at: string|null, code_verified_at: string|null}
  *
  * @package BCC\Trust\Onchain\Repositories
  */
@@ -34,11 +37,14 @@ final class ValidatorStepUpRepository
     /** Wrong codes (or code checks) a step-up survives. */
     public const MAX_ATTEMPTS = 5;
 
+    /** A step-up never lives longer than this from its creation, resends included. */
+    public const MAX_LIFETIME_SECONDS = 1800;
+
     /** Most expired rows one purge deletes. */
     public const PURGE_BATCH = 500;
 
     private const COLUMNS = 'id, user_id, action, page_id, target_user_id, role, code_hash, credential_verified,
-                             attempts, created_at, expires_at, resend_after, used_at';
+                             attempts, created_at, expires_at, resend_after, used_at, code_verified_at';
 
     public static function table(): string
     {
@@ -115,8 +121,33 @@ final class ValidatorStepUpRepository
     }
 
     /**
-     * Spend the step-up, atomically, only for its EXACT binding. Must run
-     * inside the action's transaction.
+     * Record that the right code was entered, atomically, while the
+     * code-bearing step-up is live, unverified and within the attempt cap.
+     * False: it is dead, password-only, already verified or not this user's.
+     *
+     * @throws \RuntimeException when the update itself fails
+     */
+    public static function markCodeVerified(string $id, int $userId, string $nowUtc): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return self::changedOne($wpdb->prepare(
+            "UPDATE {$table} SET code_verified_at = %s
+              WHERE id = %s AND user_id = %d AND code_hash IS NOT NULL AND code_verified_at IS NULL
+                AND used_at IS NULL AND expires_at > %s AND attempts <= %d",
+            $nowUtc,
+            $id,
+            $userId,
+            $nowUtc,
+            self::MAX_ATTEMPTS
+        ));
+    }
+
+    /**
+     * Spend the step-up, atomically, only for its EXACT binding and, when it
+     * carries a code, only once that code was verified. Must run inside the
+     * action's transaction.
      *
      * @param array{id: string, user_id: int, action: string, page_id: int, target_user_id: int, role: string} $binding
      * @throws \RuntimeException when the update itself fails
@@ -129,7 +160,8 @@ final class ValidatorStepUpRepository
         return self::changedOne($wpdb->prepare(
             "UPDATE {$table} SET used_at = %s
               WHERE id = %s AND user_id = %d AND action = %s AND page_id = %d AND target_user_id = %d AND role = %s
-                AND credential_verified = 1 AND used_at IS NULL AND expires_at > %s AND attempts <= %d",
+                AND credential_verified = 1 AND (code_hash IS NULL OR code_verified_at IS NOT NULL)
+                AND used_at IS NULL AND expires_at > %s AND attempts <= %d",
             $nowUtc,
             $binding['id'],
             $binding['user_id'],
@@ -144,7 +176,9 @@ final class ValidatorStepUpRepository
 
     /**
      * Replace the code of a live, code-bearing step-up once its resend
-     * window has passed. Attempts are NOT reset.
+     * window has passed. Attempts are NOT reset; the code verification is
+     * (the new code must be entered), and the new expiry is capped at
+     * created_at + MAX_LIFETIME_SECONDS.
      *
      * @throws \RuntimeException when the update itself fails
      */
@@ -154,11 +188,14 @@ final class ValidatorStepUpRepository
         $table = self::table();
 
         return self::changedOne($wpdb->prepare(
-            "UPDATE {$table} SET code_hash = %s, expires_at = %s, resend_after = %s
+            "UPDATE {$table}
+                SET code_hash = %s, code_verified_at = NULL,
+                    expires_at = LEAST(CAST(%s AS DATETIME), DATE_ADD(created_at, INTERVAL %d SECOND)), resend_after = %s
               WHERE id = %s AND user_id = %d AND code_hash IS NOT NULL AND used_at IS NULL
                 AND expires_at > %s AND attempts < %d AND (resend_after IS NULL OR resend_after <= %s)",
             $codeHash,
             $expiresAt,
+            self::MAX_LIFETIME_SECONDS,
             $resendAfter,
             $id,
             $userId,

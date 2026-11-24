@@ -23,9 +23,14 @@ if (!defined('ABSPATH')) {
  *    target and role, lives 10 minutes, and is returned only as an opaque id.
  * 2. {@see checkCode()}: BEFORE the action's transaction, one attempt is
  *    counted atomically (5 at most) and the code compared with hash_equals.
- *    The count commits on its own, so a wrong code is never rolled back.
+ *    The count commits on its own, so a wrong code is never rolled back. The
+ *    right code is RECORDED on the row (code_verified_at).
  * 3. {@see consumeInTransaction()}: INSIDE the action's transaction, the
- *    step-up is spent only for its exact binding.
+ *    step-up is spent only for its exact binding and, when it carries a
+ *    code, only once that code was recorded as verified. A caller that skips
+ *    checkCode() (or ignores its answer) cannot spend it.
+ *
+ * A resend never extends a step-up past 30 minutes from its start.
  *
  * The code is stored only as HMAC-SHA256 under an HKDF-derived key, bound to
  * the step-up id; it is never logged or returned. Starting is capped per
@@ -141,13 +146,18 @@ final class ValidatorStepUpService
             return self::rateLimited('validator_step_up_mail:' . $actorId, self::MAIL_LIMIT, self::MAIL_WINDOW);
         }
 
-        $now  = time();
+        $now     = time();
+        $created = strtotime((string) $row->created_at . ' UTC');
+        $expires = min($now + self::TTL_SECONDS, ($created === false ? $now : $created) + StepUps::MAX_LIFETIME_SECONDS);
+        if ($expires <= $now) {
+            return self::fail('step_up_expired', 403);
+        }
         $code = self::newCode();
         if (!StepUps::replaceCode(
             $stepUpId,
             $actorId,
             self::codeHash($stepUpId, $code),
-            gmdate('Y-m-d H:i:s', $now + self::TTL_SECONDS),
+            gmdate('Y-m-d H:i:s', $expires),
             gmdate('Y-m-d H:i:s', $now + self::RESEND_SECONDS),
             gmdate('Y-m-d H:i:s', $now)
         )) {
@@ -155,12 +165,13 @@ final class ValidatorStepUpService
         }
         self::mailCode($actorId, $code, (string) $row->action);
 
-        return ['ok' => true, 'expires_in' => self::TTL_SECONDS, 'resend_after' => self::RESEND_SECONDS];
+        return ['ok' => true, 'expires_in' => $expires - $now, 'resend_after' => self::RESEND_SECONDS];
     }
 
     /**
      * Check the code of a step-up, BEFORE the action's transaction. One
-     * attempt is counted first, atomically, and commits on its own.
+     * attempt is counted first, atomically, and commits on its own. The
+     * right code is recorded on the row; consume() requires that record.
      *
      * @return string|null null when the action may proceed; otherwise the
      *   error key: step_up_invalid | step_up_expired | code_invalid
@@ -192,13 +203,22 @@ final class ValidatorStepUpService
             self::recordFailure($actorId, (string) $row->action, (int) $row->page_id, (int) $row->target_user_id, 'code_invalid');
             return 'code_invalid';
         }
+        if (!StepUps::markCodeVerified($stepUpId, $actorId, $now)) {
+            // Already recorded by an earlier check of this code (a retried
+            // action) is fine; a step-up that died in between is not.
+            $row = StepUps::find($stepUpId, $actorId);
+            if ($row === null || $row->code_verified_at === null || $row->used_at !== null) {
+                return 'step_up_invalid';
+            }
+        }
 
         return null;
     }
 
     /**
      * Spend the step-up for its EXACT binding. Call INSIDE the action's
-     * transaction, after checkCode() passed.
+     * transaction, after checkCode() passed: a code-bearing step-up whose
+     * code was never recorded as verified is refused here.
      */
     public static function consumeInTransaction(int $actorId, string $stepUpId, string $action, int $pageId, int $targetUserId, string $role): bool
     {

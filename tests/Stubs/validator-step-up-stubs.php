@@ -165,11 +165,12 @@ namespace BCC\Trust\Onchain\Repositories {
         final class ValidatorStepUpRepository
         {
             public const MAX_ATTEMPTS = 5;
+            public const MAX_LIFETIME_SECONDS = 1800;
 
             /** @param array<string, mixed> $row */
             public static function create(array $row): void
             {
-                \StepUpWorld::$rows[$row['id']] = (object) ($row + ['attempts' => 0, 'used_at' => null, 'credential_verified' => 1]);
+                \StepUpWorld::$rows[$row['id']] = (object) ($row + ['attempts' => 0, 'used_at' => null, 'credential_verified' => 1, 'code_verified_at' => null]);
             }
 
             public static function find(string $id, int $userId): ?object
@@ -188,11 +189,24 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
+            public static function markCodeVerified(string $id, int $userId, string $now): bool
+            {
+                $row = self::find($id, $userId);
+                if ($row === null || $row->code_hash === null || $row->code_verified_at !== null || $row->used_at !== null
+                    || strcmp((string) $row->expires_at, $now) <= 0 || $row->attempts > self::MAX_ATTEMPTS
+                ) {
+                    return false;
+                }
+                $row->code_verified_at = $now;
+                return true;
+            }
+
             /** @param array<string, mixed> $b */
             public static function consume(array $b, string $now): bool
             {
                 $row = self::find((string) $b['id'], (int) $b['user_id']);
                 if ($row === null || $row->used_at !== null || strcmp((string) $row->expires_at, $now) <= 0
+                    || ($row->code_hash !== null && $row->code_verified_at === null)
                     || $row->action !== $b['action'] || (int) $row->page_id !== $b['page_id']
                     || (int) $row->target_user_id !== $b['target_user_id'] || $row->role !== $b['role']
                 ) {
@@ -208,9 +222,11 @@ namespace BCC\Trust\Onchain\Repositories {
                 if ($row === null || $row->code_hash === null || ($row->resend_after !== null && strcmp((string) $row->resend_after, $now) > 0)) {
                     return false;
                 }
-                $row->code_hash    = $hash;
-                $row->expires_at   = $expires;
-                $row->resend_after = $resendAfter;
+                $cap                   = gmdate('Y-m-d H:i:s', (int) strtotime((string) $row->created_at . ' UTC') + self::MAX_LIFETIME_SECONDS);
+                $row->code_hash        = $hash;
+                $row->code_verified_at = null;
+                $row->expires_at       = strcmp($expires, $cap) < 0 ? $expires : $cap;
+                $row->resend_after     = $resendAfter;
                 return true;
             }
 

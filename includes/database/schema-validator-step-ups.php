@@ -15,7 +15,11 @@
  *    is never stored, logged or returned.
  *  - attempts: counted atomically BEFORE a code is compared; at the cap the
  *    step-up is dead.
- *  - expires_at / resend_after / used_at: UTC, computed in PHP.
+ *  - code_verified_at: set (by a conditional UPDATE) only when the right
+ *    code was entered; a code-bearing step-up cannot be consumed without it.
+ *    A resend clears it.
+ *  - expires_at / resend_after / used_at: UTC, computed in PHP. A resend
+ *    never extends a step-up past created_at + 30 minutes.
  *
  * Rows expire after minutes and a bounded cron purge deletes them.
  *
@@ -46,6 +50,7 @@ function bcc_trust_create_validator_step_ups_table(): void {
         expires_at DATETIME NOT NULL,
         resend_after DATETIME NULL,
         used_at DATETIME NULL,
+        code_verified_at DATETIME NULL,
         PRIMARY KEY (id),
         KEY idx_user_created (user_id, created_at),
         KEY idx_expires (expires_at)

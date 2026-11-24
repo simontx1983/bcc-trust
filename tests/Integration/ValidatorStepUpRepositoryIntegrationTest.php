@@ -13,8 +13,10 @@ use PHPUnit\Framework\TestCase;
 /**
  * The step-up table's conditional UPDATEs on a real engine: an attempt is
  * counted only while the step-up is live and under the cap; a consume needs
- * EVERY binding column and works once; a resend respects its window; an
- * expired row is dead; the purge is bounded to expired rows.
+ * EVERY binding column, a verified code (when it carries one) and works
+ * once; a resend respects its window, clears the verification and never
+ * extends past 30 minutes; an expired row is dead; the purge is bounded to
+ * expired rows.
  */
 #[Group('integration')]
 #[Group('mariadb')]
@@ -47,11 +49,11 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         return gmdate('Y-m-d H:i:s', time() + $offset);
     }
 
-    private static function make(string $id, int $ttl = 600, ?string $resendAfter = null): void
+    private static function make(string $id, int $ttl = 600, ?string $resendAfter = null, bool $withCode = true): void
     {
         StepUps::create([
             'id' => $id, 'user_id' => self::STAFF, 'action' => 'link_owner', 'page_id' => 501,
-            'target_user_id' => 900, 'role' => 'owner', 'code_hash' => str_repeat('c', 64),
+            'target_user_id' => 900, 'role' => 'owner', 'code_hash' => $withCode ? str_repeat('c', 64) : null,
             'created_at' => self::at(0), 'expires_at' => self::at($ttl), 'resend_after' => $resendAfter,
         ]);
     }
@@ -72,7 +74,42 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         }
         self::assertFalse(StepUps::countAttempt($id, self::STAFF, self::at(0)), 'the cap');
         self::assertSame('5', (string) StepUps::find($id, self::STAFF)?->attempts);
-        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)), 'the last allowed attempt can still be the right one');
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)), 'the last allowed attempt can still be the right one');
+        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
+    }
+
+    public function testACodeStepUpIsNeverConsumedWithoutAVerifiedCode(): void
+    {
+        $id = str_repeat('7', 32);
+        self::make($id);
+        StepUps::countAttempt($id, self::STAFF, self::at(0));
+
+        self::assertFalse(StepUps::consume(self::binding($id), self::at(0)), 'attempts under the cap, but no verified code');
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(1)), 'recorded once');
+        self::assertNotNull(StepUps::find($id, self::STAFF)?->code_verified_at);
+        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(2)), 'a spent step-up');
+    }
+
+    public function testAPasswordOnlyStepUpNeedsNoCodeAndCannotBeMarked(): void
+    {
+        $id = str_repeat('8', 32);
+        self::make($id, 600, null, false);
+
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(0)), 'no code to verify');
+        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
+    }
+
+    public function testADeadStepUpCannotBeMarked(): void
+    {
+        $expired = str_repeat('9', 32);
+        self::make($expired, -1);
+        self::assertFalse(StepUps::markCodeVerified($expired, self::STAFF, self::at(0)), 'expired');
+
+        $other = str_repeat('6', 32);
+        self::make($other);
+        self::assertFalse(StepUps::markCodeVerified($other, self::STAFF + 1, self::at(0)), 'another user');
     }
 
     public function testAConsumeNeedsEveryBindingColumnAndWorksOnce(): void
@@ -86,6 +123,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         ] as $override) {
             self::assertFalse(StepUps::consume($override + self::binding($id), self::at(0)), json_encode($override) ?: '');
         }
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
         self::assertFalse(StepUps::consume(self::binding($id), self::at(0)), 'single use');
         // A later consume would rewrite used_at to a NEW value (a changed
@@ -99,6 +137,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         global $wpdb;
         $id = str_repeat('c', 32);
         self::make($id);
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
 
         $wpdb->query('START TRANSACTION');
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
@@ -127,6 +166,25 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         self::assertTrue(StepUps::replaceCode($id, self::STAFF, str_repeat('9', 64), self::at(600), self::at(120), self::at(61)));
         $row = StepUps::find($id, self::STAFF);
         self::assertSame([str_repeat('9', 64), '1'], [$row?->code_hash, (string) $row?->attempts]);
+    }
+
+    public function testAResendClearsTheVerificationAndIsCappedAtThirtyMinutes(): void
+    {
+        $id      = str_repeat('5', 32);
+        $created = time() - 1700; // one clock read: no second-boundary flake
+        StepUps::create([
+            'id' => $id, 'user_id' => self::STAFF, 'action' => 'link_owner', 'page_id' => 501,
+            'target_user_id' => 900, 'role' => 'owner', 'code_hash' => str_repeat('c', 64),
+            'created_at' => gmdate('Y-m-d H:i:s', $created), 'expires_at' => gmdate('Y-m-d H:i:s', $created + 1790),
+            'resend_after' => gmdate('Y-m-d H:i:s', $created),
+        ]);
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
+
+        self::assertTrue(StepUps::replaceCode($id, self::STAFF, str_repeat('9', 64), gmdate('Y-m-d H:i:s', $created + 2300), self::at(60), self::at(0)));
+        $row = StepUps::find($id, self::STAFF);
+        self::assertNull($row?->code_verified_at, 'the new code must be entered');
+        self::assertSame(gmdate('Y-m-d H:i:s', $created + 1800), $row?->expires_at, 'created_at + 30 min, not now + 10 min');
+        self::assertFalse(StepUps::consume(self::binding($id), self::at(0)));
     }
 
     public function testThePurgeDeletesOnlyExpiredRows(): void

@@ -139,6 +139,45 @@ final class ValidatorStepUpServiceTest extends TestCase
         }
 
         self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code), 'even the right code, after the cap');
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'), 'and it cannot be spent');
+    }
+
+    /**
+     * The store, not the caller, proves the code was checked: a caller that
+     * skips checkCode() or ignores a wrong-code answer cannot spend a
+     * code-bearing step-up, even with attempts left under the cap.
+     */
+    public function testACodeStepUpIsNeverSpentWithoutAVerifiedCode(): void
+    {
+        [$id, $code] = self::startLink();
+        $wrong       = $code === '000000' ? '111111' : '000000';
+
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'), 'checkCode() skipped');
+        self::assertSame('code_invalid', S::checkCode(self::STAFF, $id, $wrong));
+        self::assertSame('code_invalid', S::checkCode(self::STAFF, $id, $wrong));
+        self::assertSame(2, \StepUpWorld::$rows[$id]->attempts, 'under the cap');
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'), 'a wrong-code answer ignored');
+
+        self::assertNull(S::checkCode(self::STAFF, $id, $code));
+        self::assertNotNull(\StepUpWorld::$rows[$id]->code_verified_at, 'the right code is recorded on the row');
+        self::assertTrue(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+    }
+
+    public function testTheRightCodeCheckedAgainStillPassesForARetriedAction(): void
+    {
+        [$id, $code] = self::startLink();
+
+        self::assertNull(S::checkCode(self::STAFF, $id, $code));
+        self::assertNull(S::checkCode(self::STAFF, $id, $code), 'already recorded: a retry after a transient failure');
+        self::assertTrue(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+        self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code), 'spent');
+    }
+
+    public function testAPasswordOnlyStepUpNeedsNoCode(): void
+    {
+        $r = S::start(self::request(), self::STAFF, 'remove_team_member', 501, 900, 'representative');
+
+        self::assertTrue(S::consumeInTransaction(self::STAFF, $r['step_up_id'], 'remove_team_member', 501, 900, 'representative'));
     }
 
     public function testAnExpiredStepUpIsReportedAndLogged(): void
@@ -161,7 +200,8 @@ final class ValidatorStepUpServiceTest extends TestCase
 
     public function testConsumeNeedsTheExactBindingAndWorksOnce(): void
     {
-        [$id] = self::startLink();
+        [$id, $code] = self::startLink();
+        self::assertNull(S::checkCode(self::STAFF, $id, $code));
 
         self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'revoke_owner', 501, 900, 'owner'), 'another action');
         self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 502, 900, 'owner'), 'another page');
@@ -185,6 +225,38 @@ final class ValidatorStepUpServiceTest extends TestCase
             self::assertSame('code_invalid', S::checkCode(self::STAFF, $id, $code), 'the old code is gone');
         }
         self::assertNull(S::checkCode(self::STAFF, $id, $newCode));
+    }
+
+    public function testAResendClearsTheVerificationSoTheNewCodeMustBeEntered(): void
+    {
+        [$id, $code] = self::startLink();
+        self::assertNull(S::checkCode(self::STAFF, $id, $code));
+
+        \StepUpWorld::$rows[$id]->resend_after = gmdate('Y-m-d H:i:s', time() - 1);
+        self::assertTrue(S::resend(self::STAFF, $id)['ok']);
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'), 'the old verification is gone');
+
+        self::assertNull(S::checkCode(self::STAFF, $id, end(\StepUpWorld::$mails)[1]));
+        self::assertTrue(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+    }
+
+    public function testResendsNeverExtendAStepUpPastThirtyMinutes(): void
+    {
+        [$id] = self::startLink();
+        $row               = \StepUpWorld::$rows[$id];
+        $row->resend_after = gmdate('Y-m-d H:i:s', time() - 1);
+        $row->created_at   = gmdate('Y-m-d H:i:s', time() - 1500);
+
+        $r = S::resend(self::STAFF, $id);
+        self::assertTrue($r['ok']);
+        self::assertEqualsWithDelta(300, $r['expires_in'], 2, 'capped at 30 minutes from the start, not 10 from now');
+        self::assertSame(gmdate('Y-m-d H:i:s', strtotime($row->created_at . ' UTC') + 1800), $row->expires_at);
+
+        $row->resend_after = gmdate('Y-m-d H:i:s', time() - 1);
+        $row->created_at   = gmdate('Y-m-d H:i:s', time() - 1800);
+        $mails             = count(\StepUpWorld::$mails);
+        self::assertSame('step_up_expired', S::resend(self::STAFF, $id)['error'] ?? null, 'at the cap: start a new step-up');
+        self::assertCount($mails, \StepUpWorld::$mails, 'no code mailed');
     }
 
     public function testTheCodeHashIsBoundToTheStepUpAndKeyed(): void
