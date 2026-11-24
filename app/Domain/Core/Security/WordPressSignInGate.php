@@ -63,6 +63,14 @@ if (!defined('ABSPATH')) {
  *    account that does not exist (`lostpassword_errors`). Admins reset at
  *    the app too; ops' wp-cli is the fallback.
  *
+ * And for every caller, admins included:
+ *   - XML-RPC is off (`xmlrpc_enabled` → false, last word). Nothing BCC
+ *     runs uses it.
+ *   - WordPress's and PeepSo's own sign-up are off: `users_can_register`
+ *     reads '0' (`pre_option_`, so nothing downstream sees another value)
+ *     and PeepSo's `site_registration_disabled` reads 1. Members sign up
+ *     at the app.
+ *
  * Also: RESERVED_PATH_WORDS can't become a group's slug (`wp_unique_post_slug`)
  * and HandleService reserves them as handles, so no app URL that names a
  * member or a group is caught by the router match in door 2.
@@ -157,6 +165,48 @@ final class WordPressSignInGate
         add_filter('allow_password_reset', [self::class, 'allowPasswordReset'], self::RESET_PRIORITY, 2);
         add_filter('lostpassword_errors', [self::class, 'sameLostPasswordAnswer'], self::RESET_PRIORITY, 2);
         add_filter('wp_unique_post_slug', [self::class, 'keepPathWordsOffGroups'], 10, 6);
+        add_filter('xmlrpc_enabled', [self::class, 'noXmlRpc'], PHP_INT_MAX);
+        add_filter('pre_option_users_can_register', [self::class, 'noNativeSignUp'], PHP_INT_MAX);
+        add_filter('peepso_filter_get_option_site_registration_disabled', [self::class, 'peepsoSignUpDisabled'], PHP_INT_MAX);
+    }
+
+    /**
+     * `xmlrpc_enabled`, last: XML-RPC stays off for every caller.
+     *
+     * @param mixed $enabled
+     */
+    public static function noXmlRpc($enabled = true): bool
+    {
+        unset($enabled);
+
+        return false;
+    }
+
+    /**
+     * `pre_option_users_can_register`, last: WordPress's own sign-up stays
+     * off for every caller. A pre_option value short-circuits get_option(),
+     * so no later `option_users_can_register` filter sees another value.
+     *
+     * @param mixed $value
+     */
+    public static function noNativeSignUp($value = false): string
+    {
+        unset($value);
+
+        return '0';
+    }
+
+    /**
+     * PeepSo's `site_registration_disabled` option, last: PeepSo's own
+     * sign-up stays off for every caller.
+     *
+     * @param mixed $value
+     */
+    public static function peepsoSignUpDisabled($value = 0): int
+    {
+        unset($value);
+
+        return 1;
     }
 
     /**

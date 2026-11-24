@@ -90,6 +90,56 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'allowPasswordReset'], PHP_INT_MAX, 2], $hooks['allow_password_reset']);
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
         self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
+        self::assertSame([[WordPressSignInGate::class, 'noXmlRpc'], PHP_INT_MAX, 1], $hooks['xmlrpc_enabled']);
+        self::assertSame([[WordPressSignInGate::class, 'noNativeSignUp'], PHP_INT_MAX, 1], $hooks['pre_option_users_can_register']);
+        self::assertSame([[WordPressSignInGate::class, 'peepsoSignUpDisabled'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_site_registration_disabled']);
+    }
+
+    /**
+     * Runs one filter's recorded callbacks, by priority, after core's value
+     * and an earlier plugin's, as apply_filters() would.
+     *
+     * @param list<array{0: callable, 1: int}> $before
+     * @return mixed
+     */
+    private static function filtered(string $hook, mixed $value, array $before)
+    {
+        $filters = $before;
+        foreach ($GLOBALS['__bcc_sig']['hooks'] as [$h, $callback, $priority]) {
+            if ($h === $hook) {
+                $filters[] = [$callback, $priority];
+            }
+        }
+        usort($filters, static fn(array $a, array $b): int => $a[1] <=> $b[1]);
+        foreach ($filters as [$callback]) {
+            $value = $callback($value);
+        }
+
+        return $value;
+    }
+
+    /** XML-RPC stays off for everyone, whatever an earlier filter answered. */
+    public function testXmlRpcIsOffWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertFalse(self::filtered('xmlrpc_enabled', true, [[static fn($on): bool => true, 99]]));
+    }
+
+    /** WordPress's own sign-up reads '0', even after a filter turned it on. */
+    public function testNativeSignUpIsOffWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertSame('0', self::filtered('pre_option_users_can_register', false, [[static fn($v): string => '1', 99]]));
+    }
+
+    /** PeepSo's own sign-up reads disabled, even after a filter enabled it. */
+    public function testPeepSoSignUpIsOffWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertSame(1, self::filtered('peepso_filter_get_option_site_registration_disabled', 0, [[static fn($v): int => 0, 99]]));
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
