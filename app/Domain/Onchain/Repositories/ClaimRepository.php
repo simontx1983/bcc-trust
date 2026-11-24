@@ -184,15 +184,30 @@ class ClaimRepository {
         $status     = ClaimStatus::assert($status);
         $verifiedAt = ($status === ClaimStatus::VERIFIED) ? current_time('mysql', true) : null;
 
+        // upsert() is the WALLET claim path. A row it touches is a wallet
+        // claim from then on: the update clause resets how it was proven
+        // (a re-claim of a once staff-approved entity must not stay 'staff',
+        // or a wallet unlink and the sweep would skip it) and clears the
+        // page team columns (a team member who becomes the owner is no
+        // longer a team row). Staff, proof and team writes have their own
+        // writers and never come through here.
         $wpdb->query($wpdb->prepare(
-            "INSERT INTO {$table} (user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status, verified_at, created_at)
-             VALUES (%d, %s, %d, %s, %d, %s, %s, %s, %s)
+            "INSERT INTO {$table} (user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status, verified_at, created_at, verification_method)
+             VALUES (%d, %s, %d, %s, %d, %s, %s, %s, %s, 'wallet')
              ON DUPLICATE KEY UPDATE
-                wallet_address = VALUES(wallet_address),
-                chain_id       = VALUES(chain_id),
-                claim_role     = VALUES(claim_role),
-                status         = VALUES(status),
-                verified_at    = VALUES(verified_at)",
+                wallet_address      = VALUES(wallet_address),
+                chain_id            = VALUES(chain_id),
+                claim_role          = VALUES(claim_role),
+                status              = VALUES(status),
+                verified_at         = VALUES(verified_at),
+                verification_method = 'wallet',
+                verified_by         = NULL,
+                invited_by          = NULL,
+                invite_expires_at   = NULL,
+                accepted_at         = NULL,
+                added_by_staff      = 0,
+                reconfirmed         = 0,
+                show_publicly       = 0",
             $userId,
             $entityType,
             $entityId,
