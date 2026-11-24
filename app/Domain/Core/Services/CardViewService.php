@@ -50,6 +50,7 @@ use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
@@ -833,7 +834,7 @@ final class CardViewService
             'name'                => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
-            'bio'                 => self::resolveMemberBio($user),
+            'bio'                 => self::resolveMemberBio($user, $viewerId),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // The member trust chip (Risky…Elite) — the sole tier vocabulary
@@ -1740,9 +1741,35 @@ final class CardViewService
      * Resolve a short editorial bio for a member card from the WP
      * user's `description` field (the standard profile-bio field).
      * Returns "" when not set.
+     *
+     * ⚠⚠ AND WHEN THE MEMBER HAS HIDDEN THEIR ABOUT SECTION, "".
+     *
+     * F-341 lets a member hide About from their profile, and the
+     * profile honours it: `UserViewService` returns `bio` as a
+     * documented `null` for a viewer who may not see that section.
+     * The card did not, so the same text was served on every card in
+     * every list — the member's setting held on one surface and not
+     * on the other.
+     *
+     * The gate is the SAME accessor the profile uses, so the two
+     * cannot drift: the owner always sees their own, an admin keeps
+     * the §F-02 exemption, and an untouched setting reads as SHOWN.
+     *
+     * ⚠ `''`, not `null`: the card's `bio` is a `string` on every
+     * kind (a group with no description sends `''` too), and the
+     * frontend already renders no line for an empty bio. A `null`
+     * here would change the field's type for one kind only.
      */
-    private static function resolveMemberBio(\WP_User $user): string
+    private static function resolveMemberBio(\WP_User $user, int $viewerId): string
     {
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_ABOUT,
+            (int) $user->ID,
+            $viewerId
+        )) {
+            return '';
+        }
+
         $raw = (string) ($user->description ?? '');
         return self::truncateBio($raw);
     }
