@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Tests\Stubs\PublicOnlyFakes;
+use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -33,6 +34,8 @@ use PHPUnit\Framework\TestCase;
 #[PreserveGlobalState(false)]
 final class RepostPublicOnlyGateTest extends TestCase
 {
+    private PostGroupFactsWpdb $wpdb;
+
     private const AUTHOR = 42;
     private const ACT    = 700;
     private const POST   = 5700;
@@ -47,6 +50,29 @@ final class RepostPublicOnlyGateTest extends TestCase
             require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/GroupSyndicationGate.php';
         }
         PublicOnlyFakes::reset();
+
+        // ⚠⚠ THE REAL PostGroupFactsRepository, driven through the shared
+        // double. The gate's group half reads the repository now, not
+        // get_post_meta() — F-461 moved it there because a FAILED meta read
+        // caches EMPTY, which this gate's permissive no-group branch would
+        // have read as "not in a group" and published a group post as
+        // repostable. Driving the real repository is what keeps that
+        // fail-closed path under test; faking the repository would retire
+        // the very thing worth proving.
+        //
+        // `rowsFromMeta()` bridges the existing PublicOnlyFakes::$postMeta
+        // fixture into the repository's own statement, so the test bodies
+        // below still say what they said when the gate read meta directly.
+        $this->wpdb = new PostGroupFactsWpdb(
+            static fn (int $postId, string $key) => PublicOnlyFakes::$postMeta[$postId][$key] ?? ''
+        );
+        $GLOBALS['wpdb'] = $this->wpdb;
+    }
+
+    protected function tearDown(): void
+    {
+        unset($GLOBALS['wpdb']);
+        parent::tearDown();
     }
 
     /** A getById()-shaped row. */
@@ -258,6 +284,61 @@ final class RepostPublicOnlyGateTest extends TestCase
         self::assertTrue(
             FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
             'an ungrouped public post is unaffected by the group list'
+        );
+    }
+    /**
+     * ⛔ THE FAIL-OPEN GUARD. An unreadable group-facts read must REFUSE.
+     *
+     * This is the case a clean merge re-opened once already: the gate was
+     * written against `get_post_meta()`, and `update_meta_cache()` caches an
+     * EMPTY result for a FAILED read — so an unreadable post looked like a
+     * post with no group, and the no-group branch here is the PERMISSIVE one.
+     * A database hiccup would have published a secret-group post as
+     * repostable by anyone.
+     *
+     * ⚠ Asserted on a read that FAILS, not on a post with no group: those
+     * two are the pair the bug confused, so a test that only covered the
+     * second would have passed throughout.
+     */
+    public function testAnUnreadableGroupFactsReadRefuses(): void
+    {
+        PublicOnlyFakes::$postMeta[self::POST] = [
+            'peepso_group_id'      => [self::GROUP],
+            '_bcc_post_visibility' => 'public_all',
+        ];
+        PublicOnlyFakes::$profileAcc[self::AUTHOR] = 10;
+
+        self::assertTrue(
+            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
+            'precondition: readable, public_all and public — so it IS repostable'
+        );
+
+        $this->wpdb->failRead = true;
+
+        self::assertFalse(
+            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
+            'an unreadable facts read must refuse, never fall through as "no group"'
+        );
+    }
+
+    /**
+     * The same for wpdb's PRE-FLUSH BAIL, which returns false with NO
+     * last_error while last_result still holds the previous query's rows.
+     * A reader trusting get_results() would serve those as this post's.
+     */
+    public function testAPreFlushBailAlsoRefuses(): void
+    {
+        PublicOnlyFakes::$postMeta[self::POST] = [
+            'peepso_group_id'      => [self::GROUP],
+            '_bcc_post_visibility' => 'public_all',
+        ];
+        PublicOnlyFakes::$profileAcc[self::AUTHOR] = 10;
+
+        $this->wpdb->bailBeforeFlush = true;
+
+        self::assertFalse(
+            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
+            'a pre-flush bail is not an answer either'
         );
     }
 }

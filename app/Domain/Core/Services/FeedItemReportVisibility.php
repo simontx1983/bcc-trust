@@ -558,16 +558,32 @@ class FeedItemReportVisibility
             return false;
         }
 
-        // 1. the group half
-        $groupIds = array_values(array_filter(
-            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
-            static fn(int $id): bool => $id > 0
-        ));
-        if ($groupIds !== []) {
-            if ((string) get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
+        // 1. the group half.
+        //
+        // ⚠⚠ THROUGH PostGroupFactsRepository, NEVER get_post_meta(), and
+        // the difference is a fail-OPEN rather than a style preference.
+        // `update_meta_cache()` caches an EMPTY result for a FAILED meta
+        // read, so a group post whose meta could not be read comes back
+        // looking like a post with no group at all — and the no-group branch
+        // of this gate is the PERMISSIVE one. The failure would therefore
+        // publish a group post as repostable-by-anyone. F-461 moved this
+        // read onto the repository for exactly that reason: `forPost()`
+        // answers null when it cannot be trusted, and null refuses here.
+        //
+        // ⚠ ONE read for both halves of the group question (the
+        // `public_all` marker and the syndication gate), so they cannot
+        // disagree about the same post — and so a second probe cannot fail
+        // where the first succeeded.
+        $groupFacts = PostGroupFactsRepository::forPost($postId);
+        if ($groupFacts === null) {
+            return false;
+        }
+
+        if ($groupFacts['group_ids'] !== []) {
+            if ($groupFacts['visibility'] !== self::GLOBAL_VISIBILITY) {
                 return false;
             }
-            if (!self::syndicationAllows($postId)) {
+            if (!self::syndicationAllows($groupFacts)) {
                 return false;
             }
         }
