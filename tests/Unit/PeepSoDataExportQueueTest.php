@@ -174,7 +174,11 @@ final class PeepSoDataExportQueueTest extends TestCase
     {
         $_GET = $query;
 
-        PeepSoDataExportQueue::refuseQueueRun();
+        try {
+            PeepSoDataExportQueue::refuseQueueRun();
+        } catch (\ExportQueueHalt) {
+            self::fail('an admin request that does not run the queue must pass through');
+        }
 
         self::assertArrayNotHasKey('die', $GLOBALS['__bcc_xq']);
     }
