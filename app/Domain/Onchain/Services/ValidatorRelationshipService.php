@@ -15,10 +15,9 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * The ONLY writer of validator owner relationships made outside the wallet
- * claim flow: a staff member links, revokes or cancels a page owner. (The
- * system's replacement of an owner by a stronger proof comes with F-550,
- * with the ownership-swap step it needs.)
+ * The writer of validator owner relationships: a staff member links, revokes
+ * or cancels a page owner, and a member's wallet proof claims a validator
+ * (claimByWallet), superseding a staff-approved owner when there is one.
  *
  * ## One lock order, everywhere
  *
@@ -183,6 +182,176 @@ final class ValidatorRelationshipService
         return self::endLinkByStaff($staffId, $pageId, $linkId, 'link_cancelled', $note, $stepUpId, $code, 'cancel_link', 'owner_link_cancelled');
     }
 
+    /**
+     * A member's WALLET PROOF claims validator $validatorId as its operator
+     * (the page-claim flow, ClaimService::claim()), and mirrors it onto
+     * $pageId, all in one run under the lock order, with the log rows.
+     *
+     * Precedence (Phillip, D3): a proof outranks a staff approval. So an
+     * incumbent owner approved by STAFF is superseded in the same run: their
+     * claim (and its page mirrors) is revoked, `owner_superseded` and
+     * `owner_linked` are logged, and the page ownership swap is left to the
+     * aligner. An incumbent proven by a wallet or key, or whose method is
+     * unknown, is never superseded: `already_claimed`, as before.
+     *
+     * The same user re-claiming is idempotent (no write, no log row). A team
+     * row of theirs on the page becomes the owner row, and that membership's
+     * end is logged (team_member_removed, became_owner). The page mirror is a
+     * wallet claim like the claim it mirrors; it is skipped (logged) when
+     * another user still holds an owner row on the page, as before.
+     *
+     * @return array{success: true, claim_id: int, mirror_written: bool, superseded_user_ids: list<int>}|array{success: false, error: string, message: string}
+     */
+    public static function claimByWallet(int $userId, int $validatorId, string $walletAddress, int $chainId, int $pageId): array
+    {
+        if ($userId <= 0 || $validatorId <= 0 || trim($walletAddress) === '' || $chainId <= 0) {
+            return ['success' => false, 'error' => 'invalid_request', 'message' => 'Invalid claim.'];
+        }
+
+        $result = self::underLocks($validatorId, static function () use ($userId, $validatorId, $walletAddress, $chainId, $pageId): array {
+            $mine   = null;
+            $others = [];
+            foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('validator', $validatorId) as $row) {
+                if ($row['user_id'] === $userId) {
+                    $mine = $row;
+                } else {
+                    $others[] = $row;
+                }
+            }
+            if ($mine !== null) {
+                return ['claim_id' => $mine['claim_id'], 'idempotent' => true];
+            }
+            foreach ($others as $other) {
+                if (self::lockedForStaff($other['verification_method'])) {
+                    throw new RelationshipRefusal('already_claimed', 409); // a proof owner is never superseded
+                }
+            }
+
+            $superseded = [];
+            $prev       = null;
+            foreach ($others as $other) {
+                $revoked = ClaimRepository::revokeInTransaction($other['claim_id']);
+                if (!$revoked['revoked']) {
+                    throw new RelationshipRefusal('transient', 503); // changed under us: retry
+                }
+                $prev = ['user_id' => $other['user_id'], 'method' => $other['verification_method']];
+                Log::append([
+                    'action'          => 'owner_superseded',
+                    'page_id'         => max(0, $pageId),
+                    'subject_user_id' => $other['user_id'],
+                    'actor_kind'      => 'member',
+                    'actor_user_id'   => $userId,
+                    'payload'         => [
+                        'prev'         => $prev,
+                        'new'          => ['user_id' => $userId, 'method' => 'wallet'],
+                        'validator_id' => $validatorId,
+                        'reason'       => 'superseded_by_wallet_proof',
+                    ],
+                ]);
+                $superseded[] = ['claim_id' => $other['claim_id'], 'user_id' => $other['user_id'], 'result' => $revoked];
+            }
+
+            $claim = ClaimRepository::upsert($userId, 'validator', $validatorId, $walletAddress, $chainId, 'operator');
+            if ($claim === false) {
+                throw new \RuntimeException('wallet claim write failed');
+            }
+
+            $mirror    = false;
+            $converted = [];
+            if ($pageId > 0) {
+                $otherOwnerOnPage = false;
+                foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('page', $pageId) as $row) {
+                    $otherOwnerOnPage = $otherOwnerOnPage || $row['user_id'] !== $userId;
+                }
+                if (!$otherOwnerOnPage) {
+                    $teamRole = ClaimRepository::teamRoleOnPageForUpdate($userId, $pageId);
+                    if ($teamRole !== null) {
+                        $converted[$pageId] = $teamRole;
+                    }
+                    if (ClaimRepository::upsert($userId, 'page', $pageId, $walletAddress, $chainId, 'operator') === false) {
+                        throw new \RuntimeException('page mirror write failed');
+                    }
+                    $mirror = true;
+                }
+            }
+            self::appendMembershipEnds($converted, $userId, $userId, 'member');
+
+            $appended = Log::append([
+                'action'          => 'owner_linked',
+                'page_id'         => max(0, $pageId),
+                'subject_user_id' => $userId,
+                'actor_kind'      => 'member',
+                'actor_user_id'   => $userId,
+                'payload'         => [
+                    'prev'           => $prev,
+                    'new'            => ['user_id' => $userId, 'method' => 'wallet'],
+                    'validator_id'   => $validatorId,
+                    'page_mirrored'  => $mirror,
+                ],
+            ]);
+
+            return [
+                'claim_id'   => $claim['id'],
+                'appended'   => $appended,
+                'superseded' => $superseded,
+                'mirror'     => $mirror,
+            ];
+        }, static function (array $done) use ($userId, $pageId, $validatorId): array {
+            /** @var list<array{claim_id: int, user_id: int, result: array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}}> $superseded */
+            $superseded = $done['superseded'] ?? [];
+            $pages      = $pageId > 0 ? [$pageId] : [];
+            foreach ($superseded as $old) {
+                self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($old['claim_id'], $old['result'], 'superseded_by_wallet_proof', false));
+                $pages = array_merge($pages, $old['result']['mirror_page_ids'], $old['result']['bound_page_ids']);
+                self::changed('owner_superseded', $pageId > 0 ? $pageId : (int) ($old['result']['mirror_page_ids'][0] ?? 0), $old['user_id'], $userId, $old['claim_id']);
+            }
+            if (!($done['idempotent'] ?? false)) {
+                foreach (array_values(array_unique(array_map('intval', $pages))) as $page) {
+                    self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule($page));
+                }
+            }
+            if ($superseded !== []) {
+                self::safely('audit', static fn () => AuditLogger::log('validator_owner_superseded', $pageId, [
+                    'validator_id' => $validatorId,
+                    'superseded'   => array_map(static fn (array $o): int => $o['user_id'], $superseded),
+                    'reason'       => 'superseded_by_wallet_proof',
+                ], 'page', $userId));
+            }
+            if ($pageId > 0 && !($done['idempotent'] ?? false) && !($done['mirror'] ?? false)) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page-claim mirror skipped: another user holds an owner row on the page; the claim stands', [
+                    'user_id' => $userId,
+                    'page_id' => $pageId,
+                ]);
+            }
+
+            return [
+                'ok'                  => true,
+                'claim_id'            => (int) $done['claim_id'],
+                'mirror_written'      => (bool) ($done['mirror'] ?? false),
+                'superseded_user_ids' => array_map(static fn (array $o): int => $o['user_id'], $superseded),
+            ];
+        });
+
+        if (($result['ok'] ?? false) !== true) {
+            $reason = (string) ($result['reason'] ?? 'unavailable');
+            if ($reason === 'already_claimed') {
+                return ['success' => false, 'error' => 'already_claimed', 'message' => 'This project already has a verified Operator.'];
+            }
+
+            return ['success' => false, 'error' => 'transient', 'message' => 'Could not complete the claim right now. Please try again.'];
+        }
+
+        /** @var list<int> $supersededIds */
+        $supersededIds = $result['superseded_user_ids'] ?? [];
+
+        return [
+            'success'             => true,
+            'claim_id'            => (int) ($result['claim_id'] ?? 0),
+            'mirror_written'      => (bool) ($result['mirror_written'] ?? false),
+            'superseded_user_ids' => $supersededIds,
+        ];
+    }
+
     // ── internals ───────────────────────────────────────────────────────
 
     /**
@@ -269,7 +438,7 @@ final class ValidatorRelationshipService
      * inside one transaction; after the COMMIT, advance the anchor while the
      * vrl lock is still held, then (locks released) run $after.
      *
-     * @param callable(): array<string, mixed> $work returns at least ['appended' => array{seq: int, row_hash: string}]
+     * @param callable(): array<string, mixed> $work returns ['appended' => array{seq: int, row_hash: string}] when it appended
      * @param callable(array<string, mixed>): array<string, mixed> $after
      * @return array<string, mixed> $after's result, or a refusal ['ok' => false, 'reason', 'status']
      */
@@ -297,10 +466,13 @@ final class ValidatorRelationshipService
                 AdvisoryLock::release($claimLock);
             }
 
-            // Committed; the vrl lock is still held.
-            /** @var array{seq: int, row_hash: string} $appended */
-            $appended = $done['appended'];
-            RelationshipLogAnchor::advance($appended['seq'], $appended['row_hash']);
+            // Committed; the vrl lock is still held. (An idempotent run
+            // appended nothing and moves nothing.)
+            if (isset($done['appended'])) {
+                /** @var array{seq: int, row_hash: string} $appended */
+                $appended = $done['appended'];
+                RelationshipLogAnchor::advance($appended['seq'], $appended['row_hash']);
+            }
         } finally {
             AdvisoryLock::release(Log::LOCK_NAME);
         }

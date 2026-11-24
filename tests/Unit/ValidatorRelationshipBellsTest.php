@@ -92,6 +92,32 @@ final class ValidatorRelationshipBellsTest extends TestCase
         }
     }
 
+    /** A wallet proof replaced a staff-approved owner: no member is named as the actor. */
+    public function testASupersedeTellsAdminsAndThePreviousOwnerWithoutNamingTheClaimer(): void
+    {
+        $newOwner = 4242;
+        self::dispatcher()->onValidatorRelationshipChanged('owner_superseded', self::PAGE, self::MEMBER, $newOwner, 77);
+
+        $bells = self::bells();
+        self::assertSame(
+            [[self::STAFF, NotificationType::VALIDATOR_OWNER_REVOKED], [self::ADMIN2, NotificationType::VALIDATOR_OWNER_REVOKED], [self::MEMBER, NotificationType::VALIDATOR_OWNERSHIP_REMOVED]],
+            array_map(static fn (array $b): array => [$b[0], $b[2]], $bells)
+        );
+        foreach ($bells as [$to, $from]) {
+            self::assertNotSame($newOwner, $from, 'the claimer is never the sender');
+            self::assertNotSame($newOwner, $to, 'and gets no bell from this');
+        }
+    }
+
+    /** The slugs the frontend (FE #400) types: a one-character drift would hide its toggles. */
+    public function testTheBellSlugsAreExactlyTheOnesTheFrontendTypes(): void
+    {
+        self::assertSame(
+            ['bcc_validator_owner_linked', 'bcc_validator_owner_revoked', 'bcc_validator_owner_link_cancelled', 'bcc_validator_ownership_granted', 'bcc_validator_ownership_removed'],
+            [NotificationType::VALIDATOR_OWNER_LINKED, NotificationType::VALIDATOR_OWNER_REVOKED, NotificationType::VALIDATOR_OWNER_LINK_CANCELLED, NotificationType::VALIDATOR_OWNERSHIP_GRANTED, NotificationType::VALIDATOR_OWNERSHIP_REMOVED]
+        );
+    }
+
     public function testAnUnrelatedActionRingsNothing(): void
     {
         self::dispatcher()->onValidatorRelationshipChanged('owner_aligned', self::PAGE, self::MEMBER, null, 0);
