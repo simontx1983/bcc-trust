@@ -782,6 +782,40 @@ final class WordPressSignInGateTest extends TestCase
         self::assertBare403();
     }
 
+    /** @return array<string, array{string}> */
+    public static function peepsoMemberDataExportActions(): array
+    {
+        return [
+            'request the export'   => ['profile.request_account_data'],
+            'download the export'  => ['profile.download_account_data'],
+            'delete the archive'   => ['profile.delete_account_data_archive'],
+        ];
+    }
+
+    /**
+     * This refusal is also what keeps PeepSo's member data-export actions
+     * closed; the export setting does not gate them (F-581, private tracker).
+     *
+     * So it must stay registered at `init`, PHP_INT_MIN (before PeepSo's
+     * router), and must keep refusing these actions for a signed-in member.
+     */
+    #[DataProvider('peepsoMemberDataExportActions')]
+    public function testTheRouterRefusalKeepsPeepSoMemberDataExportActionsClosed(string $method): void
+    {
+        WordPressSignInGate::register();
+        $init = array_values(array_filter(
+            $GLOBALS['__bcc_sig']['hooks'],
+            static fn(array $h): bool => $h[0] === 'init' && $h[1] === [WordPressSignInGate::class, 'refuseWordPressAjax']
+        ));
+        self::assertCount(1, $init, 'registered once at init');
+        self::assertSame(PHP_INT_MIN, $init[0][2], 'at PHP_INT_MIN, before PeepSo routes the call');
+
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
+
+        self::assertSame('status', self::runInit('/peepsoajax/' . $method));
+        self::assertBare403();
+    }
+
     public function testAnAdminKeepsPeepSoAjax(): void
     {
         $GLOBALS['__bcc_sig']['current'] = self::ADMIN;
