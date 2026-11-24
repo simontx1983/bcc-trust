@@ -1445,8 +1445,14 @@ self::assertCount(
             );
         }
 
-        self::assertCount(
-            1,
+                // TWO writes, and both must be unpinned: the impostor pins one by
+        // its SHORT NAME and the other through `self::`. The second is the
+        // case the namespace requirement exists for. This rule was already
+        // correct here while bcc-core had only the class check -- and NEITHER
+        // fixture exercised it, so no mutant could kill either. Found by
+        // hashing each rule function across the twins and diffing.
+self::assertCount(
+            2,
             $rows,
             'only the real write may be reported; a method that merely shares a'
             . " writer's name is not a call to that writer, through `->` or `?->`"
