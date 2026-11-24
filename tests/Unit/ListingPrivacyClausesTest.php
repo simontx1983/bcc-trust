@@ -100,12 +100,10 @@ final class ListingPrivacyClausesTest extends TestCase
     }
 
     /**
-     * F-519, the finding: duplicate '0' + '1' rows. The old `meta_query`
-     * (NOT EXISTS OR != '1') let the '0' row satisfy the OR. The shared
-     * predicate is a NOT EXISTS over ANY truthy row of either key, so the
-     * strictest row wins; its SQL is pinned on real engines with F-518's
-     * tests. Here: that this is what the search carries, and that no
-     * `meta_query` form of the opt-out survives anywhere.
+     * F-519: the search excludes on ANY stored row that reads as on, so
+     * the strictest row wins. The shared predicate's SQL is pinned on real
+     * engines with F-518's tests. Here: that this is what the search
+     * carries, and that no `meta_query` form of the opt-out is left.
      */
     public function testNoMetaQueryFormOfTheOptOutIsLeft(): void
     {

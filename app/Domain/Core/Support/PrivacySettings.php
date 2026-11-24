@@ -412,11 +412,11 @@ final class PrivacySettings
         //                         that pass ARG_IGNORE_SEARCH_OPTOUT) and
         //                         flags the query.
         //   `pre_user_query`    → applies it, and the profile level, in SQL.
-        //                         Neither fits a `meta_query`: the profile
-        //                         level is `peepso_users.usr_profile_acc`,
-        //                         not usermeta, and "no row of this key is
-        //                         on" (F-519, duplicate rows) is a NOT
-        //                         EXISTS a `meta_query` cannot express.
+        //                         Both are SQL: the profile level is
+        //                         `peepso_users.usr_profile_acc`, not
+        //                         usermeta, and the opt-out (F-519)
+        //                         excludes on ANY stored row that reads
+        //                         as on; the strictest row wins.
         //
         // Priority 20 so it runs AFTER PeepSo's own `pre_user_query`
         // (registered at the default 10 inside `PeepSoUserSearch`). The
@@ -540,11 +540,9 @@ final class PrivacySettings
      * F-519: leave out every member who opted out of search, in SQL.
      *
      * One shared predicate, {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}
-     * (the sitemap uses it too). It excludes a member when ANY row of
-     * `hide_from_search` reads as on, so duplicate '0' + '1' rows exclude:
-     * the strictest row wins, failing closed. The old `meta_query`
-     * (NOT EXISTS OR != '1') let a '0' row satisfy the OR and kept that
-     * member listed.
+     * (the sitemap uses it too). It excludes a member when ANY stored row
+     * of `hide_from_search` reads as on; the strictest row wins, failing
+     * closed.
      *
      * ⚠ The legacy opt-out counts only while fold_discovery_optout_v1 has
      * not completed ({@see legacyOptOutStillRead()}). The fold copied every
@@ -605,10 +603,9 @@ final class PrivacySettings
         // PeepSo option is ever enabled, both apply and agree.
         //
         // ⚠ F-519: the exclusion is SQL in filterPeepSoUserQuery(), not a
-        // `meta_query` here. A `meta_query` cannot say "no row of this key
-        // is on": its `NOT EXISTS OR != '1'` form is satisfied by a '0'
-        // row even when a '1' row sits beside it. The legacy opt-out is
-        // read too until the F-257 fold has completed, as before.
+        // `meta_query` here: it excludes on ANY stored row that reads as
+        // on, so the strictest row wins. The legacy opt-out is read too
+        // until the F-257 fold has completed, as before.
         //
         // ⚠ ADMINS ARE EXEMPT, per the user's "admins exempt" rule:
         // otherwise a moderator cannot find a hidden or opted-out member
