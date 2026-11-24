@@ -62,7 +62,12 @@ final class GroupRosterCardTest extends TestCase
             throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure('Repo', 'read', 'no answer');
         };
 
-        self::assertNull(self::cardOrNull($failing));
+        try {
+            $card = self::cardOrNull($failing);
+        } catch (\RuntimeException $e) {
+            self::fail('a card that cannot be built must not take the roster down: ' . $e->getMessage());
+        }
+        self::assertNull($card);
         self::assertCount(1, \BCC\Core\Log\Logger::$lines);
         self::assertSame(41, \BCC\Core\Log\Logger::$lines[0][1]['user_id'] ?? null);
         self::assertSame(4300, \BCC\Core\Log\Logger::$lines[0][1]['group_id'] ?? null);
