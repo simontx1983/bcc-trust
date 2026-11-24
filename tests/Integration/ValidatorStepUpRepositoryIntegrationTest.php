@@ -88,6 +88,9 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         }
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
         self::assertFalse(StepUps::consume(self::binding($id), self::at(0)), 'single use');
+        // A later consume would rewrite used_at to a NEW value (a changed
+        // row), so this one proves the used_at IS NULL condition itself.
+        self::assertFalse(StepUps::consume(self::binding($id), self::at(5)), 'single use, later');
         self::assertFalse(StepUps::countAttempt($id, self::STAFF, self::at(0)), 'a spent step-up takes no more attempts');
     }
 
