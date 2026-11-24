@@ -16,7 +16,7 @@ use PHPUnit\Framework\TestCase;
  * The resolver is the single seam every consumer asks "what kind of group
  * is this?", so the `delegators` arm is what routes a validator community
  * to its own join endpoint (MyGroupsEndpoint rejects the kind), renders
- * the DELEGATOR COMMUNITY kicker, and marks it on-chain verified. A
+ * the DELEGATOR GROUP kicker, and marks it on-chain verified. A
  * regression here silently downgrades a gated community to GroupType::User
  * — which is exactly the Halls split-brain bug class, where the plain
  * join door would accept a group whose gate lives elsewhere.

@@ -15,6 +15,30 @@ namespace BCC\Trust\Tests\Support;
  * the parent post's group (GroupInteractionGate::checkPost) and does not
  * consult NoReactionsGate, which the caller-count inventory in
  * NoReactionsGateTest also records.
+ *
+ * ── ⚠ WHY `RepostEndpoint` IS NOT IN THIS TABLE (F-346) ──────────────
+ * It is a gated act-id engagement write, so it LOOKS like it belongs. The
+ * three order checks driven by this table (FeedItemGateTest,
+ * GroupInteractionGateTest, NoReactionsGateTest) read the handler's own
+ * body and expect each gate call, its guard and its return to appear
+ * INLINE there. The repost route deliberately puts all three gates in one
+ * shared helper, because it runs them TWICE per request — on the submitted
+ * id and again on the resolved repost root — and two inline copies are
+ * exactly the drift that helper prevents.
+ *
+ * So this table cannot express its shape, and listing it would fail rather
+ * than cover it. What covers it instead:
+ *   - the per-file CALL-SITE counts in GroupInteractionGateTest and
+ *     NoReactionsGateTest, which do include `RepostEndpoint.php`, so a
+ *     refactor that drops a gate call still fails;
+ *   - `RepostEndpointTest`, which asserts the real order over a real call
+ *     trace for BOTH ids, including that each refusal is honoured and that
+ *     nothing is written after it — the property these source-text checks
+ *     explicitly say they cannot see.
+ *
+ * ⛔ Generalising this table with an optional "gated via helper" form is a
+ * worthwhile follow-up; it was left out of F-346 because it changes shared
+ * test infrastructure three suites depend on.
  */
 final class EngagementWriteRoutes
 {

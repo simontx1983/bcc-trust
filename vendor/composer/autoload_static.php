@@ -281,6 +281,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\REST\\ReactionsEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/ReactionsEndpoint.php',
         'BCC\\Trust\\Core\\REST\\ReadModelHealthEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/ReadModelHealthEndpoint.php',
         'BCC\\Trust\\Core\\REST\\RecoveryEmailEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/RecoveryEmailEndpoint.php',
+        'BCC\\Trust\\Core\\REST\\RepostEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/RepostEndpoint.php',
         'BCC\\Trust\\Core\\REST\\ReviewRepliesEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/ReviewRepliesEndpoint.php',
         'BCC\\Trust\\Core\\REST\\SitemapEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/SitemapEndpoint.php',
         'BCC\\Trust\\Core\\REST\\StokeEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/StokeEndpoint.php',

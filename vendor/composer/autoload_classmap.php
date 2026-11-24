@@ -125,6 +125,7 @@ return array(
     'BCC\\Trust\\Core\\REST\\ReactionsEndpoint' => $baseDir . '/app/Domain/Core/REST/ReactionsEndpoint.php',
     'BCC\\Trust\\Core\\REST\\ReadModelHealthEndpoint' => $baseDir . '/app/Domain/Core/REST/ReadModelHealthEndpoint.php',
     'BCC\\Trust\\Core\\REST\\RecoveryEmailEndpoint' => $baseDir . '/app/Domain/Core/REST/RecoveryEmailEndpoint.php',
+    'BCC\\Trust\\Core\\REST\\RepostEndpoint' => $baseDir . '/app/Domain/Core/REST/RepostEndpoint.php',
     'BCC\\Trust\\Core\\REST\\ReviewRepliesEndpoint' => $baseDir . '/app/Domain/Core/REST/ReviewRepliesEndpoint.php',
     'BCC\\Trust\\Core\\REST\\SitemapEndpoint' => $baseDir . '/app/Domain/Core/REST/SitemapEndpoint.php',
     'BCC\\Trust\\Core\\REST\\StokeEndpoint' => $baseDir . '/app/Domain/Core/REST/StokeEndpoint.php',
