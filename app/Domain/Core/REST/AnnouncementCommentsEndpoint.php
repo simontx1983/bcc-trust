@@ -300,7 +300,7 @@ final class AnnouncementCommentsEndpoint
             self::service()->adminRestore(
                 (int) $request['commentId'],
                 get_current_user_id(),
-                current_user_can('manage_options')
+                BearerAuth::userIsAdmin(get_current_user_id())
             ),
             'private, no-store',
             'Authorization, Cookie'

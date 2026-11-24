@@ -31,9 +31,7 @@ final class ReadModelHealthEndpoint
         register_rest_route('bcc-trust/v1', '/health/read-model', [
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [self::class, 'handle'],
-            'permission_callback' => function () {
-                return current_user_can('manage_options');
-            },
+            'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
         ]);
     }
 
