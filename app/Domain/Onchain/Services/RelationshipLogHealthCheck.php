@@ -113,14 +113,19 @@ final class RelationshipLogHealthCheck
             if ($head['seq'] !== $verifiedHeadSeq) {
                 return;
             }
-            update_option(self::HEAD_EXPORTED_AT, time(), false);
-            self::mailAdmins(
+            $failedBefore = did_action('wp_mail_failed');
+            $attempted    = self::mailAdmins(
                 'Validator relationship log: weekly record',
                 "The validator relationship history verified cleanly.\n\n"
                 . 'Entries: ' . $head['seq'] . "\n"
                 . 'Latest entry hash: ' . $head['row_hash'] . "\n\n"
                 . 'Keep this email: it records the history as it stood today.'
             );
+            // Stamped only when at least one send went out, so a day on
+            // which every send failed is retried the next day.
+            if ($attempted > did_action('wp_mail_failed') - $failedBefore) {
+                update_option(self::HEAD_EXPORTED_AT, time(), false);
+            }
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::warning('[bcc-trust] validator relationship log weekly record failed', ['error' => $e->getMessage()]);
         }
@@ -154,9 +159,11 @@ final class RelationshipLogHealthCheck
         ];
     }
 
-    private static function mailAdmins(string $subject, string $body): void
+    /** @return int how many sends were attempted */
+    private static function mailAdmins(string $subject, string $body): int
     {
-        $site = get_bloginfo('name') ?: 'BCC';
+        $site      = get_bloginfo('name') ?: 'BCC';
+        $attempted = 0;
         foreach (\BCC\Trust\Core\Support\AdminRecipients::ids() as $adminId) {
             $user = get_userdata($adminId);
             if (!$user instanceof \WP_User || (string) $user->user_email === '') {
@@ -168,6 +175,9 @@ final class RelationshipLogHealthCheck
                 nl2br(esc_html($body)),
                 'validator_log_mail_failed'
             );
+            ++$attempted;
         }
+
+        return $attempted;
     }
 }

@@ -58,6 +58,21 @@ final class RelationshipLogHealthCheckTest extends TestCase
         self::assertCount(4, \HealthWorld::$mails, 'again after a week');
     }
 
+    /** A week whose sends all failed is retried the next day, not skipped. */
+    public function testTheWeekIsStampedOnlyWhenASendWentOut(): void
+    {
+        \HealthWorld::$mailFails = true;
+
+        H::run();
+        self::assertCount(2, \HealthWorld::$mails, 'both sends attempted');
+        self::assertArrayNotHasKey(H::HEAD_EXPORTED_AT, \HealthWorld::$options, 'not stamped: nothing went out');
+
+        \HealthWorld::$mailFails = false;
+        H::run();
+        self::assertCount(4, \HealthWorld::$mails, 'retried the next run');
+        self::assertGreaterThan(0, \HealthWorld::$options[H::HEAD_EXPORTED_AT] ?? 0);
+    }
+
     public function testAHeadNewerThanTheVerifiedOneIsNotExported(): void
     {
         \HealthWorld::$head = ['seq' => 4, 'row_hash' => 'bbbb'];

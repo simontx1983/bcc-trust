@@ -27,6 +27,9 @@ namespace {
         public static array $metrics = [];
         /** @var list<array{int, string}> advance() calls: the health check must make none */
         public static array $anchored = [];
+        /** sends that fail (wp_mail_failed fires) */
+        public static bool $mailFails = false;
+        public static int $mailFailures = 0;
         /** @var array{seq: int, row_hash: string}|null what RelationshipLogAnchor::get() answers */
         public static ?array $anchor = ['seq' => 3, 'row_hash' => 'aaaa'];
     }
@@ -64,6 +67,11 @@ namespace {
     function get_option(string $key, mixed $default = false): mixed
     {
         return \HealthWorld::$options[$key] ?? $default;
+    }
+
+    function did_action(string $hook): int
+    {
+        return $hook === 'wp_mail_failed' ? \HealthWorld::$mailFailures : 0;
     }
 }
 
@@ -122,6 +130,9 @@ namespace BCC\Core\Mail {
         public static function send(string $to, string $subject, string $html, string $failureEvent): void
         {
             \HealthWorld::$mails[] = [$to, $subject];
+            if (\HealthWorld::$mailFails) {
+                ++\HealthWorld::$mailFailures; // wp_mail fires wp_mail_failed
+            }
         }
     }
 }
