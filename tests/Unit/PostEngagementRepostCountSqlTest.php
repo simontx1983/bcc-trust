@@ -97,6 +97,21 @@ final class PostEngagementRepostCountSqlTest extends TestCase
             public function query($sql)
             {
                 $this->queries[] = (string) $sql;
+                // ⚠⚠ ANSWERED FIRST, BEFORE THE FAILURE SWITCHES.
+                // TableRegistry::existsOrUnknown() now probes through
+                // runRead() — query() + last_result — and looks for the
+                // TABLE NAME among each row's object vars, so the probe needs
+                // a row of its own rather than this double's payload.
+                // It must stay OUTSIDE $queryFails / $errorAfterQuery: if a
+                // failure switch also broke the probe, the read-failure tests
+                // below would pass by failing at the TABLE GUARD instead of at
+                // the read they name, which is not the same claim.
+                if (str_contains((string) $sql, 'SHOW TABLES LIKE')) {
+                    $this->last_error  = '';
+                    $this->last_result = [(object) ['Tables_in_wp' => 'wp_peepso_activities']];
+
+                    return 1;
+                }
                 if ($this->queryFails) {
                     return false;
                 }

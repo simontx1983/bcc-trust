@@ -127,3 +127,50 @@ namespace {
         }
     }
 }
+
+namespace BCC\Core\Log {
+    /**
+     * ⚠ ADDED WHEN origin/main WAS MERGED IN, not part of the original
+     * harness. `TableRegistry::exists()` routes its read-failure path through
+     * `GuardsReadFailures`, which logs — so a test that DELIBERATELY fails a
+     * read now reaches `Logger::error()`. Without this the suite died with
+     * "Class BCC\Core\Log\Logger not found" from inside the table guard,
+     * BEFORE the repository issued any SQL, which is why the failures showed
+     * up as empty captured queries and null counts rather than as a missing
+     * class.
+     *
+     * ⚠⚠ ALL FOUR METHODS, deliberately. A partial Logger stub is a known
+     * trap in this suite: one that defined only `warning()` once broke 21
+     * unrelated tests with "undefined method Logger::audit()". The real class
+     * has exactly info/error/warning/audit, so this mirrors all of them even
+     * though these tests only trip `error()`.
+     */
+    if (!\class_exists('BCC\Core\Log\Logger', false)) {
+        final class Logger
+        {
+            /** @param array<string, mixed> $context */
+            public static function info(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function error(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function warning(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function audit(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+        }
+    }
+}
