@@ -602,6 +602,7 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\RelationshipLogHasher' => $baseDir . '/app/Domain/Onchain/Support/RelationshipLogHasher.php',
     'BCC\\Trust\\Onchain\\Support\\SolanaEndpoints' => $baseDir . '/app/Domain/Onchain/Support/SolanaEndpoints.php',
     'BCC\\Trust\\Onchain\\Support\\StakeAmount' => $baseDir . '/app/Domain/Onchain/Support/StakeAmount.php',
+    'BCC\\Trust\\Onchain\\Support\\ValidatorStatusProjection' => $baseDir . '/app/Domain/Onchain/Support/ValidatorStatusProjection.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\ChainDescriptionState' => $baseDir . '/app/Domain/Onchain/ValueObjects/ChainDescriptionState.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\ChainNftCapabilityOverrides' => $baseDir . '/app/Domain/Onchain/ValueObjects/ChainNftCapabilityOverrides.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\ClaimStatus' => $baseDir . '/app/Domain/Onchain/ValueObjects/ClaimStatus.php',
