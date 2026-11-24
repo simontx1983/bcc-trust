@@ -765,11 +765,8 @@ final class WordPressSignInGateTest extends TestCase
     }
 
     /**
-     * This refusal is also what keeps PeepSo's member data-export actions
-     * closed; the export setting does not gate them (F-581, private tracker).
-     *
-     * So it must stay registered at `init`, PHP_INT_MIN (before PeepSo's
-     * router), and must keep refusing these actions for a signed-in member.
+     * These actions stay closed to members by this refusal; it must stay at
+     * `init` PHP_INT_MIN, before PeepSo's router (F-581, private tracker).
      */
     #[DataProvider('peepsoMemberDataExportActions')]
     public function testTheRouterRefusalKeepsPeepSoMemberDataExportActionsClosed(string $method): void
