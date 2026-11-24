@@ -51,6 +51,7 @@ use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
+use BCC\Trust\Core\ValueObjects\OwnerVerification;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
@@ -273,6 +274,18 @@ final class CardViewService
             $isClaimedByViewer = self::viewerHasClaim($viewerId, $pageId);
         }
 
+        // The viewer's role on this page (contract v1.NEXT): `owner` when they
+        // hold its verified owner claim, a team role when they hold an ACTIVE
+        // team row, else null. A card flag only: every write re-checks.
+        if ($viewerId <= 0 || $isClaimedByViewer) {
+            $viewerTeamRole = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_team_roles'])) {
+            $viewerTeamRole = $prefetched['viewer_team_roles'][$pageId] ?? null;
+        } else {
+            $viewerTeamRole = ClaimRepository::activeTeamRolesOnPages($viewerId, [$pageId])[$pageId] ?? null;
+        }
+        $viewerPageRole = self::viewerPageRole($isClaimedByViewer, $viewerTeamRole);
+
         if ($viewerId <= 0) {
             $viewerHasReviewed = false;
         } elseif ($prefetched !== null && isset($prefetched['viewer_votes'])) {
@@ -352,13 +365,16 @@ final class CardViewService
             : null;
 
         $operatorProfile = null;
+        $ownerMethods    = [];
         if ($kind === 'validator') {
             if ($prefetched !== null && isset($prefetched['operator_profiles'])) {
                 $operatorProfile = $prefetched['operator_profiles'][$pageId] ?? null;
+                $ownerMethods    = $prefetched['owner_methods'][$pageId] ?? [];
             } else {
-                $operators = ClaimRepository::resolveVerifiedOperatorForPages([$pageId]);
+                $resolved        = ClaimRepository::resolveVerifiedOperatorsWithMethodsForPages([$pageId]);
+                $ownerMethods    = $resolved['methods'][$pageId] ?? [];
                 $operatorProfile = (new OperatorProfileRepository())
-                    ->findPublicForResolvedPages($operators)[$pageId] ?? null;
+                    ->findPublicForResolvedPages($resolved['operators'])[$pageId] ?? null;
             }
         }
         $operatorProfileLogo = self::operatorProfileLogoUrl($operatorProfile);
@@ -423,6 +439,14 @@ final class CardViewService
             // ClaimRepository query, so the prefetched-list path stays
             // N+1-free. Distinct from the owner-EMAIL verification signal.
             'is_claim_verified'   => $rm !== null && (bool) ($rm->has_verified_claim ?? 0),
+            // Contract v1.NEXT: how the page's owner proved it, as public
+            // badge copy rendered verbatim: {kind: wallet|node_key|staff,
+            // label, description}. Never a method or a date. null = no badge
+            // (no owner, an ambiguous page, an unknown method, or not a
+            // validator page).
+            'owner_verification'  => OwnerVerification::fromMethods($ownerMethods)?->toApiResponse(),
+            // Contract v1.NEXT: owner | administrator | representative | null.
+            'viewer_page_role'    => $viewerPageRole,
             // §D2 — true when the current viewer has already cast a
             // vote on this page. Drives the entity profile's
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
@@ -892,6 +916,9 @@ final class CardViewService
             // Members aren't on-chain-claimed — always false, emitted for
             // shape uniformity with entity cards (matches is_claimed above).
             'is_claim_verified'   => false,
+            // Page-only (contract v1.NEXT); always present, null here.
+            'owner_verification'  => null,
+            'viewer_page_role'    => null,
             'claim_target'        => null,
             // Entity-addressed messaging is validator-only at V1;
             // members are messaged directly through the DM surface.
@@ -1103,6 +1130,9 @@ final class CardViewService
             // Communities aren't on-chain-claimed — always false, emitted
             // for shape uniformity (mirrors is_claimed above).
             'is_claim_verified'   => false,
+            // Page-only (contract v1.NEXT); always present, null here.
+            'owner_verification'  => null,
+            'viewer_page_role'    => null,
             'claim_target'        => null,
             // Entity-addressed messaging is validator-only at V1.
             'messaging'           => ['destination' => 'none', 'operator' => null],
@@ -1484,6 +1514,21 @@ final class CardViewService
         return self::claimRowIsVerified(
             ClaimRepository::getUserClaim($viewerId, 'page', $pageId, PageClaimRolePolicy::OWNER_ROLES)
         );
+    }
+
+    /**
+     * The viewer's role on a page, for the card: `owner` when they hold its
+     * verified owner claim; else their ACTIVE team role
+     * (ClaimRepository::activeTeamRolesOnPages: an invite or any other
+     * status holds none); else null.
+     */
+    private static function viewerPageRole(bool $isOwner, ?string $activeTeamRole): ?string
+    {
+        if ($isOwner) {
+            return 'owner';
+        }
+
+        return $activeTeamRole !== null && PageClaimRolePolicy::isTeamRole($activeTeamRole) ? $activeTeamRole : null;
     }
 
     /**
@@ -2165,6 +2210,13 @@ final class CardViewService
                 'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_image'     => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                // Contract v1.NEXT: owner controls with no flag of their own
+                // yet (can_edit_bio above now covers the profile text: name,
+                // bio, banner). Owner-only until team members exist; then
+                // the page role policy decides them.
+                'can_manage_team'        => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_links'         => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_notifications' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 // Mirrors the DM write gates exactly (MessagesService's
                 // single policy evaluator) against the page's resolved
                 // operator, or the queue-mode gates when the validator
@@ -2445,8 +2497,13 @@ final class CardViewService
             'can_open_dispute'   => $sign,
             'can_endorse'        => $sign,
             'can_post_as_entity' => $sign,
-            'can_edit_bio'       => $sign,
+            // Owner-only controls are HIDDEN from a signed-out viewer (no
+            // hint): signing in would not unlock them (contract v1.NEXT).
+            'can_edit_bio'           => self::deny(null, 'not_claimer'),
             'can_edit_image'     => $sign,
+            'can_manage_team'        => self::deny(null, 'not_claimer'),
+            'can_edit_links'         => self::deny(null, 'not_claimer'),
+            'can_edit_notifications' => self::deny(null, 'not_claimer'),
         ];
     }
 
