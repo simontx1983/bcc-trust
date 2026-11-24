@@ -188,7 +188,13 @@ namespace BCC\Trust\Core\Support {
          */
         function get_option(string $key, $default = false)
         {
-            return $default;
+            // F-519: a suite may set an option (the F-257 fold's done-marker)
+            // in `__bcc_prefs_options` and see which were read in
+            // `__bcc_prefs_option_reads`. An empty store returns $default,
+            // as before.
+            $GLOBALS['__bcc_prefs_option_reads'][] = $key;
+
+            return $GLOBALS['__bcc_prefs_options'][$key] ?? $default;
         }
     }
 }

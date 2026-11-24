@@ -185,7 +185,8 @@ final class PrivacySettings
      */
     public static function readAll(int $userId): array
     {
-        $flags = self::flagsOrClosed($userId);
+        // `discovery_optout` answers as search applies it (searchOptOut()).
+        $flags = self::flagsOrClosed($userId, true);
 
         $out = [];
         foreach (self::ALL_KEYS as $key) {
@@ -291,6 +292,8 @@ final class PrivacySettings
      * ON), the direction that hides rather than leaks. WordPress's
      * update_user_meta() rewrites every row, so they only diverge when
      * something called add_user_meta() directly.
+     *
+     * `discovery_optout` answers as search applies it: {@see searchOptOut()}.
      */
     public static function flagOrUnknown(int $userId, string $key): ?bool
     {
@@ -302,40 +305,84 @@ final class PrivacySettings
         if (!in_array($metaKey, $keys, true)) {
             $keys = [$metaKey];
         }
+        $isSearchOptOut = $key === 'discovery_optout';
+        if ($isSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
 
         $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             return null;
         }
 
-        return self::strictest($values[$userId][$metaKey] ?? []);
+        $byKey = $values[$userId] ?? [];
+
+        return $isSearchOptOut ? self::searchOptOut($byKey) : self::strictest($byKey[$metaKey] ?? []);
     }
 
     /**
      * Every public flag for one member, read once. An unreadable set reads
      * as ALL HIDDEN, as {@see flag()} does.
      *
+     * `$withSearchOptOut` also reads the legacy opt-out, so that
+     * `discovery_optout` answers as search applies it
+     * ({@see searchOptOut()}). Without it, as for {@see readProfile()},
+     * which never returns that key, the read stays the ALL_KEYS one that
+     * {@see prime()} batches.
+     *
      * @return array<string, bool> public key => hidden
      */
-    private static function flagsOrClosed(int $userId): array
+    private static function flagsOrClosed(int $userId, bool $withSearchOptOut = false): array
     {
         if ($userId <= 0) {
             return array_fill_keys(self::ALL_KEYS, false);
         }
 
-        $values = UserMetaRepository::valuesOrUnknown([$userId], self::metaKeys());
+        $keys = self::metaKeys();
+        if ($withSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
+        $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             self::$unreadReads++;
 
             return array_fill_keys(self::ALL_KEYS, true);
         }
 
+        $byKey = $values[$userId] ?? [];
         $flags = [];
         foreach (self::ALL_KEYS as $key) {
-            $flags[$key] = self::strictest($values[$userId][self::metaKey($key)] ?? []);
+            $flags[$key] = self::strictest($byKey[self::metaKey($key)] ?? []);
+        }
+        if ($withSearchOptOut) {
+            $flags['discovery_optout'] = self::searchOptOut($byKey);
         }
 
         return $flags;
+    }
+
+    /**
+     * `discovery_optout` (= /me/profile-prefs `hide_from_search`) as search
+     * applies it: the per-member form of
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}.
+     * Hidden when any row of the one flag reads as on, or, until the F-257
+     * fold has completed ({@see legacyOptOutStillRead()}), any row of the
+     * legacy opt-out does. So the setting a member is shown is what search
+     * does to them (F-519).
+     *
+     * The fold-done option is read only when the one flag is off and a
+     * legacy row is on.
+     *
+     * @param array<string, list<string>> $byKey
+     */
+    private static function searchOptOut(array $byKey): bool
+    {
+        if (self::strictest($byKey[self::HIDE_FROM_LISTING_META] ?? [])) {
+            return true;
+        }
+
+        return self::strictest($byKey[self::LEGACY_DISCOVERY_OPTOUT_META] ?? [])
+            && self::legacyOptOutStillRead();
     }
 
     /** @param list<string> $rawValues */
