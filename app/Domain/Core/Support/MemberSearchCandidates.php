@@ -96,8 +96,7 @@ final class MemberSearchCandidates
 
         $failClosed = $throwOnReadFailure ? self::FAIL_CLOSED_QUERY_ARGS : [];
 
-        self::clearReadErrorIf($throwOnReadFailure);
-        $byName = get_users($failClosed + [
+        $byName = self::verifiedUserIds($failClosed + [
             'search'         => '*' . $needle . '*',
             'search_columns' => ['display_name'],
             'fields'         => 'ID',
@@ -107,8 +106,7 @@ final class MemberSearchCandidates
                 ['key' => 'bcc_privacy_real_name_hidden', 'compare' => 'NOT EXISTS'],
                 ['key' => 'bcc_privacy_real_name_hidden', 'value' => '1', 'compare' => '!='],
             ],
-        ]);
-        self::throwIfReadFailed($throwOnReadFailure, 'display name lookup');
+        ], $throwOnReadFailure, 'display name lookup');
 
         // A display_name that IS the login (wp-admin / WP-CLI accounts, and a
         // member renamed before F-280 whose display_name still holds their
@@ -161,15 +159,13 @@ final class MemberSearchCandidates
 
         $byHandle = [];
         if ($handle !== '') {
-            self::clearReadErrorIf($throwOnReadFailure);
-            $byHandle = get_users($failClosed + [
+            $byHandle = self::verifiedUserIds($failClosed + [
                 'meta_key'     => 'bcc_handle',
                 'meta_value'   => $handle,
                 'meta_compare' => 'LIKE',
                 'fields'       => 'ID',
                 'number'       => $max,
-            ]);
-            self::throwIfReadFailed($throwOnReadFailure, 'handle lookup');
+            ], $throwOnReadFailure, 'handle lookup');
         }
 
         $ids = [];
@@ -209,6 +205,129 @@ final class MemberSearchCandidates
             }
             return true;
         }));
+    }
+
+    /**
+     * Run one fail-closed `get_users()` lookup and refuse unless it RAN.
+     *
+     * ⚠⚠ ONLY THE TWO `get_users()` LOOKUPS GET THIS, and the other three
+     * guarded steps in ids() are deliberately left alone. After
+     * `cache_users()` primes the rows, `get_userdata()` is a CACHE HIT
+     * that runs no statement at all — legitimately. A "did a statement
+     * run" requirement there cannot tell "did not run" from "did not
+     * need to run", so it would throw on a warm cache and turn an
+     * ordinary member search into a 503. For those steps the F-456
+     * `last_error` checks remain the best available signal, and their
+     * limits are already documented above.
+     *
+     * ⇒ Do not "finish the job" by extending this to them.
+     *
+     * ── WHAT THIS ESTABLISHES ───────────────────────────────────────
+     *
+     * `last_error` alone cannot: `wpdb::query()` returns false ABOVE
+     * `flush()` on a failed reconnect and on an emptied `query` filter,
+     * recording no error. And the read happens inside `WP_User_Query`,
+     * so there is no return value of ours to check. So the lookup's own
+     * query object is captured and three cases are separated:
+     *
+     *   `request` EMPTY → something answered the lookup through
+     *     `users_pre_query` (WP 5.1+, applied at
+     *     class-wp-user-query.php:820 BEFORE `request` is assembled).
+     *     ACCEPTED: these lookups MATCH (display name, current handle);
+     *     they are not the privacy filter, and substituting the matching
+     *     is what that extension point is for. Privacy is enforced
+     *     elsewhere — PeepSo's pass in bcc-search, and the real-name
+     *     flags in withoutHiddenRealNames().
+     *
+     *     ⚠ bcc-search's privacy pass makes the OPPOSITE choice for the
+     *     same filter, and deliberately: there the statement IS the
+     *     filter, so an answer that skipped it is refused. Same
+     *     mechanism, different thing at stake.
+     *
+     *   `request` set, it ran, and it was the last statement → ACCEPTED.
+     *
+     *   `request` set and either check fails → REFUSED. The statement
+     *     was built and did not execute.
+     *
+     * ⚠ The `num_queries` half is applied ONLY in the branch where a
+     * statement is guaranteed to execute: FAIL_CLOSED_QUERY_ARGS sets
+     * `cache_results => false`, and with the cache skipped
+     * class-wp-user-query.php:843-847 always reaches
+     * `$wpdb->get_col($this->request)`. Outside that branch the counter
+     * says nothing, which is the whole reason the three steps above are
+     * excluded.
+     *
+     * @param  array<string, mixed> $args
+     * @return list<int|string>
+     * @throws RepositoryReadFailure when $failClosed and the lookup did not run
+     */
+    private static function verifiedUserIds(array $args, bool $failClosed, string $step): array
+    {
+        if (!$failClosed) {
+            // The fail-SAFE contract is unchanged: a lookup that did not
+            // run answers as "nobody matched", as it always has.
+            $ids = get_users($args);
+
+            return is_array($ids) ? array_values($ids) : [];
+        }
+
+        global $wpdb;
+
+        $captured = null;
+        $capture  = static function (object $query) use (&$captured): void {
+            $captured = $query;
+        };
+
+        self::clearReadError();
+        $queriesBefore = (int) ($wpdb->num_queries ?? 0);
+
+        // Added and removed around this one call, at a priority late
+        // enough to see PeepSo's clauses already in place. Removed in a
+        // finally so a throw from inside the query cannot leave it
+        // attached for the rest of the request.
+        add_action('pre_user_query', $capture, PHP_INT_MAX);
+        try {
+            $ids = get_users($args);
+        } finally {
+            remove_action('pre_user_query', $capture, PHP_INT_MAX);
+        }
+
+        self::guardReadOrThrow('ids: ' . $step);
+        self::throwUnlessLookupRan($captured, $queriesBefore, $step);
+
+        return is_array($ids) ? array_values($ids) : [];
+    }
+
+    /**
+     * Refuse a lookup whose statement was built and did not execute.
+     *
+     * See {@see verifiedUserIds()} for why an EMPTY request is accepted
+     * and why the counter is only consulted alongside a built request.
+     *
+     * @throws RepositoryReadFailure
+     */
+    private static function throwUnlessLookupRan(?object $query, int $queriesBefore, string $step): void
+    {
+        global $wpdb;
+
+        $request = $query !== null ? (string) ($query->request ?? '') : '';
+        if ($request === '') {
+            return; // answered through users_pre_query; see the docblock.
+        }
+
+        $ran    = (int) ($wpdb->num_queries ?? 0) > $queriesBefore;
+        $isOurs = (string) ($wpdb->last_query ?? '') === $request;
+        if ($ran && $isOurs) {
+            return;
+        }
+
+        throw new RepositoryReadFailure(
+            static::class,
+            'ids: ' . $step,
+            'the lookup statement was built but did not run'
+            . ' (a statement ran: ' . ($ran ? 'yes' : 'no')
+            . ', and it was this lookup: ' . ($isOurs ? 'yes' : 'no') . ')'
+        );
     }
 
     /**
