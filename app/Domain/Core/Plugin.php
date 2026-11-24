@@ -880,7 +880,18 @@ final class Plugin
             $this->userViewService(),
             $this->cardViewService(),
             $this->shiftLogService(),
-            $this->attestationService()
+            $this->attestationService(),
+            $this->publicProfileIndex()
+        );
+    }
+
+    /** F-518: the one owner of "may this be listed publicly" (sitemap + `indexable`). */
+    private ?Services\PublicProfileIndex $publicProfileIndex = null;
+    public function publicProfileIndex(): Services\PublicProfileIndex
+    {
+        return $this->publicProfileIndex ??= new Services\PublicProfileIndex(
+            new Repositories\PublicIndexRepository($this->userInfoRepository()),
+            $this->groupContextResolver()
         );
     }
 
@@ -1495,6 +1506,9 @@ final class Plugin
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
+        // F-518: the app sitemap's public index (members, pages, groups).
+        // Anonymous, viewer-independent, fail-closed.
+        \BCC\Trust\Core\REST\SitemapEndpoint::register();
 
         // V1 contract: per-user 52-week shift-log activity grid (§4.4)
         \BCC\Trust\Core\REST\UsersEndpoint::register();
