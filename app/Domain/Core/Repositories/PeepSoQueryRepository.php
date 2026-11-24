@@ -350,6 +350,37 @@ final class PeepSoQueryRepository
     }
 
     /**
+     * Move a page's post_author from $fromUserId to $toUserId ONLY if it is
+     * still $fromUserId: one compare-and-set UPDATE, so no post-save handler
+     * runs and a concurrent change is never overwritten. The caller clears
+     * the post cache.
+     *
+     * @return bool|null true = moved; false = the author was not $fromUserId;
+     *   null = the write failed (nothing is known to have changed)
+     */
+    public static function compareAndSetPageAuthor(int $pageId, int $fromUserId, int $toUserId): ?bool
+    {
+        if ($pageId <= 0 || $fromUserId <= 0 || $toUserId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        self::clearLastError();
+        $changed = $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->posts} SET post_author = %d
+              WHERE ID = %d AND post_author = %d AND post_type = 'peepso-page'",
+            $toUserId,
+            $pageId,
+            $fromUserId
+        ));
+        if ($changed === false || self::lastError() !== '') {
+            return null;
+        }
+
+        return (int) $changed === 1;
+    }
+
+    /**
      * F-360: the ONE order for "the claimer's status on a page" when the pair
      * has several peepso_page_members rows: a `banned` row first (a ban is
      * never hidden), then a `member_owner` row (an owner is never missed),
