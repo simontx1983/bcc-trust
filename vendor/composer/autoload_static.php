@@ -762,6 +762,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\RelationshipLogHasher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/RelationshipLogHasher.php',
         'BCC\\Trust\\Onchain\\Support\\SolanaEndpoints' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/SolanaEndpoints.php',
         'BCC\\Trust\\Onchain\\Support\\StakeAmount' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/StakeAmount.php',
+        'BCC\\Trust\\Onchain\\Support\\ValidatorStatusProjection' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ValidatorStatusProjection.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\ChainDescriptionState' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/ChainDescriptionState.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\ChainNftCapabilityOverrides' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/ChainNftCapabilityOverrides.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\ClaimStatus' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/ClaimStatus.php',

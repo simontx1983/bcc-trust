@@ -34,6 +34,7 @@ use BCC\Trust\Core\ValueObjects\GroupVerification;
 use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Repositories\ValidatorGroupRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
+use BCC\Trust\Onchain\Support\ValidatorStatusProjection;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
 use BCC\Trust\Onchain\ValueObjects\ValidatorGatedGroupConfig;
 use WP_REST_Request;
@@ -351,6 +352,7 @@ final class ValidatorGroupsEndpoint
      *     delegator_count: string|null,
      *     native_token: string|null,
      *     chain_name?: string|null,
+     *     chain_id?: int,
      *     page_slug: string|null
      * }|null $row
      * @return array{
@@ -377,7 +379,11 @@ final class ValidatorGroupsEndpoint
         return [
             'moniker'           => $row->moniker !== null && $row->moniker !== '' ? (string) $row->moniker : null,
             'chain_name'        => isset($row->chain_name) && $row->chain_name !== '' ? (string) $row->chain_name : null,
-            'status'            => $row->status !== null && $row->status !== '' ? (string) $row->status : null,
+            // F-584: `unknown` while the chain has stopped answering (a row
+            // with no chain id cannot be shown as current either).
+            'status'            => ValidatorStatusProjection::isStale((int) ($row->chain_id ?? 0))
+                ? ValidatorStatusProjection::UNKNOWN
+                : ($row->status !== null && $row->status !== '' ? (string) $row->status : null),
             'commission'        => $row->commission_rate !== null ? (float) $row->commission_rate : null,
             'total_stake'       => $row->total_stake !== null ? (float) $row->total_stake : null,
             'delegator_count'   => $row->delegator_count !== null ? (int) $row->delegator_count : null,
