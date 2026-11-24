@@ -997,7 +997,7 @@ final class CollectionRepository
         $table  = self::table();
         $chains = ChainRepository::table();
 
-        $row = $wpdb->get_row($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT c.id, c.contract_address, c.canonical_identifier, c.chain_id,
                     c.collection_name, c.collection_symbol, c.token_standard,
                     c.total_supply, c.unique_holders, c.image_url, c.marketplace_url,
@@ -1015,14 +1015,18 @@ final class CollectionRepository
               WHERE c.id = %d
               LIMIT 1",
             $collectionId
-        ));
+        );
 
-        // ⚠ `get_row()` returns null BOTH for no-such-row and for a failed
-        // query, so this has to run on the null path too — otherwise an
-        // unreadable table is indistinguishable from a deleted collection.
-        self::guardReadOrThrow('findForAdminDetail');
-
-        return $row;
+        // ⚠⚠ runReadRow, NOT get_row(). `get_row()` returns null BOTH for
+        // no-such-row and for a read that did not run, which is why the old
+        // form had to run its guard on the null path too. That guard reads
+        // `last_error` and nothing else, so it could not see a pre-flush
+        // bail: query() returns false above flush(), no error is recorded,
+        // and the PREVIOUS query's rows are still in last_result.
+        //
+        // The read is now verified before a row is taken from it, so null
+        // has ONE meaning here: there is no such collection.
+        return self::runReadRow($sql, 'findForAdminDetail', true);
     }
 
 
@@ -1506,7 +1510,8 @@ final class CollectionRepository
      * collection (a legitimate re-add).
      *
      * Fail closed: a read that did not run throws, so a write path can
-     * refuse instead of trusting an empty answer. `query()` is called
+     * refuse instead of trusting an empty answer. It reads through
+     * {@see GuardsReadFailures::runReadRow()}, which calls `query()`
      * explicitly because wpdb has failure paths that return false without
      * setting `last_error` and before `flush()`, leaving the previous
      * query's rows in `last_result`.
@@ -1524,8 +1529,7 @@ final class CollectionRepository
         global $wpdb;
         $table = self::table();
 
-        $wpdb->last_error = '';
-        $ok = $wpdb->query($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT id, contract_address, canonical_identifier
                FROM {$table}
               WHERE chain_id = %d
@@ -1535,16 +1539,16 @@ final class CollectionRepository
             $chainId,
             $contract,
             $canonical
-        ));
-        if ($ok === false) {
-            throw new RepositoryReadFailure(static::class, __FUNCTION__, (string) $wpdb->last_error);
-        }
-        self::guardReadOrThrow(__FUNCTION__);
+        );
 
-        $row = is_array($wpdb->last_result) ? ($wpdb->last_result[0] ?? null) : null;
+        // This method already hand-rolled the verified read — clear
+        // last_error, call query(), check its return, then take row 0 out
+        // of last_result. That is precisely runReadRow(). Same behaviour,
+        // one owner, and the next read of this shape inherits it.
+        /** @var object{id: int|numeric-string, contract_address: string, canonical_identifier: ?string}|null $row */
+        $row = self::runReadRow($sql, __FUNCTION__, true);
 
-        /** @var object{id: int|numeric-string, contract_address: string, canonical_identifier: ?string}|null */
-        return is_object($row) ? $row : null;
+        return $row;
     }
 
     /**
@@ -1599,7 +1603,7 @@ final class CollectionRepository
             return null;
         }
 
-        $value = $wpdb->get_var($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT token_standard
                FROM {$table}
               WHERE chain_id = %d
@@ -1607,17 +1611,20 @@ final class CollectionRepository
               LIMIT 1",
             $chainId,
             $identity->canonical()
-        ));
-        if ($failClosed) {
-            self::guardReadOrThrow('findTokenStandardOrThrow');
-        } else {
-            self::guardRead('findTokenStandard');
-        }
+        );
 
+        // runReadVar carries the caller's policy in its third argument, so
+        // the two guard branches collapse into the read itself. The names
+        // are kept exactly as they were, because they appear in logs.
+        $value = self::runReadVar(
+            $sql,
+            $failClosed ? 'findTokenStandardOrThrow' : 'findTokenStandard',
+            $failClosed
+        );
         if ($value === null) {
             return null;
         }
-        $str = trim((string) $value);
+        $str = trim($value);
         return $str === '' ? null : $str;
     }
 
@@ -1921,17 +1928,7 @@ final class CollectionRepository
         $table  = self::table();
         $chains = ChainRepository::table();
 
-        /** @var list<object{
-         *     id: string,
-         *     chain_id: string,
-         *     contract_address: string,
-         *     canonical_identifier: string|null,
-         *     collection_name: string|null,
-         *     image_url: string|null,
-         *     chain_slug: string,
-         *     chain_type: string
-         * }>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT c.id, c.chain_id, c.contract_address, c.canonical_identifier,
                     c.collection_name, c.image_url,
                     ch.slug AS chain_slug, ch.chain_type
@@ -1945,14 +1942,32 @@ final class CollectionRepository
              LIMIT %d",
             $chainId,
             $limit
-        ));
-        if ($failClosed) {
-            self::guardReadOrThrow('listVerifiedByChainOrThrow');
-        } else {
-            self::guardRead('listVerifiedByChain');
-        }
+        );
 
-        return $rows ?: [];
+        // The @var moved down to the assignment it describes. runRead()
+        // returns a list and never null, so the `|null` arm and the
+        // `?: []` below it were both unreachable: a guard that cannot
+        // fire tells the next reader the shape is uncertain when it is
+        // not. The third argument carries the caller's policy, so the
+        // two guard branches collapse into the read. Both log names are
+        // kept exactly as they were, because they appear in logs.
+        /** @var list<object{
+         *     id: string,
+         *     chain_id: string,
+         *     contract_address: string,
+         *     canonical_identifier: string|null,
+         *     collection_name: string|null,
+         *     image_url: string|null,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }> $rows */
+        $rows = self::runRead(
+            $sql,
+            $failClosed ? 'listVerifiedByChainOrThrow' : 'listVerifiedByChain',
+            $failClosed
+        );
+
+        return $rows;
     }
 
 
