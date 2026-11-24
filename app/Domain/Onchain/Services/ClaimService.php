@@ -86,7 +86,7 @@ class ClaimService {
         // a staff revoke's reasons, a staff link cancelled, and a staff or
         // node-key owner replaced by a wallet proof.
         'linked_in_error', 'evidence_withdrawn', 'owner_requested', 'ownership_disputed',
-        'link_cancelled', 'superseded_by_wallet_proof',
+        'link_cancelled', 'superseded_by_proof',
     ];
 
     /**

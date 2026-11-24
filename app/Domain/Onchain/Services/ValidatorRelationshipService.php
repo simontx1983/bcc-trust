@@ -245,7 +245,7 @@ final class ValidatorRelationshipService
                         'prev'         => $prev,
                         'new'          => ['user_id' => $userId, 'method' => 'wallet'],
                         'validator_id' => $validatorId,
-                        'reason'       => 'superseded_by_wallet_proof',
+                        'reason'       => 'superseded_by_proof',
                     ],
                 ]);
                 $superseded[] = ['claim_id' => $other['claim_id'], 'user_id' => $other['user_id'], 'result' => $revoked];
@@ -301,7 +301,7 @@ final class ValidatorRelationshipService
             $superseded = $done['superseded'] ?? [];
             $pages      = $pageId > 0 ? [$pageId] : [];
             foreach ($superseded as $old) {
-                self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($old['claim_id'], $old['result'], 'superseded_by_wallet_proof', false));
+                self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($old['claim_id'], $old['result'], 'superseded_by_proof', false));
                 $pages = array_merge($pages, $old['result']['mirror_page_ids'], $old['result']['bound_page_ids']);
                 self::changed('owner_superseded', $pageId > 0 ? $pageId : (int) ($old['result']['mirror_page_ids'][0] ?? 0), $old['user_id'], $userId, $old['claim_id']);
             }
@@ -314,7 +314,7 @@ final class ValidatorRelationshipService
                 self::safely('audit', static fn () => AuditLogger::log('validator_owner_superseded', $pageId, [
                     'validator_id' => $validatorId,
                     'superseded'   => array_map(static fn (array $o): int => $o['user_id'], $superseded),
-                    'reason'       => 'superseded_by_wallet_proof',
+                    'reason'       => 'superseded_by_proof',
                 ], 'page', $userId));
             }
             if ($pageId > 0 && !($done['idempotent'] ?? false) && !($done['mirror'] ?? false)) {
