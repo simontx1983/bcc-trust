@@ -967,6 +967,11 @@ class CronService
             // copy makes, so the sweep must run far more often than the
             // window it enforces, or a single missed run breaks the promise.
             'bcc_trust_post_reach_dedupe_sweep' => 'hourly',
+            // F-581: the PeepSo upkeep BCC depends on (trending hashtags,
+            // expired mayfly rows, registration-avatar temp files), run by
+            // BCC because PeepSo's own maintenance bundle is not run here.
+            // See Integration\PeepSoUpkeep for what it does and never does.
+            'bcc_trust_peepso_upkeep'          => 'bcc_five_minutes',
         ];
 
         /**
