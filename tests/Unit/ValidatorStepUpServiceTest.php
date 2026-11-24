@@ -180,6 +180,32 @@ final class ValidatorStepUpServiceTest extends TestCase
         self::assertTrue(S::consumeInTransaction(self::STAFF, $r['step_up_id'], 'remove_team_member', 501, 900, 'representative'));
     }
 
+    /** The C3 split: a team step-up never authorizes an owner change, nor the reverse. */
+    public function testATeamStepUpNeverSpendsOnAnOwnerActionNorTheReverse(): void
+    {
+        $team = S::start(self::request(), self::STAFF, 'add_team_member', 501, 900, 'owner')['step_up_id'];
+        self::assertNull(S::checkCode(self::STAFF, $team, null));
+        foreach (['link_owner', 'revoke_owner', 'cancel_link'] as $ownerAction) {
+            self::assertFalse(S::consumeInTransaction(self::STAFF, $team, $ownerAction, 501, 900, 'owner'), $ownerAction);
+        }
+
+        [$owner, $code] = self::startLink();
+        self::assertNull(S::checkCode(self::STAFF, $owner, $code));
+        foreach (['add_team_member', 'remove_team_member'] as $teamAction) {
+            self::assertFalse(S::consumeInTransaction(self::STAFF, $owner, $teamAction, 501, 900, 'owner'), $teamAction);
+        }
+    }
+
+    /** Defence in depth: an owner-level row that somehow lost its code never skips the code. */
+    public function testAnOwnerStepUpWithoutACodeIsInvalid(): void
+    {
+        [$id] = self::startLink();
+        \StepUpWorld::$rows[$id]->code_hash = null;
+
+        self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, null));
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+    }
+
     public function testAnExpiredStepUpIsReportedAndLogged(): void
     {
         [$id, $code] = self::startLink();

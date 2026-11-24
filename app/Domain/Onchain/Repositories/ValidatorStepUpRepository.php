@@ -24,6 +24,9 @@ if (!defined('ABSPATH')) {
  *  - {@see replaceCode()} never extends a step-up past MAX_LIFETIME_SECONDS
  *    from its creation, and clears the code verification.
  *
+ * An owner-level action (CODE_REQUIRED_ACTIONS) always needs a code: such a
+ * row is never stored without one, and never consumed without one.
+ *
  * Times are UTC strings computed by the caller in PHP, never MySQL NOW().
  *
  * @phpstan-type StepUpRow object{id: string, user_id: numeric-string, action: string, page_id: numeric-string, target_user_id: numeric-string, role: string, code_hash: string|null, credential_verified: numeric-string, attempts: numeric-string, created_at: string, expires_at: string, resend_after: string|null, used_at: string|null, code_verified_at: string|null}
@@ -33,6 +36,9 @@ if (!defined('ABSPATH')) {
 final class ValidatorStepUpRepository
 {
     use GuardsReadFailures;
+
+    /** Actions that need the password AND an emailed code (owner-level changes). */
+    public const CODE_REQUIRED_ACTIONS = ['link_owner', 'revoke_owner', 'cancel_link'];
 
     /** Wrong codes (or code checks) a step-up survives. */
     public const MAX_ATTEMPTS = 5;
@@ -54,9 +60,13 @@ final class ValidatorStepUpRepository
     /**
      * @param array{id: string, user_id: int, action: string, page_id: int, target_user_id: int, role: string, code_hash: string|null, created_at: string, expires_at: string, resend_after: string|null} $row
      * @throws \RuntimeException when the insert fails
+     * @throws \InvalidArgumentException for an owner-level action without a code
      */
     public static function create(array $row): void
     {
+        if ($row['code_hash'] === null && in_array($row['action'], self::CODE_REQUIRED_ACTIONS, true)) {
+            throw new \InvalidArgumentException('An owner-level step-up needs a code.');
+        }
         global $wpdb;
         $ok = $wpdb->insert(self::table(), [
             'id'                  => $row['id'],
@@ -161,6 +171,7 @@ final class ValidatorStepUpRepository
             "UPDATE {$table} SET used_at = %s
               WHERE id = %s AND user_id = %d AND action = %s AND page_id = %d AND target_user_id = %d AND role = %s
                 AND credential_verified = 1 AND (code_hash IS NULL OR code_verified_at IS NOT NULL)
+                AND (code_hash IS NOT NULL OR action NOT IN (%s, %s, %s))
                 AND used_at IS NULL AND expires_at > %s AND attempts <= %d",
             $nowUtc,
             $binding['id'],
@@ -169,8 +180,7 @@ final class ValidatorStepUpRepository
             $binding['page_id'],
             $binding['target_user_id'],
             $binding['role'],
-            $nowUtc,
-            self::MAX_ATTEMPTS
+            ...[...self::CODE_REQUIRED_ACTIONS, $nowUtc, self::MAX_ATTEMPTS]
         ));
     }
 

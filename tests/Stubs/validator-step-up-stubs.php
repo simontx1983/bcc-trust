@@ -166,6 +166,7 @@ namespace BCC\Trust\Onchain\Repositories {
         {
             public const MAX_ATTEMPTS = 5;
             public const MAX_LIFETIME_SECONDS = 1800;
+            public const CODE_REQUIRED_ACTIONS = ['link_owner', 'revoke_owner', 'cancel_link'];
 
             /** @param array<string, mixed> $row */
             public static function create(array $row): void
@@ -207,6 +208,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 $row = self::find((string) $b['id'], (int) $b['user_id']);
                 if ($row === null || $row->used_at !== null || strcmp((string) $row->expires_at, $now) <= 0
                     || ($row->code_hash !== null && $row->code_verified_at === null)
+                    || ($row->code_hash === null && in_array($row->action, self::CODE_REQUIRED_ACTIONS, true))
                     || $row->action !== $b['action'] || (int) $row->page_id !== $b['page_id']
                     || (int) $row->target_user_id !== $b['target_user_id'] || $row->role !== $b['role']
                 ) {

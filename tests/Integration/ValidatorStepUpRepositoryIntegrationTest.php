@@ -95,10 +95,32 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
     public function testAPasswordOnlyStepUpNeedsNoCodeAndCannotBeMarked(): void
     {
         $id = str_repeat('8', 32);
-        self::make($id, 600, null, false);
+        StepUps::create([
+            'id' => $id, 'user_id' => self::STAFF, 'action' => 'add_team_member', 'page_id' => 501,
+            'target_user_id' => 900, 'role' => 'representative', 'code_hash' => null,
+            'created_at' => self::at(0), 'expires_at' => self::at(600), 'resend_after' => null,
+        ]);
+        $binding = ['action' => 'add_team_member', 'role' => 'representative'] + self::binding($id);
 
         self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(0)), 'no code to verify');
-        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
+        self::assertTrue(StepUps::consume($binding, self::at(0)));
+    }
+
+    public function testAnOwnerLevelStepUpIsNeverStoredOrConsumedWithoutACode(): void
+    {
+        global $wpdb;
+        try {
+            self::make(str_repeat('4', 32), 600, null, false);
+            self::fail('an owner-level step-up was stored without a code');
+        } catch (\InvalidArgumentException $e) {
+            self::assertNull(StepUps::find(str_repeat('4', 32), self::STAFF));
+        }
+
+        // A row that lost its code some other way is still never consumed.
+        $id = str_repeat('3', 32);
+        self::make($id);
+        $wpdb->query($wpdb->prepare('UPDATE `' . StepUps::table() . '` SET code_hash = NULL WHERE id = %s', $id));
+        self::assertFalse(StepUps::consume(self::binding($id), self::at(0)));
     }
 
     public function testADeadStepUpCannotBeMarked(): void

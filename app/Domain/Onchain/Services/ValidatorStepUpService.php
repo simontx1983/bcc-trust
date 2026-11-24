@@ -43,7 +43,7 @@ if (!defined('ABSPATH')) {
 final class ValidatorStepUpService
 {
     /** Actions confirmed with the password AND an emailed code. */
-    public const ACTIONS_WITH_CODE = ['link_owner', 'revoke_owner', 'cancel_link'];
+    public const ACTIONS_WITH_CODE = StepUps::CODE_REQUIRED_ACTIONS;
 
     /** Actions confirmed with the password alone. */
     public const ACTIONS_PASSWORD_ONLY = ['add_team_member', 'remove_team_member'];
@@ -195,7 +195,8 @@ final class ValidatorStepUpService
             return 'step_up_invalid';
         }
         if ($row->code_hash === null) {
-            return null; // a password-only step-up
+            // A password-only step-up, which an owner-level action never is.
+            return in_array((string) $row->action, self::ACTIONS_WITH_CODE, true) ? 'step_up_invalid' : null;
         }
         if ($code === null || preg_match('/^\d{6}$/', $code) !== 1
             || !hash_equals((string) $row->code_hash, self::codeHash($stepUpId, $code))
