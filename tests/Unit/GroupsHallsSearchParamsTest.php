@@ -56,9 +56,15 @@ final class GroupsHallsSearchParamsTest extends TestCase
     private static function call(string $route, array $params): array
     {
         $request = new \WP_REST_Request($params);
-        $res     = $route === '/groups'
-            ? (new GroupsDiscoveryEndpoint())->getList($request)
-            : (new HallsEndpoint())->handle($request);
+        try {
+            $res = $route === '/groups'
+                ? (new GroupsDiscoveryEndpoint())->getList($request)
+                : (new HallsEndpoint())->handle($request);
+        } catch (\Throwable $e) {
+            // Every case here must stop before the first read; one that ran
+            // on into a read the stubs cannot serve failed to refuse.
+            self::fail('the request was not refused before the reads: ' . $e->getMessage());
+        }
         $data = $res->get_data();
         $err  = is_array($data) && is_array($data['error'] ?? null) ? $data['error'] : [];
 
