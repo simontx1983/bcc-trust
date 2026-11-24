@@ -56,6 +56,8 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         }
         $GLOBALS['__actions']      = [];
         $GLOBALS['bcc_scheduled']  = [];
+        $GLOBALS['__bcc_ineligible_targets'] = [];
+        require_once dirname(__DIR__) . '/Stubs/validator-link-target-stub.php';
         $this->cleanUp();
 
         global $wpdb;
@@ -312,6 +314,53 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         self::assertSame([true, false], [$result['success'], $result['mirror_written']]);
         self::assertSame('verified', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null, 'the claim stands');
         self::assertNull($this->row(self::OWNER, 'page', self::PAGE));
+    }
+
+    /** Security #881: a link to a member who is not eligible is refused INSIDE the run. */
+    public function testALinkToAnIneligibleMemberIsRefusedAndNothingIsWritten(): void
+    {
+        $GLOBALS['__bcc_ineligible_targets'] = [self::OWNER];
+        $stepUp = self::stepUp('link_owner', self::OWNER);
+
+        self::assertSame(['ok' => false, 'reason' => 'target_not_eligible', 'status' => 422], $this->link(self::OWNER, $stepUp));
+        self::assertNull(ClaimRepository::getUserClaim(self::OWNER, 'validator', $this->validatorId, ['operator']));
+        self::assertSame([], self::logActions());
+        self::assertNull(StepUps::find($stepUp, self::STAFF)?->used_at, 'the step-up is not spent');
+    }
+
+    /** Security #881 belt: a page that is not bound to the validator is never mirrored. */
+    public function testAWalletClaimNeverMirrorsAnUnboundPage(): void
+    {
+        $result = Service::claimByWallet(self::OWNER, $this->validatorId, 'cosmos1proof', 7, self::PAGE + 50);
+
+        self::assertSame([true, false], [$result['success'], $result['mirror_written']]);
+        self::assertSame('verified', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null);
+        self::assertNull($this->row(self::OWNER, 'page', self::PAGE + 50));
+        self::assertSame('0', (string) Log::rowsAfter(0, 1)[0]->page_id, 'and never named in the log');
+    }
+
+    /** Review #881: a validator's page mirror is written under the PAGE lock a collection mirror takes. */
+    public function testAWalletClaimWaitsForThePageLock(): void
+    {
+        $other = new \mysqli(
+            getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+            getenv('BCC_TEST_DB_USER') ?: 'root',
+            getenv('BCC_TEST_DB_PASS') ?: 'root',
+            getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+            (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+        );
+        $held = $other->query("SELECT GET_LOCK('bcc_claim:page:" . self::PAGE . ":operator', 0) AS got")->fetch_assoc();
+        self::assertSame('1', (string) ($held['got'] ?? ''), 'control: the other connection holds the page lock');
+        try {
+            $result = $this->walletClaim(self::OWNER);
+        } finally {
+            $other->query("SELECT RELEASE_LOCK('bcc_claim:page:" . self::PAGE . ":operator')");
+            $other->close();
+        }
+
+        self::assertSame(['success' => false, 'error' => 'transient'], array_intersect_key($result, ['success' => 1, 'error' => 1]));
+        self::assertNull($this->row(self::OWNER, 'validator', $this->validatorId), 'nothing written without the page lock');
+        self::assertSame([], self::logActions());
     }
 
     public function testAStaffApprovedOwnerMustBeRevokedFirst(): void

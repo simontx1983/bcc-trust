@@ -148,6 +148,44 @@ final class RelationshipLogLockOrderGuardTest extends TestCase
     }
 
     /**
+     * vrl → validator claim lock → page claim lock(s): a method that names
+     * both a validator and a page claim lock acquires the validator one
+     * first (a collection's page mirror takes only the page lock, so the
+     * order can never form a cycle).
+     */
+    public function testPageClaimLocksComeAfterTheValidatorClaimLock(): void
+    {
+        $root    = dirname(__DIR__, 2);
+        $checked = 0;
+        $it      = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app', \FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $file) {
+            if (!$file instanceof \SplFileInfo || $file->getExtension() !== 'php') {
+                continue;
+            }
+            $relative = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+            $code     = GateOrder::code($relative);
+            if (!str_contains($code, "'bcc_claim:page:'") || !str_contains($code, "'bcc_claim:validator:'")) {
+                continue;
+            }
+            preg_match_all('/function\s+(\w+)\s*\(/', $code, $m);
+            foreach ($m[1] as $method) {
+                $body = GateOrder::body($code, $method);
+                $page = strpos($body, "'bcc_claim:page:'");
+                $val  = strpos($body, "'bcc_claim:validator:'");
+                if ($page === false || $val === false) {
+                    continue;
+                }
+                ++$checked;
+                self::assertLessThan($page, $val, "{$relative} {$method}(): the validator claim lock is named (and taken) before any page claim lock");
+                preg_match_all('/AdvisoryLock::acquire\(/', $body, $acq, PREG_OFFSET_CAPTURE);
+                $afterPage = array_filter(array_column($acq[0], 1), static fn (int $o): bool => $o > $page);
+                self::assertNotSame([], $afterPage, "{$relative} {$method}(): a page claim lock is acquired after it is named");
+            }
+        }
+        self::assertGreaterThanOrEqual(1, $checked, 'the scan found the validator+page lock path (it is not scanning nothing)');
+    }
+
+    /**
      * In a method that takes the vrl lock, NOTHING that takes a lock runs
      * before it: not a direct AdvisoryLock::acquire(), and not a helper that
      * takes one inside (createExclusiveClaim(), ClaimRepository::revoke(),

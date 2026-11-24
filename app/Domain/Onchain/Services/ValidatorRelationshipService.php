@@ -94,8 +94,18 @@ final class ValidatorRelationshipService
         if ($stepUpError !== null) {
             return self::refused($stepUpError, 403);
         }
+        try {
+            $lockedPages = ClaimRepository::boundPagesFor('validator', $validatorId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return self::refused('unavailable', 503);
+        }
 
-        $result = self::underLocks($validatorId, static function () use ($staffId, $pageId, $userId, $validatorId, $evidenceType, $evidenceNote, $evidenceRef, $stepUpId): array {
+        $result = self::underLocks($validatorId, static function () use ($staffId, $pageId, $userId, $validatorId, $evidenceType, $evidenceNote, $evidenceRef, $stepUpId, $lockedPages): array {
+            // The member staff are about to make an owner must be a real,
+            // known-not-suspended account with member powers (fail-closed).
+            if (!ValidatorLinkTargetCheck::eligible($userId)) {
+                throw new RelationshipRefusal('target_not_eligible', 422);
+            }
             if (!ValidatorStepUpService::consumeInTransaction($staffId, $stepUpId, 'link_owner', $pageId, $userId, 'owner')) {
                 throw new RelationshipRefusal('step_up_invalid', 403);
             }
@@ -109,9 +119,10 @@ final class ValidatorRelationshipService
                 throw new RelationshipRefusal('owner_exists', 409);
             }
 
+            // Mirrors only on pages still bound now AND locked by this run.
             $write = ClaimRepository::writeRelationshipClaim(
                 $userId, 'validator', $validatorId, 'operator', 'staff', $staffId, '', 0,
-                ClaimRepository::boundPagesFor('validator', $validatorId)
+                array_values(array_intersect(ClaimRepository::boundPagesFor('validator', $validatorId), $lockedPages))
             );
             if (!$write['ok']) {
                 throw new RelationshipRefusal('owner_exists', 409);
@@ -146,7 +157,7 @@ final class ValidatorRelationshipService
             self::changed('owner_linked', $pageId, $userId, $staffId, (int) $done['link_id']);
 
             return ['ok' => true, 'link_id' => (int) $done['link_id']];
-        });
+        }, $lockedPages);
 
         if (($result['ok'] ?? false) !== true) {
             return self::refused((string) ($result['reason'] ?? 'unavailable'), (int) ($result['status'] ?? 503));
@@ -209,6 +220,10 @@ final class ValidatorRelationshipService
         }
 
         $result = self::underLocks($validatorId, static function () use ($userId, $validatorId, $walletAddress, $chainId, $pageId): array {
+            // Belt: the page is mirrored (and named in the log) only when it
+            // is bound to this validator, read strictly inside the run.
+            $page = ($pageId > 0 && in_array($pageId, ClaimRepository::boundPagesFor('validator', $validatorId), true)) ? $pageId : 0;
+
             $mine   = null;
             $others = [];
             foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('validator', $validatorId) as $row) {
@@ -219,7 +234,7 @@ final class ValidatorRelationshipService
                 }
             }
             if ($mine !== null) {
-                return ['claim_id' => $mine['claim_id'], 'idempotent' => true];
+                return ['claim_id' => $mine['claim_id'], 'idempotent' => true, 'page' => $page];
             }
             foreach ($others as $other) {
                 if (self::lockedForStaff($other['verification_method'])) {
@@ -237,7 +252,7 @@ final class ValidatorRelationshipService
                 $prev = ['user_id' => $other['user_id'], 'method' => $other['verification_method']];
                 Log::append([
                     'action'          => 'owner_superseded',
-                    'page_id'         => max(0, $pageId),
+                    'page_id'         => $page,
                     'subject_user_id' => $other['user_id'],
                     'actor_kind'      => 'member',
                     'actor_user_id'   => $userId,
@@ -258,17 +273,17 @@ final class ValidatorRelationshipService
 
             $mirror    = false;
             $converted = [];
-            if ($pageId > 0) {
+            if ($page > 0) {
                 $otherOwnerOnPage = false;
-                foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('page', $pageId) as $row) {
+                foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('page', $page) as $row) {
                     $otherOwnerOnPage = $otherOwnerOnPage || $row['user_id'] !== $userId;
                 }
                 if (!$otherOwnerOnPage) {
-                    $teamRole = ClaimRepository::teamRoleOnPageForUpdate($userId, $pageId);
+                    $teamRole = ClaimRepository::teamRoleOnPageForUpdate($userId, $page);
                     if ($teamRole !== null) {
-                        $converted[$pageId] = $teamRole;
+                        $converted[$page] = $teamRole;
                     }
-                    if (ClaimRepository::upsert($userId, 'page', $pageId, $walletAddress, $chainId, 'operator') === false) {
+                    if (ClaimRepository::upsert($userId, 'page', $page, $walletAddress, $chainId, 'operator') === false) {
                         throw new \RuntimeException('page mirror write failed');
                     }
                     $mirror = true;
@@ -278,7 +293,7 @@ final class ValidatorRelationshipService
 
             $appended = Log::append([
                 'action'          => 'owner_linked',
-                'page_id'         => max(0, $pageId),
+                'page_id'         => $page,
                 'subject_user_id' => $userId,
                 'actor_kind'      => 'member',
                 'actor_user_id'   => $userId,
@@ -295,8 +310,10 @@ final class ValidatorRelationshipService
                 'appended'   => $appended,
                 'superseded' => $superseded,
                 'mirror'     => $mirror,
+                'page'       => $page,
             ];
-        }, static function (array $done) use ($userId, $pageId, $validatorId): array {
+        }, static function (array $done) use ($userId, $validatorId): array {
+            $pageId = (int) ($done['page'] ?? 0);
             /** @var list<array{claim_id: int, user_id: int, result: array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}}> $superseded */
             $superseded = $done['superseded'] ?? [];
             $pages      = $pageId > 0 ? [$pageId] : [];
@@ -330,7 +347,7 @@ final class ValidatorRelationshipService
                 'mirror_written'      => (bool) ($done['mirror'] ?? false),
                 'superseded_user_ids' => array_map(static fn (array $o): int => $o['user_id'], $superseded),
             ];
-        });
+        }, $pageId > 0 ? [$pageId] : []);
 
         if (($result['ok'] ?? false) !== true) {
             $reason = (string) ($result['reason'] ?? 'unavailable');
@@ -435,16 +452,24 @@ final class ValidatorRelationshipService
 
     /**
      * Run $work under the lock order with the claim lock of $validatorId,
-     * inside one transaction; after the COMMIT, advance the anchor while the
-     * vrl lock is still held, then (locks released) run $after.
+     * then the page claim lock of each of $pageIds (ascending: the lock a
+     * collection's page mirror takes, so page rows are written under the
+     * same page lock wherever they come from), inside one transaction; after
+     * the COMMIT, advance the anchor while the vrl lock is still held, then
+     * (locks released) run $after.
+     *
+     *   vrl → bcc_claim:validator:{V}:operator → bcc_claim:page:{P}:operator…
      *
      * @param callable(): array<string, mixed> $work returns ['appended' => array{seq: int, row_hash: string}] when it appended
      * @param callable(array<string, mixed>): array<string, mixed> $after
+     * @param list<int> $pageIds pages whose rows $work may write
      * @return array<string, mixed> $after's result, or a refusal ['ok' => false, 'reason', 'status']
      */
-    private static function underLocks(int $validatorId, callable $work, callable $after): array
+    private static function underLocks(int $validatorId, callable $work, callable $after, array $pageIds = []): array
     {
         $claimLock = 'bcc_claim:validator:' . $validatorId . ':operator';
+        $pages     = array_values(array_unique(array_filter(array_map('intval', $pageIds), static fn (int $p): bool => $p > 0)));
+        sort($pages);
         if (!AdvisoryLock::acquire(Log::LOCK_NAME, self::LOCK_TIMEOUT)) {
             \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'log_lock_unavailable');
             return self::refused('busy', 503);
@@ -454,7 +479,16 @@ final class ValidatorRelationshipService
                 \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'claim_lock_unavailable');
                 return self::refused('busy', 503);
             }
+            $heldPageLocks = [];
             try {
+                foreach ($pages as $page) {
+                    $pageLock = 'bcc_claim:page:' . $page . ':operator';
+                    if (!AdvisoryLock::acquire($pageLock, self::LOCK_TIMEOUT)) {
+                        \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'claim_lock_unavailable');
+                        return self::refused('busy', 503);
+                    }
+                    $heldPageLocks[] = $pageLock;
+                }
                 /** @var array<string, mixed> $done */
                 $done = TransactionManager::run($work);
             } catch (RelationshipRefusal $refusal) {
@@ -463,6 +497,9 @@ final class ValidatorRelationshipService
                 \BCC\Core\Log\Logger::error('[bcc-trust] validator relationship change failed', ['error' => $e->getMessage()]);
                 return self::refused('unavailable', 503);
             } finally {
+                foreach (array_reverse($heldPageLocks) as $heldPageLock) {
+                    AdvisoryLock::release($heldPageLock);
+                }
                 AdvisoryLock::release($claimLock);
             }
 
