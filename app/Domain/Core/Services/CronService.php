@@ -311,8 +311,17 @@ class CronService
         try {
             $graph = Plugin::instance()->trustGraph();
 
-            // PageRank
-            $graph->batchCalculateAllRanks();
+            // PageRank. F-574: the edge reads FAIL CLOSED. A read that cannot
+            // be verified throws before any rank is computed or written, so
+            // this run leaves every stored rank as it was and the next run
+            // retries. Caught HERE only, so ring detection below still runs.
+            try {
+                $graph->batchCalculateAllRanks();
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] PageRank skipped: the edge graph could not be read; ranks unchanged', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
 
             // Ring / sybil detection (cache results for FraudDetector lookups)
             $ringMinSize = defined('BCC_TRUST_RING_MIN_SIZE') ? BCC_TRUST_RING_MIN_SIZE : 3;
