@@ -613,6 +613,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Admin\\Views\\NftSpamContractsView' => __DIR__ . '/../..' . '/app/Domain/Onchain/Admin/Views/NftSpamContractsView.php',
         'BCC\\Trust\\Onchain\\Admin\\WebhooksPage' => __DIR__ . '/../..' . '/app/Domain/Onchain/Admin/WebhooksPage.php',
         'BCC\\Trust\\Onchain\\CLI\\BackfillValidatorPagesCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/BackfillValidatorPagesCommand.php',
+        'BCC\\Trust\\Onchain\\CLI\\ClaimRevokeUserCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/ClaimRevokeUserCommand.php',
         'BCC\\Trust\\Onchain\\CLI\\HallOwnershipRepairCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/HallOwnershipRepairCommand.php',
         'BCC\\Trust\\Onchain\\CLI\\SolanaGateIdentityRepairCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/SolanaGateIdentityRepairCommand.php',
         'BCC\\Trust\\Onchain\\CLI\\ValidatorMsgQueueCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/ValidatorMsgQueueCommand.php',
