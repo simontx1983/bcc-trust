@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Core\PeepSo\PeepSoMediaCache;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
@@ -398,6 +399,7 @@ final class CardViewService
             'handle'              => $handle,
             'card_kind'           => $kind,
             'bio'                 => self::resolvePageBio($post),
+            'cover_photo_url'     => self::resolvePageCoverUrl($post),
             // Validator community branding is separate from chain identity
             // and from the frozen post title/slug. Unclaimed and ambiguous
             // pages receive null rather than another operator's profile.
@@ -834,6 +836,7 @@ final class CardViewService
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
             'bio'                 => self::resolveMemberBio($user),
+            'cover_photo_url'     => self::resolveMemberCoverUrl($userId),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // The member trust chip (Risky…Elite) — the sole tier vocabulary
@@ -1076,6 +1079,15 @@ final class CardViewService
             // (same bound as truncateBio) — pass through; '' when unset
             // to match the page/member bio convention.
             'bio'                 => $groupData['description'] ?? '',
+            // ⚠ ALWAYS null FOR NOW, and deliberately so: the field is
+            // shape-stable on every kind from here, and `null` is the
+            // designed empty state (the frontend keeps its dot pattern).
+            // A group's cover is PRODUCER-SUPPLIED in the follow-up,
+            // because this builder's contract is pure composition with
+            // zero extra queries — a meta read here would be one query
+            // per card in a bounded discovery loop. `image_url` above
+            // already arrives that way.
+            'cover_photo_url'     => null,
             'trust_score'         => 0,
             'reputation_tier'     => 'neutral',
             'reputation_tier_label' => null,
@@ -1750,6 +1762,64 @@ final class CardViewService
      *
      * @return array{initials: string, monogram_color: string, background: string}
      */
+    /**
+     * §3.2 `cover_photo_url` for a page card — the `page_cover_photo`
+     * meta, or null when the page has none.
+     *
+     * ⚠⚠ THE META, NOT `PeepSoPage::get_cover_url()`. That accessor
+     * starts from `get_cover_default()` and overwrites it only when this
+     * same meta is non-empty (peepso-pages page.php:722-735), so it can
+     * never report "no cover": every page would receive PeepSo's default
+     * image and no caller could tell a real cover from a placeholder.
+     * This meta is the only signal that separates them, and it is what
+     * the accessor itself reads.
+     *
+     * Fail-safe: anything that is not a non-empty string reads as "no
+     * cover", never as an error. `esc_url_raw()` is hygiene on a value
+     * that reaches an `<img src>`.
+     *
+     * ⚠ Stated rather than assumed: the stored value is whatever the
+     * uploader wrote, and no SAME-HOST restriction is applied here. In
+     * practice PeepSo's uploader writes a local uploads URL, so the
+     * emitted value is WP media; a host allow-list would be a policy
+     * decision, not hygiene, and is not made in this change.
+     */
+    private static function resolvePageCoverUrl(\WP_Post $post): ?string
+    {
+        $cover = get_post_meta((int) $post->ID, 'page_cover_photo', true);
+        if (!is_string($cover) || $cover === '') {
+            return null;
+        }
+
+        $url = esc_url_raw($cover);
+
+        return $url === '' ? null : $url;
+    }
+
+    /**
+     * §3.2 `cover_photo_url` for a member card — the same seam the
+     * PROFILE uses, so a member's card and their profile cannot show
+     * different covers.
+     *
+     * `PeepSoMediaCache::coverPhotoUrl()` is bcc-core's cached read of
+     * PeepSo's stored cover hash (1h TTL, busted on the cover-hash meta
+     * write), and `UserViewService` resolves §3.1's `cover_photo_url`
+     * through it already. Resolving it uncached constructs a PeepSoUser,
+     * which is a per-user `peepso_users` SELECT — which is exactly why
+     * the cached seam exists and why a card list must use it.
+     *
+     * ⚠ NO VISIBILITY GATE HERE, and that is deliberate: it matches the
+     * profile, which emits `cover_photo_url` in its header block beside
+     * `avatar_url` with no §F-02 section gate. Adding one here would make
+     * the card contradict the profile. Whatever hides a member entirely
+     * (F-182 suspension) still removes the card upstream.
+     */
+    private static function resolveMemberCoverUrl(int $userId): ?string
+    {
+        $url = PeepSoMediaCache::coverPhotoUrl($userId);
+
+        return is_string($url) && $url !== '' ? $url : null;
+    }
     /**
      * Resolve a short editorial bio for a peepso-page card. The
      * post_excerpt is the WP-canonical short-description field — use
