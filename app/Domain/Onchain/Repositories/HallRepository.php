@@ -32,6 +32,14 @@ final class HallRepository {
     public const META_CHAIN_TAG = '_bcc_chain_tag';
 
     /**
+     * A topic Hall's topic: its slug and the label an admin gave it. A topic
+     * Hall has a topic and no chain tag naming a chain (paired with bcc-core
+     * PeepSoGroupRepository's Hall-kind filter, which reads the same keys).
+     */
+    public const META_TOPIC       = '_bcc_hall_topic';
+    public const META_TOPIC_LABEL = '_bcc_hall_topic_label';
+
+    /**
      * Repair marker — set when a Hall was created but its ownership could
      * NOT be moved to the intended deterministic owner.
      *
@@ -221,5 +229,63 @@ final class HallRepository {
         }
 
         return get_post_meta($groupId, self::META_OWNER_INCOMPLETE, true) === '1';
+    }
+
+    /**
+     * Each Hall's kind and topic, by the same rule as bcc-core's Hall-kind
+     * filter (PeepSoGroupRepository::listHalls() `$hallKind`), so a Hall's
+     * `hall_kind` always matches the filter that listed it:
+     *  - 'chain': a `_bcc_chain_tag` value naming a chain (a positive id);
+     *  - 'topic': a non-empty `_bcc_hall_topic` value and no such chain tag;
+     *  - null: neither (a chainless Hall from before topic Halls).
+     * `topic` is set only for a topic Hall: the first non-empty topic value,
+     * labelled by the first non-empty label value (the slug when it has none).
+     *
+     * One batched, bounded read through bcc-core's PostMetaRepository. Every
+     * requested id is in the result; null when that read cannot be trusted.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, array{hall_kind: 'chain'|'topic'|null, topic: array{slug: string, label: string}|null}>|null
+     */
+    public static function kindFactsForHalls(array $groupIds): ?array {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $groupIds), static fn (int $id): bool => $id > 0)));
+        if ($ids === []) {
+            return [];
+        }
+
+        $meta = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown(
+            $ids,
+            [self::META_CHAIN_TAG, self::META_TOPIC, self::META_TOPIC_LABEL]
+        );
+        if ($meta === null) {
+            return null;
+        }
+
+        // The raw values, as the core filter compares them.
+        $first = static fn (array $values): string => (string) (array_values(array_filter(
+            $values,
+            static fn (string $v): bool => $v !== ''
+        ))[0] ?? '');
+
+        $out = [];
+        foreach ($ids as $id) {
+            $rows  = $meta[$id] ?? [];
+            $chain = array_filter(
+                $rows[self::META_CHAIN_TAG] ?? [],
+                static fn (string $v): bool => preg_match('/^[1-9][0-9]*$/', $v) === 1
+            ) !== [];
+            $topic = $first($rows[self::META_TOPIC] ?? []);
+            $label = $first($rows[self::META_TOPIC_LABEL] ?? []);
+
+            if ($chain) {
+                $out[$id] = ['hall_kind' => 'chain', 'topic' => null];
+            } elseif ($topic !== '') {
+                $out[$id] = ['hall_kind' => 'topic', 'topic' => ['slug' => $topic, 'label' => $label !== '' ? $label : $topic]];
+            } else {
+                $out[$id] = ['hall_kind' => null, 'topic' => null];
+            }
+        }
+
+        return $out;
     }
 }

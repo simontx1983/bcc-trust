@@ -46,6 +46,30 @@ final class HallsEndpoint
     /** Slug pattern — same as PeepSo's post_name conventions. Bounded. */
     private const SLUG_PATTERN = '[a-z0-9][a-z0-9-]{0,99}';
 
+    /**
+     * GET /halls `kind`: the Hall kinds bcc-core's Hall-kind filter takes
+     * (PeepSoGroupRepository::HALL_KIND_CHAIN / HALL_KIND_TOPIC). Literals,
+     * paired with those constants, so loading this endpoint never loads
+     * bcc-core; HallKindFilterIntegrationTest pins the pairing.
+     */
+    public const HALL_KINDS = ['chain', 'topic'];
+
+    /**
+     * The `kind` param as bcc-core's Hall-kind filter takes it: null when
+     * absent, false when it is not a Hall kind.
+     *
+     * @return 'chain'|'topic'|null|false
+     */
+    public static function hallKind(string $kind): string|null|false
+    {
+        return match ($kind) {
+            ''      => null,
+            'chain' => 'chain',
+            'topic' => 'topic',
+            default => false,
+        };
+    }
+
     public static function register(): void
     {
         $instance = new self();
@@ -75,6 +99,8 @@ final class HallsEndpoint
                     'type'              => 'string',
                     'sanitize_callback' => 'sanitize_text_field',
                 ],
+                // chain | topic; the handler refuses anything else (as /groups does its kind).
+                'kind'  => ['sanitize_callback' => 'sanitize_key'],
                 'q' => [
                     'required'          => false,
                     'type'              => 'string',
@@ -186,6 +212,17 @@ final class HallsEndpoint
             );
         }
 
+        // `kind` keeps chain Halls or topic Halls (bcc-core's Hall-kind
+        // filter); any other value is a 400 naming the accepted ones.
+        $kind = self::hallKind((string) $request->get_param('kind'));
+        if ($kind === false) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'kind must be one of: ' . implode(', ', self::HALL_KINDS) . '.',
+                400
+            );
+        }
+
         if ($page < 1) {
             $page = 1;
         }
@@ -198,7 +235,8 @@ final class HallsEndpoint
             $page,
             $pageSize,
             $chain,
-            $query
+            $query,
+            $kind
         );
 
         $response = ApiResponse::ok($payload);
