@@ -37,7 +37,10 @@
  * Deliberately NOT applied: viewer-specific presentation filters
  * (mutual-block invisibility, caution-tier shadow limiting). Those live in
  * FeedRankingService's exclusion lists, and a member who blocked an author
- * may still need to report what that author posted.
+ * may still need to report what that author posted. A REVIEW REPLY is the
+ * exception: it is reportable exactly where its Reviews tab shows it, and
+ * the tab already applies its author's visibility, blocks included
+ * ({@see replyIsShownTo()}).
  *
  * @package BCC\Trust\Core\Services
  */
@@ -154,10 +157,13 @@ class FeedItemReportVisibility
         // Reviews are never group-tagged, so the group rule does not apply.
         // F-532: the review's page must also pass PageAccess for this viewer,
         // so a reply on a SECRET page they may not see answers as missing.
+        // And the Reviews tab must show this viewer the reply: a member's
+        // profile they may open, an author they may see (replyIsShownTo()).
         if ((int) ($activity->act_module_id ?? 0)
             === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
         ) {
-            return $this->isLive($activity) && $this->replyParentIsVisible($postId, $viewerId);
+            return $this->isLive($activity)
+                && $this->replyIsShownTo($postId, (int) ($activity->act_user_id ?? 0), $viewerId);
         }
         // Only modules a feed or permalink can show at all: the SAME
         // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
@@ -216,12 +222,31 @@ class FeedItemReportVisibility
      *
      * F-532: and may $viewerId see the review's page? PageAccess decides for
      * a PeepSo page (a SECRET page admits its members, invitees, author and
-     * site admins; a failed read admits no one). A member's self-page is
-     * not a PeepSo page, so it has no page rule. Rationale: F-532 (private
+     * site admins; a failed read admits no one). Rationale: F-532 (private
      * tracker).
+     *
+     * And would the Reviews tab show $viewerId this reply? The reply is
+     * reportable exactly where it is shown:
+     *  - a review of a MEMBER (their self-page, which is not a PeepSo page):
+     *    only when the viewer may open that member's profile, as the
+     *    member's Reviews tab answers 403 otherwise (CardReviewsEndpoint);
+     *  - its author ($authorId, the reply's post author): by the tabs' own
+     *    decision, ReviewReplyService::shownAuthors(). A block either way,
+     *    a suspended or banned author, or a state that could not be read
+     *    refuses. On a page's review, an author hidden only by the level
+     *    they chose for their profile is still shown (as the page's
+     *    response), so that reply stays reportable.
+     * ⚠ Both read the CURRENT user (PeepSo answers for no one else), so a
+     * $viewerId that is not the request's user is refused rather than
+     * answered as someone else. Every caller passes the request's user.
+     * Unchanged: a reply whose author no longer answers for the page
+     * (hand-over) stays reportable while it is live.
      */
-    private function replyParentIsVisible(int $postId, int $viewerId): bool
+    private function replyIsShownTo(int $postId, int $authorId, int $viewerId): bool
     {
+        if ($viewerId !== (int) get_current_user_id()) {
+            return false;
+        }
         $voteId = (int) get_post_meta($postId, '_bcc_activity_sidecar_id', true);
         if ($voteId <= 0) {
             return false;
@@ -236,9 +261,18 @@ class FeedItemReportVisibility
             return false;
         }
 
-        $pageId = (int) $review->page_id;
-        return MemberSelfPageService::isSelfPage($pageId)
-            || \BCC\Trust\Core\Support\PageAccess::viewerMaySeeId($pageId, $viewerId);
+        $pageId   = (int) $review->page_id;
+        $selfPage = MemberSelfPageService::isSelfPage($pageId);
+        $tabOpens = $selfPage
+            ? ProfileAccess::canViewProfile(MemberSelfPageService::ownerOfSelfPage($pageId))
+            : \BCC\Trust\Core\Support\PageAccess::viewerMaySeeId($pageId, $viewerId);
+        if (!$tabOpens) {
+            return false;
+        }
+
+        // A member's Reviews tab never shows a reply as the page's; a
+        // page's own tab does.
+        return isset(ReviewReplyService::shownAuthors([$authorId], !$selfPage)[$authorId]);
     }
 
     /**

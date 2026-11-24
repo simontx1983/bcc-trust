@@ -348,10 +348,15 @@ file_put_contents($f, str_replace($old, $new, $s));
 mutate_guard "$FETCH" '
 $f = $argv[1]; $s = file_get_contents($f);
 $E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
-$old = "        update_option(";
+// Anchored on the DAS option write itself (its first two lines): a bare
+// "update_option(" also matches every other, more-indented call in the file.
+$old = implode($E, [
+    "        update_option(",
+    "            HeliusEndpoint::dasUnsupportedOptionKey(\$chainId),",
+]);
 $new = implode($E, [
     "        \\BCC\\Core\\Log\\Logger::error(\x27[bcc-trust] das endpoint\x27, [\x27rpc_url\x27 => \$rpcUrl]);",
-    "        update_option(",
+    $old,
 ]);
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));

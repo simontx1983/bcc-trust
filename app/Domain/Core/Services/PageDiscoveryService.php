@@ -154,9 +154,20 @@ class PageDiscoveryService {
         string $status = '',
         ?float $min_self_stake = null
     ): array {
+        // F-584: the `status` filter matches only validators on a chain that
+        // is still answering (any other reads `unknown`). Active chains only:
+        // a deactivated chain is not indexed, so its statuses are frozen.
+        $statusChainIds = $status !== ''
+            ? \BCC\Trust\Onchain\Support\ValidatorStatusProjection::currentAmong(array_map(
+                static fn (object $chain): int => (int) $chain->id,
+                \BCC\Trust\Onchain\Repositories\ChainRepository::getActive()
+            ))
+            : [];
+
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake,
+            $statusChainIds
         );
 
         $rows = $result['rows'];

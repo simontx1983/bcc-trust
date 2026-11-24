@@ -34,19 +34,28 @@ final class PageClaimRoleReadGuardTest extends TestCase
         // upsert(): reads back the id of the row it just wrote, by the
         // (user, entity_type, entity_id) unique key. Not an authority read.
         'upsert',
+        // lockedUserRow(): writeRelationshipClaim() locks the ONE row the
+        // (user, entity_type, entity_id) unique key allows, whatever its
+        // role, to decide insert vs update. A write-path lookup, not an
+        // authority read.
+        'lockedUserRow',
     ];
 
-    /** @return array<string, string> relative path => source without comments */
+    /** @return array<string, string> relative path => source without comments, over bcc-trust.php, app/ and includes/ */
     private static function appSources(): array
     {
-        $root = dirname(__DIR__, 2);
-        $out  = [];
-        $it   = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app', \FilesystemIterator::SKIP_DOTS));
-        foreach ($it as $file) {
-            if (!$file instanceof \SplFileInfo || $file->getExtension() !== 'php') {
-                continue;
+        $root  = dirname(__DIR__, 2);
+        $files = ['bcc-trust.php'];
+        foreach (['app', 'includes'] as $dir) {
+            $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/' . $dir, \FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $file) {
+                if ($file instanceof \SplFileInfo && $file->getExtension() === 'php') {
+                    $files[] = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+                }
             }
-            $relative       = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+        }
+        $out = [];
+        foreach ($files as $relative) {
             $out[$relative] = GateOrder::code($relative);
         }
         ksort($out);
@@ -118,21 +127,25 @@ final class PageClaimRoleReadGuardTest extends TestCase
 
     /**
      * Every SQL string literal (single- or double-quoted, interpolation
-     * kept) in app/ that names `entity_type = 'page'` or a bound
-     * `entity_type = %s` also names claim_role.
+     * kept) that names `entity_type = 'page'`, a bound `entity_type = %s`,
+     * or an `entity_type IN (...)` list including 'page', also FILTERS on
+     * claim_role: the role condition must be in its WHERE, not just its
+     * SELECT list.
      */
     public function testEveryPageCapableClaimSqlNamesClaimRole(): void
     {
         $checked = 0;
         foreach (self::appSources() as $path => $code) {
             foreach (self::sqlStrings($code) as [$sql, $offset]) {
-                if (!preg_match("/entity_type\s*=\s*('page'|%s)/", $sql)) {
+                if (!preg_match("/entity_type\s*(?:=\s*(?:'page'|%s)|IN\s*\([^)]*'page')/i", $sql)) {
                     continue;
                 }
                 ++$checked;
                 // {$roleSql} is roleCondition()'s claim_role filter (pinned by
                 // testEachReaderFiltersOnTheRolesItIsGiven).
-                if (str_contains($sql, 'claim_role') || str_contains($sql, '{$roleSql}')) {
+                $wherePos = stripos($sql, 'WHERE');
+                $where    = $wherePos === false ? '' : substr($sql, $wherePos);
+                if (str_contains($where, 'claim_role') || str_contains($where, '{$roleSql}')) {
                     continue;
                 }
                 $method = self::enclosingMethod($code, $offset);
