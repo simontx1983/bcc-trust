@@ -1332,7 +1332,14 @@ final class AttestationRepository
      * (for the elite-source cap + diversity count). Both kinds (vouch +
      * stand_behind) contribute; revoked rows are excluded.
      *
+     * F-469: FAIL-CLOSED. `[]` is an ANSWER here: the target has no active
+     * attestations, so its bonus is 0 and recomputeFor() writes 0. A read
+     * that did not run throws instead, so nothing is written; both of
+     * recomputeFor()'s callers record an `attestation_synthesis` metric, and
+     * the daily decay sweep re-synthesizes.
+     *
      * @return list<object{attestor_user_id: int, weight_at_time: float, created_at: string, reaffirmed_at: ?string}>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function listActiveForSynthesis(string $targetKind, int $targetId): array
     {
@@ -1353,13 +1360,14 @@ final class AttestationRepository
         /** @phpstan-ignore-next-line argument.type */
         $prepared = $wpdb->prepare($sql, $targetKind, $targetId, self::SYNTHESIS_MAX_ROWS);
         if (!is_string($prepared)) {
-            return [];
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
 
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
-        }
+        // F-469: get_results() hands back [] on a failed query, which read as
+        // "no attestations" and wrote a zero bonus. runRead() checks query()'s
+        // own return as well as last_error, so wpdb's silent failure paths
+        // throw too.
+        $rows = self::runRead($prepared, __FUNCTION__, true);
 
         $out = [];
         foreach ($rows as $row) {
