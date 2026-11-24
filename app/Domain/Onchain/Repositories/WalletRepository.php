@@ -256,8 +256,7 @@ final class WalletRepository
         // wallets per chain. LIMIT caps a misconfigured dataset so this
         // query can't return unbounded memory if something ever inflates
         // the wallets table for a single user.
-        /** @var list<WalletWithChain>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql = (string) $wpdb->prepare(
             "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
                     w.label, w.verified_at, w.is_primary, w.created_at,
                     c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
@@ -267,15 +266,19 @@ final class WalletRepository
              ORDER BY w.is_primary DESC, w.created_at ASC
              LIMIT 200",
             ...$args
-        ));
+        );
 
-        if ($failClosed) {
-            self::guardReadOrThrow('getForUserOrThrow');
-        } else {
-            self::guardRead('getForUser');
-        }
+        // The @var moved down to the assignment it describes. runRead()
+        // returns a list and never null, so the old `|null` arm and the
+        // `?: []` after it could neither fire.
+        /** @var list<WalletWithChain> $rows */
+        $rows = self::runRead(
+            $sql,
+            $failClosed ? 'getForUserOrThrow' : 'getForUser',
+            $failClosed
+        );
 
-        return $rows ?: [];
+        return $rows;
     }
 
     /**
