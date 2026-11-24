@@ -202,6 +202,41 @@ final class CardsListEndpoint
         );
     }
 
+    /**
+     * The page types a list with no `kind` asks discovery for: one per card
+     * kind (PageTypeMap). A page type with no card kind would be counted
+     * in the total and then render nothing.
+     *
+     * @return list<string>
+     */
+    public static function cardPageTypes(): array
+    {
+        return array_values(PageTypeMap::KIND_TO_PAGE_TYPE);
+    }
+
+    /**
+     * The list's pagination, from one discovery result. `total` (structure
+     * A, for the Explore tab counts) is the count behind `total_pages`: the
+     * same discovery statement's COUNT, with the same filters and the same
+     * secret-page exclusion as the rows, so the two describe one set.
+     *
+     * @param array<string, mixed> $discoveryResult
+     * @return array{page: int, per_page: int, total: int, total_pages: int, has_more: bool}
+     */
+    public static function pagination(int $page, int $perPage, array $discoveryResult): array
+    {
+        $totalPages = isset($discoveryResult['pages']) ? (int) $discoveryResult['pages'] : 1;
+        $total      = isset($discoveryResult['total']) ? max(0, (int) $discoveryResult['total']) : 0;
+
+        return [
+            'page'        => $page,
+            'per_page'    => $perPage,
+            'total'       => $total,
+            'total_pages' => $totalPages,
+            'has_more'    => $page < $totalPages && $page < self::PAGE_MAX,
+        ];
+    }
+
     public function handle(WP_REST_Request $request): WP_REST_Response
     {
         $viewerId = get_current_user_id();
@@ -245,7 +280,10 @@ final class CardsListEndpoint
         }
 
         // ── kind → page_type translation ────────────────────────────────
-        $types = [];
+        // No kind = every CARD kind's page type, never "all page types":
+        // a page type with no card kind (e.g. 'dao') would be counted in
+        // the total and take a slot on the page, then render nothing.
+        $types = self::cardPageTypes();
         if ($kindParam !== '') {
             if (!in_array($kindParam, self::ALLOWED_KINDS, true)) {
                 return ApiResponse::error(
@@ -348,7 +386,6 @@ final class CardsListEndpoint
         $rows = isset($discoveryResult['results']) && is_array($discoveryResult['results'])
             ? $discoveryResult['results']
             : [];
-        $totalPages = isset($discoveryResult['pages']) ? (int) $discoveryResult['pages'] : 1;
 
         // ── Hydrate to Card view-models ─────────────────────────────────
         // PageDiscoveryService::buildCard{,FromReadModel} emits row keys
@@ -396,12 +433,7 @@ final class CardsListEndpoint
 
         $payload = [
             'items'      => $items,
-            'pagination' => [
-                'page'        => $page,
-                'per_page'    => $perPage,
-                'total_pages' => $totalPages,
-                'has_more'    => $page < $totalPages && $page < self::PAGE_MAX,
-            ],
+            'pagination' => self::pagination($page, $perPage, $discoveryResult),
         ];
 
         $response = ApiResponse::ok($payload);
