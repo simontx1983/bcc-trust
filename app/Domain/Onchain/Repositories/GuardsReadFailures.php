@@ -248,6 +248,52 @@ trait GuardsReadFailures
         return (string) $first;
     }
 
+    /**
+     * A snapshot of the query counter, for a caller that must later ask
+     * whether a statement ran at all.
+     *
+     * ⚠ THIS EXISTS SO THE READ BOUNDARY STAYS HERE. `$wpdb` belongs to
+     * Repositories (§1): a Support or Service class touching it directly
+     * is a WPDB_OUTSIDE_REPO violation and arch-guardrails refuses it,
+     * correctly. `MemberSearchCandidates` needs the counter to tell a
+     * lookup that did not run from one that did, so the fact is SERVED
+     * from here rather than read over there.
+     *
+     * `num_queries` is incremented inside wpdb's private `_do_query()`,
+     * BELOW both pre-flush bails, which is exactly what makes it usable
+     * for that question.
+     */
+    private static function queryCountSnapshot(): int
+    {
+        global $wpdb;
+
+        return (int) ($wpdb->num_queries ?? 0);
+    }
+
+    /** Did ANY statement run since {@see queryCountSnapshot()} was taken? */
+    private static function aStatementRanSince(int $before): bool
+    {
+        return self::queryCountSnapshot() > $before;
+    }
+
+    /**
+     * Was $sql the most recently EXECUTED statement?
+     *
+     * `last_query` is assigned below both pre-flush bails too, so on a
+     * bail it still holds the PREVIOUS statement's SQL. That is what
+     * lets a caller tell "my statement ran" from "my statement was built
+     * and something else is the last thing that actually ran".
+     *
+     * An empty $sql is never a match: nothing was built, so nothing can
+     * have been the last statement.
+     */
+    private static function lastStatementWas(string $sql): bool
+    {
+        global $wpdb;
+
+        return $sql !== '' && (string) ($wpdb->last_query ?? '') === $sql;
+    }
+
     /** The error string left behind by the most recent query, if any. */
     private static function lastReadError(): string
     {

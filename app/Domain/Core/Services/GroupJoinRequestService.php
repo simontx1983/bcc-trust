@@ -323,7 +323,7 @@ final class GroupJoinRequestService
         }
         $items = [];
         if ($userIds !== []) {
-            $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
+            $prefetched = MemberSummaryPrefetcher::primeFor($userIds, $actorId);
             $userView   = Plugin::instance()->userViewService();
             foreach ($rows as $row) {
                 $summary = $userView->getSummary((int) $row->user_id, $actorId, $prefetched);

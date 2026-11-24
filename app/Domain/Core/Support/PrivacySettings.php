@@ -423,8 +423,19 @@ final class PrivacySettings
             && self::legacyOptOutStillRead();
     }
 
-    /** @param list<string> $rawValues */
-    private static function strictest(array $rawValues): bool
+    /**
+     * True when ANY stored row reads as on (FILTER_VALIDATE_BOOLEAN), so a
+     * member with both an off and an on row is treated as on: the side that
+     * hides more. For PHP-only flag reads. A read that must agree with an
+     * SQL filter uses UserSyncRepository::anyRowOn() instead (the SQL's
+     * exact truthy set, nothing trimmed).
+     *
+     * Public for the moderation flags (UserViewService::resolveFlags() and
+     * the public index's meta pass, F-518), which read every row the same way.
+     *
+     * @param list<string> $rawValues
+     */
+    public static function strictest(array $rawValues): bool
     {
         foreach ($rawValues as $raw) {
             if (filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {

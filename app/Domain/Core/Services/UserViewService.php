@@ -797,11 +797,24 @@ final class UserViewService
      *
      * Returns true for {1, "1", true, "true", "yes", "on"} (case-insensitive).
      * Returns false for {0, "0", "", false, "false", "no", "off", null}.
+     * Every row is read, and any row that reads as true sets the flag.
      */
     private static function metaFlag(int $userId, string $key): bool
     {
-        $raw = get_user_meta($userId, $key, true);
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        // Every stored row, and ANY one that reads as on sets the flag
+        // (PrivacySettings::strictest()): WordPress allows duplicate rows,
+        // and a '0' row beside a '1' row must not hide the flag. The public
+        // index reads the flags the same way (PublicProfileIndex), so a
+        // flagged profile is never listed or indexable.
+        $rows = get_user_meta($userId, $key, false);
+        if (!is_array($rows)) {
+            return false;
+        }
+
+        return PrivacySettings::strictest(array_map(
+            static fn (mixed $raw): string => is_scalar($raw) ? (string) $raw : '',
+            array_values($rows)
+        ));
     }
 
     /**
