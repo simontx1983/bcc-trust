@@ -58,6 +58,9 @@ final class PageOwnershipAligner
     public const MAX_PENDING  = 200;
     public const SWEEP_BATCH  = 20;
 
+    private const PENDING_LOCK      = 'bcc_validator_pages_to_align';
+    private const PENDING_LOCK_WAIT = 5;
+
     public const OUTCOME_ALIGNED    = 'aligned';
     public const OUTCOME_NOOP       = 'noop';
     public const OUTCOME_LOCKED     = 'locked';
@@ -189,7 +192,7 @@ final class PageOwnershipAligner
             if (ClaimRepository::userHoldsPageThroughAnyClaim($author, $pageId)) {
                 return self::OUTCOME_MISALIGNED; // the author still holds the page through a claim
             }
-            $departed = get_userdata($author) === false || ClaimRepository::userHadRevokedOwnerRowOnPage($author, $pageId);
+            $departed = !ClaimRepository::accountExistsStrict($author) || ClaimRepository::userHadRevokedOwnerRowOnPage($author, $pageId);
         } catch (RepositoryReadFailure) {
             return self::OUTCOME_UNKNOWN;
         }
@@ -229,24 +232,47 @@ final class PageOwnershipAligner
 
     private static function remember(int $pageId): void
     {
-        $pending = self::pending();
-        if (in_array($pageId, $pending, true)) {
-            return;
-        }
-        $pending[] = $pageId;
-        if (count($pending) > self::MAX_PENDING) {
-            \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'align_backlog_full');
-            $pending = array_slice($pending, -self::MAX_PENDING);
-        }
-        update_option(self::PENDING, $pending, false);
+        self::withPendingLock(static function () use ($pageId): void {
+            $pending = self::pending();
+            if (in_array($pageId, $pending, true)) {
+                return;
+            }
+            $pending[] = $pageId;
+            if (count($pending) > self::MAX_PENDING) {
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'align_backlog_full');
+                $pending = array_slice($pending, -self::MAX_PENDING);
+            }
+            update_option(self::PENDING, $pending, false);
+        });
     }
 
     private static function forget(int $pageId): void
     {
-        $pending = self::pending();
-        $kept    = array_values(array_filter($pending, static fn (int $id): bool => $id !== $pageId));
-        if ($kept !== $pending) {
-            update_option(self::PENDING, $kept, false);
+        self::withPendingLock(static function () use ($pageId): void {
+            $pending = self::pending();
+            $kept    = array_values(array_filter($pending, static fn (int $id): bool => $id !== $pageId));
+            if ($kept !== $pending) {
+                update_option(self::PENDING, $kept, false);
+            }
+        });
+    }
+
+    /**
+     * The pending list is read-modify-write on one option: serialize it, so
+     * a concurrent schedule() and forget() can never drop a page. Without the
+     * lock nothing is written (logged); the page's own single event still
+     * runs, and the next schedule() or sweep retries.
+     */
+    private static function withPendingLock(callable $write): void
+    {
+        if (!AdvisoryLock::acquire(self::PENDING_LOCK, self::PENDING_LOCK_WAIT)) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] page ownership align: pending list busy; not updated this time', []);
+            return;
+        }
+        try {
+            $write();
+        } finally {
+            AdvisoryLock::release(self::PENDING_LOCK);
         }
     }
 }

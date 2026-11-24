@@ -102,6 +102,28 @@ final class PageOwnershipAlignerTest extends TestCase
         self::assertSame(9, \AlignWorld::$author[self::PAGE]);
     }
 
+    /** A failed existence read is not "the account is gone". */
+    public function testAnUnreadableAccountNeverSwaps(): void
+    {
+        \AlignWorld::$desired            = ['state' => 'RESOLVED', 'user_id' => 5];
+        \AlignWorld::$author[self::PAGE]  = 9;
+        \AlignWorld::$existenceReadFails = true;
+
+        self::assertSame('unknown', A::align(self::PAGE));
+        self::assertSame([], \AlignWorld::$calls);
+    }
+
+    /** The pending list is updated only under its own lock (never a lost update). */
+    public function testThePendingListIsNotRewrittenWithoutItsLock(): void
+    {
+        \AlignWorld::$busyLocks = ['bcc_validator_pages_to_align'];
+
+        A::schedule(777);
+
+        self::assertSame([self::PAGE], A::pending(), 'nothing written while another writer holds the list');
+        self::assertContains([A::HOOK, [777]], \AlignWorld::$scheduled, 'the page\'s own single event still runs');
+    }
+
     public function testAnUnreadableDepartureNeverSwaps(): void
     {
         \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];

@@ -25,6 +25,9 @@ namespace {
         public static ?bool $hadRevoked = false;
         /** @var list<int> user ids whose account is gone */
         public static array $deletedUsers = [];
+        public static bool $existenceReadFails = false;
+        /** @var list<string> advisory lock names held by someone else */
+        public static array $busyLocks = [];
         public static bool $swapSkips = false;
         /** @var array<int, int> page => post_author */
         public static array $author = [];
@@ -47,6 +50,8 @@ namespace {
             self::$releaseSkips = false;
             self::$hadRevoked   = false;
             self::$deletedUsers = [];
+            self::$existenceReadFails = false;
+            self::$busyLocks    = [];
             self::$swapSkips    = false;
             self::$author       = [];
             self::$options      = [];
@@ -104,7 +109,7 @@ namespace BCC\Core\DB {
     {
         public static function acquire(string $key, int $timeout = 0): bool
         {
-            return \AlignWorld::$lockFree;
+            return \AlignWorld::$lockFree && !in_array($key, \AlignWorld::$busyLocks, true);
         }
 
         public static function release(string $key): void
@@ -149,6 +154,14 @@ namespace BCC\Trust\Onchain\Repositories {
                 throw new RepositoryReadFailure(self::class, __FUNCTION__, 'read failed');
             }
             return \AlignWorld::$desired;
+        }
+
+        public static function accountExistsStrict(int $userId): bool
+        {
+            if (\AlignWorld::$existenceReadFails) {
+                throw new RepositoryReadFailure(self::class, __FUNCTION__, 'read failed');
+            }
+            return !in_array($userId, \AlignWorld::$deletedUsers, true);
         }
 
         public static function userHadRevokedOwnerRowOnPage(int $userId, int $pageId): bool
