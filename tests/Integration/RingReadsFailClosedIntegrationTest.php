@@ -171,7 +171,11 @@ final class RingReadsFailClosedIntegrationTest extends TestCase
         wp_cache_set('ring_results', self::SENTINEL, 'bcc_trust_admin', DAY_IN_SECONDS);
         $this->failOnly('SELECT id, source_user_id, target_user_id, weight, edge_type');
 
-        Plugin::instance()->cronService()->dailyGraphUpdate();
+        try {
+            Plugin::instance()->cronService()->dailyGraphUpdate();
+        } catch (RepositoryReadFailure $e) {
+            self::fail('the edge-read failure must not escape the cron: ' . $e->getMessage());
+        }
 
         self::assertGreaterThanOrEqual(1, $GLOBALS['wpdb']->injectedFailures, 'the fault must actually fire');
         $after = wp_cache_get('ring_results', 'bcc_trust_admin');
