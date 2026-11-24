@@ -2342,6 +2342,10 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
+    \WP_CLI::add_command(
+        'bcc-trust claims-revoke-user',
+        \BCC\Trust\Onchain\CLI\ClaimRevokeUserCommand::class
+    );
     // ── `bcc-trust cosmwasm` IS GONE ────────────────────────────────────
     //
     // The one-shot supervised pass was the last way to START a full-chain

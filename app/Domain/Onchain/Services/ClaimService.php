@@ -824,6 +824,30 @@ class ClaimService {
     }
 
     /**
+     * Revoke up to $limit of the user's verified claims (or one wallet's),
+     * oldest first, through revokeClaim(): for a user with more than
+     * REVOKE_ALL_MAX claims, worked through in batches before an unlink or
+     * a deletion. A failed read or revoke throws; earlier revokes stand.
+     *
+     * @return int how many were revoked
+     */
+    public static function revokeBatchForUser(int $userId, string $reason, int $limit, ?string $walletAddress = null, ?int $chainId = null): int
+    {
+        if (!in_array($reason, self::REVOKE_REASONS, true)) {
+            throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
+        }
+
+        $revoked = 0;
+        foreach (ClaimRepository::verifiedEntityClaimIdsBatch($userId, $limit, $walletAddress, $chainId) as $claimId) {
+            if (self::revokeClaim($claimId, $reason)) {
+                ++$revoked;
+            }
+        }
+
+        return $revoked;
+    }
+
+    /**
      * F-521: an account deletion's claim purge. Every verified claim is
      * revoked through {@see revokeClaim()} with `account_deleted` first, so
      * each is audited and frees the page it granted; then all of the user's

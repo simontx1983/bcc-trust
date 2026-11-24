@@ -977,6 +977,38 @@ class ClaimRepository {
      */
     public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
     {
+        $ids = self::verifiedEntityClaimIds($userId, $walletAddress, $chainId, self::REVOKE_ALL_MAX + 1);
+        if (count($ids) > self::REVOKE_ALL_MAX) {
+            throw new RepositoryReadFailure(
+                static::class,
+                __FUNCTION__,
+                'more than ' . self::REVOKE_ALL_MAX . ' verified claims: revoke them in batches first with '
+                . '`wp bcc-trust claims-revoke-user ' . $userId . ' --reason=<wallet_unlinked|account_deleted>`, then retry'
+            );
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Up to $limit of the same ids, lowest first, WITHOUT refusing a larger
+     * set: for working through a user with more than REVOKE_ALL_MAX claims
+     * in batches (the claims-revoke-user command). Read fail-closed.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedEntityClaimIdsBatch(int $userId, int $limit, ?string $walletAddress = null, ?int $chainId = null): array
+    {
+        return self::verifiedEntityClaimIds($userId, $walletAddress, $chainId, max(1, min(self::REVOKE_ALL_MAX, $limit)));
+    }
+
+    /**
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    private static function verifiedEntityClaimIds(int $userId, ?string $walletAddress, ?int $chainId, int $limit): array
+    {
         if ($userId <= 0) {
             return [];
         }
@@ -1000,16 +1032,13 @@ class ClaimRepository {
                 $args[] = $chainId;
             }
         }
-        $args[] = self::REVOKE_ALL_MAX + 1;
+        $args[] = $limit;
 
         /** @var list<object{id: numeric-string}> $rows */
         $rows = self::runRead($wpdb->prepare(
             "SELECT id FROM {$table} WHERE {$where} ORDER BY id ASC LIMIT %d",
             ...$args
         ), __FUNCTION__, true);
-        if (count($rows) > self::REVOKE_ALL_MAX) {
-            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'more verified claims than REVOKE_ALL_MAX');
-        }
 
         $ids = [];
         foreach ($rows as $row) {

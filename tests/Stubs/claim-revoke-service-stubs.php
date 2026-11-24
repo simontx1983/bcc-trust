@@ -126,6 +126,16 @@ namespace BCC\Trust\Onchain\Repositories {
             }
 
             /** @return list<int> */
+            /** @return list<int> */
+            public static function verifiedEntityClaimIdsBatch(int $userId, int $limit, ?string $walletAddress = null, ?int $chainId = null): array
+            {
+                \ClaimRevokeWorld::$idReads[] = [$userId, $walletAddress, $chainId];
+                if (\ClaimRevokeWorld::$idsThrow !== null) {
+                    throw \ClaimRevokeWorld::$idsThrow;
+                }
+                return array_slice(\ClaimRevokeWorld::$userClaimIds, 0, $limit);
+            }
+
             public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
             {
                 \ClaimRevokeWorld::$idReads[] = [$userId, $walletAddress, $chainId];

@@ -166,6 +166,21 @@ final class ClaimRevokeAllTest extends TestCase
         self::assertSame([42], $logged, 'the failed claim is logged by id');
     }
 
+    public function testABatchRevokesAtMostTheBatchThroughTheAuditedPath(): void
+    {
+        \ClaimRevokeWorld::$userClaimIds = [41, 42, 43];
+
+        self::assertSame(2, ClaimService::revokeBatchForUser(5, 'account_deleted', 2));
+        self::assertSame([41, 42], \ClaimRevokeWorld::$revokeCalls);
+        self::assertSame(['account_deleted', 'account_deleted'], self::auditedReasons());
+    }
+
+    public function testABatchRefusesAnUnknownReason(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        ClaimService::revokeBatchForUser(5, 'because', 10);
+    }
+
     public function testNoUserIsANoOp(): void
     {
         ClaimService::purgeForDeletedUser(0);
