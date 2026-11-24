@@ -1706,6 +1706,10 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // links no feeds from its head; see WordPressFrontEndGate.
 \BCC\Trust\Core\Security\WordPressFrontEndGate::register();
 
+// F-581: PeepSo's data-export queue stays closed; BCC handles data requests.
+// See PeepSoDataExportQueue.
+\BCC\Trust\Core\Security\PeepSoDataExportQueue::register();
+
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list
 // (auth, appeal, prefs, push unsubscribe, blocks, password change); see

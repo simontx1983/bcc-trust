@@ -88,7 +88,7 @@ final class HallsService
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
      */
-    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain): array
+    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain, string $query = ''): array
     {
         $page     = max(1, $page);
         $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
@@ -105,8 +105,10 @@ final class HallsService
             }
         }
 
-        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize);
-        $total = PeepSoGroupRepository::countHalls($chainId);
+        // The optional name filter goes to both reads, so the page and its
+        // total always agree.
+        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize, $query);
+        $total = PeepSoGroupRepository::countHalls($chainId, $query);
 
         $groupIds       = array_map(static fn($r) => (int) $r->id, $rows);
         $myMemberships  = $this->loadViewerMemberships($viewerId, $groupIds);
