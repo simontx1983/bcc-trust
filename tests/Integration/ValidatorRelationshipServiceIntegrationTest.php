@@ -166,6 +166,38 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         self::assertSame('wallet_owner_present', $this->link(self::OWNER)['reason']);
     }
 
+    /** Exclusivity reads the page's own owner rows, not only the claims the resolvers see. */
+    public function testAProofOwnerRowOnThePageAloneIsLockedForStaff(): void
+    {
+        global $wpdb;
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OTHER, 'entity_type' => 'page', 'entity_id' => self::PAGE,
+            'wallet_address' => 'cosmos1own', 'chain_id' => 7, 'claim_role' => 'operator',
+            'status' => 'verified', 'verification_method' => 'wallet', 'verified_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+
+        self::assertSame('wallet_owner_present', $this->link(self::OWNER)['reason']);
+        self::assertSame([], self::logActions());
+    }
+
+    /** ...and every OTHER page bound to the validator. */
+    public function testAnOwnerRowOnAnotherBoundPageIsAnIncumbentToo(): void
+    {
+        global $wpdb;
+        $other = self::PAGE + 1;
+        $wpdb->insert($wpdb->postmeta, ['post_id' => $other, 'meta_key' => '_bcc_onchain_validator_id', 'meta_value' => (string) $this->validatorId]);
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OTHER, 'entity_type' => 'page', 'entity_id' => $other,
+            'wallet_address' => '', 'chain_id' => 0, 'claim_role' => 'operator',
+            'status' => 'verified', 'verification_method' => 'staff', 'verified_by' => self::STAFF, 'verified_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+        try {
+            self::assertSame('owner_exists', $this->link(self::OWNER)['reason']);
+        } finally {
+            $wpdb->query($wpdb->prepare("DELETE FROM `{$wpdb->postmeta}` WHERE post_id = %d AND meta_key = '_bcc_onchain_validator_id'", $other));
+        }
+    }
+
     public function testAStaffApprovedOwnerMustBeRevokedFirst(): void
     {
         $this->seedOwner(self::OTHER, 'staff');

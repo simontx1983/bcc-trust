@@ -100,7 +100,7 @@ final class ValidatorRelationshipService
             if (!ValidatorStepUpService::consumeInTransaction($staffId, $stepUpId, 'link_owner', $pageId, $userId, 'owner')) {
                 throw new RelationshipRefusal('step_up_invalid', 403);
             }
-            $owners = ClaimRepository::ownerClaimsForPageStrict($pageId);
+            $owners = self::incumbentOwners($validatorId, $pageId);
             foreach ($owners as $owner) {
                 if (self::lockedForStaff($owner['verification_method'])) {
                     throw new RelationshipRefusal('wallet_owner_present', 409);
@@ -306,6 +306,35 @@ final class ValidatorRelationshipService
         }
 
         return $after($done);
+    }
+
+    /**
+     * Every verified owner of the validator, read under its claim lock (the
+     * lock createExclusiveClaim() takes): the validator's own owner rows, and
+     * for the requested page and EVERY page bound to the validator, the
+     * owners the resolvers see plus the page's own owner rows. Fail-closed.
+     *
+     * @return list<array{claim_id: int, user_id: int, verification_method: string}>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
+    private static function incumbentOwners(int $validatorId, int $pageId): array
+    {
+        $byClaim = [];
+        foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('validator', $validatorId) as $row) {
+            $byClaim[$row['claim_id']] = $row;
+        }
+        $pages   = ClaimRepository::boundPagesFor('validator', $validatorId);
+        $pages[] = $pageId;
+        foreach (array_values(array_unique($pages)) as $page) {
+            foreach (ClaimRepository::ownerClaimsForPageStrict($page) as $row) {
+                $byClaim[$row['claim_id']] = $row;
+            }
+            foreach (ClaimRepository::verifiedOwnerRowsForEntityStrict('page', $page) as $row) {
+                $byClaim[$row['claim_id']] = $row;
+            }
+        }
+
+        return array_values($byClaim);
     }
 
     /**

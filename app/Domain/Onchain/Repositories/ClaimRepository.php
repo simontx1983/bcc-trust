@@ -1557,6 +1557,40 @@ class ClaimRepository {
     }
 
     /**
+     * Every VERIFIED owner-role row (operator / creator) on one entity, any
+     * user: a validator or collection claim, or a page row. Read fail-closed,
+     * for exclusivity checks made under the entity's claim lock.
+     *
+     * @return list<array{claim_id: int, user_id: int, verification_method: string}>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedOwnerRowsForEntityStrict(string $entityType, int $entityId): array
+    {
+        if ($entityId <= 0 || !in_array($entityType, ['validator', 'collection', 'page'], true)) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string, user_id: numeric-string, verification_method: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id, user_id, verification_method FROM {$table}
+              WHERE entity_type = %s AND entity_id = %d AND status = 'verified'
+                AND claim_role IN ('operator', 'creator')
+              ORDER BY id ASC LIMIT 50",
+            $entityType,
+            $entityId
+        ), __FUNCTION__, true);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = ['claim_id' => (int) $row->id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
+        }
+
+        return $out;
+    }
+
+    /**
      * The pages bound to an entity, read fail-closed (both binding legs).
      *
      * @return list<int>
