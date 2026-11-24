@@ -1886,6 +1886,54 @@ final class NotificationDispatcher
      * code and no provider. Sent by the sweep only (not on the revoke hook,
      * so other revoke callers do not ring the bell).
      */
+    /**
+     * A validator relationship change committed (ValidatorRelationshipService
+     * fires bcc_validator_relationship_changed). Every administrator gets a
+     * bell naming the page and the acting staff member; the member gets a
+     * self-notification naming no staff member. Never throws.
+     *
+     * @param list<int> $replaced
+     */
+    public function onValidatorRelationshipChanged(string $action, int $pageId, int $subjectUserId, ?int $actorId, int $linkId, array $replaced = []): void
+    {
+        $adminType = match ($action) {
+            'owner_linked'         => NotificationType::VALIDATOR_OWNER_LINKED,
+            'owner_revoked'        => NotificationType::VALIDATOR_OWNER_REVOKED,
+            'owner_link_cancelled' => NotificationType::VALIDATOR_OWNER_LINK_CANCELLED,
+            default                => null,
+        };
+        if ($adminType === null || $pageId <= 0 || $subjectUserId <= 0) {
+            return;
+        }
+        $title = html_entity_decode((string) get_the_title($pageId), ENT_QUOTES, 'UTF-8');
+        $title = $title !== '' ? mb_substr($title, 0, 80) : 'a validator page';
+        $staff = $actorId !== null && $actorId > 0 ? (string) (get_userdata($actorId)->display_name ?? 'A staff member') : 'The system';
+        $verb  = match ($action) {
+            'owner_linked'  => 'linked an owner to',
+            'owner_revoked' => 'revoked the owner of',
+            default         => 'cancelled the owner link on',
+        };
+        $from = $actorId !== null && $actorId > 0 ? $actorId : self::resolveSystemSenderId();
+
+        foreach (\BCC\Trust\Core\Support\AdminRecipients::ids() as $adminId) {
+            try {
+                $this->dispatch($from, $adminId, mb_substr("{$staff} {$verb} {$title}.", 0, 200), $adminType, $pageId, 0);
+            } catch (\Throwable $e) {
+                Logger::warning('[NotificationDispatcher] validator relationship admin bell failed', ['page_id' => $pageId, 'admin_id' => $adminId, 'error' => $e->getMessage()]);
+            }
+        }
+
+        try {
+            if ($action === 'owner_linked') {
+                $this->dispatch($subjectUserId, $subjectUserId, mb_substr("You are now the verified owner of {$title}.", 0, 200), NotificationType::VALIDATOR_OWNERSHIP_GRANTED, $pageId, 0);
+            } else {
+                $this->dispatch($subjectUserId, $subjectUserId, mb_substr("You are no longer the verified owner of {$title}.", 0, 200), NotificationType::VALIDATOR_OWNERSHIP_REMOVED, $pageId, 0);
+            }
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] validator relationship member bell failed', ['page_id' => $pageId, 'user_id' => $subjectUserId, 'error' => $e->getMessage()]);
+        }
+    }
+
     public function onClaimBadgeRemoved(int $userId, int $claimId, string $entityName, string $reason): void
     {
         if ($userId <= 0 || $claimId <= 0) {
