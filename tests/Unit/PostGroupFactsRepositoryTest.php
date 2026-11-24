@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\PostGroupFactsRepository;
+use BCC\Core\Feed\GroupSyndicationGate;
 use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -274,5 +275,60 @@ final class PostGroupFactsRepositoryTest extends TestCase
             'visibility'      => 'public_all',
             'privacy_at_post' => '1',
         ], PostGroupFactsRepository::forPost(self::POST));
+    }
+    /**
+     * ⛔ A PADDED NON-OPEN VALUE MUST NOT DEFEAT THE FOLD, and this is the
+     * case that separates the fold's predicate from a lookalike.
+     *
+     * `GroupSyndicationGate::madeWhileNonOpen()` TRIMS before comparing, so
+     * it reads `' 1'` as non-open. A fold doing its own exact
+     * `in_array(' 1', ['1','2'], true)` reads the same row as OPEN, returns
+     * it as the strict answer, and the consumer then judges that very value
+     * non-open — permissive, from a fold that believed it was being strict,
+     * with the later open row never consulted.
+     *
+     * So the fold borrows the consumer's predicate, and this test fails if
+     * anyone swaps it back for an exact comparison.
+     */
+    public function testAPaddedNonOpenValueDoesNotDefeatTheFold(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_group_privacy_at_post', ' 1'],
+            ['_bcc_post_group_privacy_at_post', '0'],
+        ]);
+
+        $facts = PostGroupFactsRepository::forPost(self::POST);
+
+        self::assertSame(
+            '0',
+            $facts['privacy_at_post'] ?? null,
+            'the open row is the strict answer; the padded non-open row must not short-circuit it'
+        );
+        self::assertFalse(
+            GroupSyndicationGate::madeWhileNonOpen($facts['privacy_at_post'] ?? null),
+            'and the CONSUMER must agree the folded value is not a non-open record'
+        );
+    }
+
+    /**
+     * The mirror: padding alone does not make a non-open record open. With
+     * every row non-open — one of them padded — the record survives, and the
+     * consumer still reads it as non-open.
+     */
+    public function testPaddingAloneDoesNotDiscardANonOpenRecord(): void
+    {
+        $this->database([
+            ['peepso_group_id', '7'],
+            ['_bcc_post_group_privacy_at_post', ' 2'],
+            ['_bcc_post_group_privacy_at_post', '1'],
+        ]);
+
+        $facts = PostGroupFactsRepository::forPost(self::POST);
+
+        self::assertTrue(
+            GroupSyndicationGate::madeWhileNonOpen($facts['privacy_at_post'] ?? null),
+            'agreeing rows keep the record, padded or not'
+        );
     }
 }

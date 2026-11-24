@@ -183,6 +183,15 @@ final class PostGroupFactsRepository
      * EVERY row agrees; one open row withholds it and the post is judged on
      * the group's current privacy instead.
      *
+     * ⛔ EACH ROW IS JUDGED BY `GroupSyndicationGate::madeWhileNonOpen()`,
+     * THE CONSUMER'S OWN PREDICATE, and not by a second copy of the rule.
+     * That is the whole point rather than a tidiness preference: the fold is
+     * only as strict as the test it shares with the code that acts on the
+     * result. An exact `in_array(…, NON_OPEN_PRIVACY, true)` here looks
+     * equivalent and is not — the predicate TRIMS first, so the two
+     * disagreed about any padded value, and a row this fold read as "open"
+     * was read as non-open downstream. One rule, one implementation.
+     *
      * @param list<string> $values every row of the key, in meta_id order
      */
     private static function strictestPrivacyAtPost(array $values): string
@@ -192,7 +201,7 @@ final class PostGroupFactsRepository
         }
 
         foreach ($values as $value) {
-            if (!in_array($value, GroupSyndicationGate::NON_OPEN_PRIVACY, true)) {
+            if (!GroupSyndicationGate::madeWhileNonOpen($value)) {
                 return $value;
             }
         }
