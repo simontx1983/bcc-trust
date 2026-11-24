@@ -41,7 +41,8 @@ final class PageClaimBodyHydrator
                 'entity_type' => (string) $claim->entity_type,
                 'entity_id'   => (int) $claim->entity_id,
                 'role'        => $role,
-                'verified_at' => self::toIso8601((string) ($claim->verified_at ?? '')),
+                // No claim time in the body: the post's own posted_at is
+                // the one time it shows (R13).
                 // Pre-rendered summary per §A2 — frontend renders verbatim.
                 // Page name resolution would add a query per feed page;
                 // until that's worth it, "this page" stands in.
@@ -51,14 +52,5 @@ final class PageClaimBodyHydrator
             ];
         }
         return $bodies;
-    }
-
-    private static function toIso8601(string $mysqlDatetime): string
-    {
-        if ($mysqlDatetime === '' || $mysqlDatetime === '0000-00-00 00:00:00') {
-            return '';
-        }
-        $ts = strtotime($mysqlDatetime . ' UTC');
-        return $ts === false ? '' : gmdate('Y-m-d\TH:i:s\Z', $ts);
     }
 }

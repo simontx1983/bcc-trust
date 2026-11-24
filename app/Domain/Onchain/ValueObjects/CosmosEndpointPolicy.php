@@ -82,6 +82,91 @@ final class CosmosEndpointPolicy
     public const ROLE_INCUMBENT = 'incumbent';
 
     /**
+     * slug => the network id the chain's nodes must report. ONE source for
+     * every Cosmos network id BCC pins: discovery's governed `cosmos` entry
+     * below reads its value from here, and the memo-claim transaction proof
+     * ({@see CosmosTxProofEndpoints}) pins each chain it supports to it.
+     *
+     * A slug is listed only once its id was read from live nodes of more
+     * than one operator (2026-11-24: `/status` `node_info.network` and the
+     * LCD `node_info`, matching), never from the frontend or a single node.
+     * Listing a slug here does NOT govern its discovery endpoint; only
+     * POLICY does that.
+     *
+     * @var array<string, string>
+     */
+    private const NETWORKS = [
+        'cosmos'    => 'cosmoshub-4',
+        'osmosis'   => 'osmosis-1',
+        'akash'     => 'akashnet-2',
+        'juno'      => 'juno-1',
+        'injective' => 'injective-1',
+    ];
+
+    /**
+     * slug => the chain's ACCOUNT address prefix (bech32 HRP), pinned beside
+     * its network for the memo claim: the operator account is the valoper's
+     * 20 bytes under this prefix, and the claim checks the signer's address
+     * against it. Never read from the chains row or an endpoint. Verified live
+     * 2026-11-24: each chain's LCD answered the auth route for an account
+     * under this prefix, on both proof operators.
+     *
+     * @var array<string, string>
+     */
+    private const ACCOUNT_PREFIXES = [
+        'cosmos'    => 'cosmos',
+        'osmosis'   => 'osmo',
+        'akash'     => 'akash',
+        'juno'      => 'juno',
+        'injective' => 'inj',
+    ];
+
+    /**
+     * slug => the node operators that confirm a validator memo claim's
+     * transaction ({@see CosmosTxProofEndpoints} holds the rules each slug's
+     * list must keep; a list that breaks one is refused at read time).
+     *
+     * A SEPARATE DECISION from discovery's POLICY below: these nodes are
+     * asked only whether a transaction was included (RPC `/tx`, `/commit`,
+     * `/status`) and for an account number and a `security_contact` (LCD).
+     * Key control is proven locally over the bytes, so a node can never forge
+     * a pass; two operators that must agree guard the inputs it could bend.
+     * Listing a host here does not approve it for discovery, or vice versa.
+     *
+     * Verified live 2026-11-24 (read-only), every pair: RPC `/status` and LCD
+     * `node_info` network, `/tx` served (tx indexing on, byte-identical
+     * bytes), `/commit` header chain id, the staking validator and auth
+     * account routes, the `/tx` not-found shape, and no redirects. Not listed
+     * (claims answer "not available on this chain yet"): cryptoorgchain (one
+     * operator reachable, its LCD refused node_info), jackal and kujira (no
+     * candidate answered), dungeon (one operator).
+     *
+     * @var array<string, list<array{operator: string, rpc: string, rest: string}>>
+     */
+    private const PROOF_ENDPOINTS = [
+        'cosmos' => [
+            ['operator' => 'Polkachu', 'rpc' => 'https://cosmos-rpc.polkachu.com', 'rest' => 'https://cosmos-api.polkachu.com'],
+            ['operator' => 'Allnodes (PublicNode)', 'rpc' => 'https://cosmos-rpc.publicnode.com', 'rest' => 'https://cosmos-rest.publicnode.com'],
+        ],
+        'osmosis' => [
+            ['operator' => 'Polkachu', 'rpc' => 'https://osmosis-rpc.polkachu.com', 'rest' => 'https://osmosis-api.polkachu.com'],
+            ['operator' => 'Allnodes (PublicNode)', 'rpc' => 'https://osmosis-rpc.publicnode.com', 'rest' => 'https://osmosis-rest.publicnode.com'],
+        ],
+        'akash' => [
+            ['operator' => 'Polkachu', 'rpc' => 'https://akash-rpc.polkachu.com', 'rest' => 'https://akash-api.polkachu.com'],
+            ['operator' => 'Allnodes (PublicNode)', 'rpc' => 'https://akash-rpc.publicnode.com', 'rest' => 'https://akash-rest.publicnode.com'],
+        ],
+        'juno' => [
+            ['operator' => 'Polkachu', 'rpc' => 'https://juno-rpc.polkachu.com', 'rest' => 'https://juno-api.polkachu.com'],
+            ['operator' => 'Allnodes (PublicNode)', 'rpc' => 'https://juno-rpc.publicnode.com', 'rest' => 'https://juno-rest.publicnode.com'],
+        ],
+        'injective' => [
+            ['operator' => 'Polkachu', 'rpc' => 'https://injective-rpc.polkachu.com', 'rest' => 'https://injective-api.polkachu.com'],
+            ['operator' => 'Allnodes (PublicNode)', 'rpc' => 'https://injective-rpc.publicnode.com', 'rest' => 'https://injective-rest.publicnode.com'],
+        ],
+    ];
+
+    /**
      * slug => [network => <chain id>, endpoints => [<normalized url> => role]]
      *
      * Keys MUST already be normalized ({@see normalize()}): lowercase https
@@ -91,7 +176,7 @@ final class CosmosEndpointPolicy
      */
     private const POLICY = [
         'cosmos' => [
-            'network'   => 'cosmoshub-4',
+            'network'   => self::NETWORKS['cosmos'],
             'endpoints' => [
                 'https://cosmos-api.polkachu.com'         => self::ROLE_PRIMARY,
                 'https://rest.cosmos.directory/cosmoshub' => self::ROLE_INCUMBENT,
@@ -115,6 +200,38 @@ final class CosmosEndpointPolicy
     public static function expectedNetwork(string $slug): ?string
     {
         return self::POLICY[$slug]['network'] ?? null;
+    }
+
+    /**
+     * The network id pinned for $slug (see NETWORKS), governed or not; null
+     * when BCC pins none.
+     */
+    public static function pinnedNetwork(string $slug): ?string
+    {
+        return self::NETWORKS[$slug] ?? null;
+    }
+
+    /** The account address prefix pinned for $slug (see ACCOUNT_PREFIXES), or null. */
+    public static function pinnedAccountPrefix(string $slug): ?string
+    {
+        return self::ACCOUNT_PREFIXES[$slug] ?? null;
+    }
+
+    /**
+     * The memo-claim proof nodes listed for $slug, as written (unchecked:
+     * ask {@see CosmosTxProofEndpoints::forSlug()}, which applies the rules).
+     *
+     * @return list<array{operator: string, rpc: string, rest: string}>
+     */
+    public static function proofEndpoints(string $slug): array
+    {
+        return self::PROOF_ENDPOINTS[$slug] ?? [];
+    }
+
+    /** @return list<string> every slug with proof nodes listed. */
+    public static function proofSlugs(): array
+    {
+        return array_keys(self::PROOF_ENDPOINTS);
     }
 
     /**
@@ -279,8 +396,22 @@ final class CosmosEndpointPolicy
      */
     public static function fingerprint(string $slug, string $url): ?string
     {
+        return self::fingerprintFor($url, self::expectedNetwork($slug));
+    }
+
+    /**
+     * The same fingerprint against the PINNED network ({@see pinnedNetwork()}),
+     * for endpoints outside discovery governance (the memo-claim proof
+     * endpoints). Identical to {@see fingerprint()} for a governed slug.
+     */
+    public static function pinnedFingerprint(string $slug, string $url): ?string
+    {
+        return self::fingerprintFor($url, self::pinnedNetwork($slug));
+    }
+
+    private static function fingerprintFor(string $url, ?string $network): ?string
+    {
         $normalized = self::normalize($url);
-        $network    = self::expectedNetwork($slug);
         if ($normalized === null || $network === null) {
             return null;
         }

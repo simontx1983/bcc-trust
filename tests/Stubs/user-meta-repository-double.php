@@ -47,6 +47,15 @@ if (!class_exists(UserMetaRepository::class, false)) {
         public static array $calls = [];
 
         /**
+         * Several stored rows for one (member, key), in umeta_id order, which
+         * a get_user_meta() shim cannot express: `$rows[$id][$key] = ['0', '1']`.
+         * Answers for that pair instead of the shim.
+         *
+         * @var array<int, array<string, list<string>>>
+         */
+        public static array $rows = [];
+
+        /**
          * @param list<int>    $userIds
          * @param list<string> $keys
          * @return array<int, array<string, list<string>>>|null
@@ -64,6 +73,10 @@ if (!class_exists(UserMetaRepository::class, false)) {
                     return null;
                 }
                 foreach ($keys as $key) {
+                    if (isset(self::$rows[$id][$key])) {
+                        $out[$id][$key] = self::$rows[$id][$key];
+                        continue;
+                    }
                     $raw = self::getUserMeta($id, $key);
                     if ($raw !== '' && $raw !== null && $raw !== false) {
                         $out[$id][$key] = [is_scalar($raw) ? (string) $raw : ''];

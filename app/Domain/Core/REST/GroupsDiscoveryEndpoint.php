@@ -43,6 +43,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\PageDiscoveryRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupContext;
+use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
@@ -77,11 +78,63 @@ final class GroupsDiscoveryEndpoint
                     'verified'  => ['sanitize_callback' => 'absint'],
                     'mine'      => ['sanitize_callback' => 'absint'],
                     'chain'     => ['sanitize_callback' => 'sanitize_key'],
+                    'kind'      => ['sanitize_callback' => 'sanitize_key'],
+                    'q' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        // A longer q is a 400 before the handler runs; the
+                        // handler checks again (same wiring as GET /cards).
+                        'maxLength'         => CardsListEndpoint::Q_MAX_LENGTH,
+                        'validate_callback' => 'rest_validate_request_arg',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                     'page'      => ['sanitize_callback' => 'absint'],
                     'page_size' => ['sanitize_callback' => 'absint'],
                 ],
             ]
         );
+    }
+
+    /**
+     * The groups a list may show, before any other filter: every browsable
+     * (non-secret) group, or with `mine`, the viewer's own memberships among
+     * them. An optional name `q` rides on the browsable read, in the same
+     * statement as the secret exclusion, so a name never finds a secret
+     * group, a viewer's own secret memberships included.
+     *
+     * An anonymous viewer asking for `mine` gets none: an empty result, not
+     * a 401, so the page can render its empty state with a sign-in hint.
+     *
+     * @return list<int>
+     */
+    public static function candidateGroupIds(int $viewerId, bool $mineOnly, string $query): array
+    {
+        $browsable = PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT, $query);
+        if (!$mineOnly) {
+            return $browsable;
+        }
+        if ($viewerId <= 0 || $browsable === []) {
+            return [];
+        }
+
+        $memberIds = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, self::CANDIDATE_LIMIT);
+        $allowed   = array_flip($browsable);
+
+        return array_values(array_filter(
+            $memberIds,
+            static fn(int $id): bool => isset($allowed[$id])
+        ));
+    }
+
+    /**
+     * `kind`: only the groups of that type, keyed and ordered as they came.
+     *
+     * @param array<int, GroupContext> $contexts
+     * @return array<int, GroupContext>
+     */
+    public static function filterContextsByKind(array $contexts, GroupType $kind): array
+    {
+        return array_filter($contexts, static fn(GroupContext $c): bool => $c->type === $kind);
     }
 
     /**
@@ -92,48 +145,55 @@ final class GroupsDiscoveryEndpoint
         $verifiedOnly = (int) $request->get_param('verified') === 1;
         $mineOnly     = (int) $request->get_param('mine') === 1;
         $chainSlug    = (string) $request->get_param('chain');
+        $kindParam    = (string) $request->get_param('kind');
+        $query        = (string) $request->get_param('q');
         $page         = max(1, (int) $request->get_param('page') ?: 1);
         $pageSize     = (int) $request->get_param('page_size') ?: self::DEFAULT_PAGE_SIZE;
         $pageSize     = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
 
+        // A name search is the expensive call, so only searches are
+        // throttled, with GET /cards's numbers. Before any query work.
+        if ($query !== '' && !\BCC\Core\Security\Throttle::allow('groups_list', CardsListEndpoint::Q_RATE_LIMIT, CardsListEndpoint::Q_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many searches. Please wait a few seconds.', 429);
+        }
+        // Defence in depth behind the arg's maxLength.
+        if (mb_strlen($query) > CardsListEndpoint::Q_MAX_LENGTH) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('q must be at most %d characters.', CardsListEndpoint::Q_MAX_LENGTH),
+                400
+            );
+        }
+
+        // `kind` takes the group `type` values cards and search already use.
+        $kind = null;
+        if ($kindParam !== '') {
+            $kind = GroupType::tryFrom($kindParam);
+            if ($kind === null) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'kind must be one of: ' . implode(', ', array_map(static fn(GroupType $t): string => $t->value, GroupType::cases())) . '.',
+                    400
+                );
+            }
+        }
+
         $viewerId = get_current_user_id();
 
-        // ── mine=1 path — viewer's own group memberships ────────────────
-        // Anonymous viewers can browse the rest of the directory but
-        // "mine" needs an identity. Return an empty result rather than
-        // 401 so the page can render the empty-state copy with a sign-in
-        // hint instead of erroring out.
-        if ($mineOnly) {
-            if ($viewerId <= 0) {
-                return $this->respond([], $page, $pageSize, 0, true);
-            }
-
-            $memberIds = PeepSoGroupRepository::getUserMemberGroupIds(
-                $viewerId,
-                self::CANDIDATE_LIMIT
-            );
-            if ($memberIds === []) {
-                return $this->respond([], $page, $pageSize, 0, true);
-            }
-            // Intersect with the browsable set so secret-group memberships
-            // (which the rest of the directory hides) stay hidden here too.
-            $browsable    = array_flip(PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT));
-            $candidateIds = array_values(array_filter(
-                $memberIds,
-                static fn(int $id): bool => isset($browsable[$id])
-            ));
-            if ($candidateIds === []) {
-                return $this->respond([], $page, $pageSize, 0, true);
-            }
-        } else {
-            $candidateIds = PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT);
-            if ($candidateIds === []) {
-                return $this->respond([], $page, $pageSize, 0);
-            }
+        $candidateIds = self::candidateGroupIds($viewerId, $mineOnly, $query);
+        if ($candidateIds === []) {
+            return $this->respond([], $page, $pageSize, 0, $mineOnly);
         }
 
         $resolver = Plugin::instance()->groupContextResolver();
         $contexts = $resolver->forManyGroups($candidateIds);
+
+        if ($kind !== null) {
+            $contexts = self::filterContextsByKind($contexts, $kind);
+            if ($contexts === []) {
+                return $this->respond([], $page, $pageSize, 0, $mineOnly);
+            }
+        }
 
         if ($verifiedOnly) {
             $contexts = array_filter(
@@ -145,12 +205,12 @@ final class GroupsDiscoveryEndpoint
             }
         }
 
-        // Chain filter — restricts to groups whose `_bcc_gate_chain_id`
-        // post_meta resolves to the requested slug. NFT holder groups
-        // carry this meta key directly (the gate config writes it at
-        // claim time); user/system groups and Locals don't, so they
-        // drop out of chain-scoped views. Unknown chain slugs return
-        // an empty result rather than 400 — the chain dropdown is
+        // Chain filter — restricts to groups whose chain meta resolves to the
+        // requested slug: `_bcc_gate_chain_id` (holder and delegator groups)
+        // or `_bcc_chain_tag` (Halls and chain-tagged groups), the same two
+        // keys the card's chain chip reads. Member-made and system groups
+        // without one drop out of chain-scoped views. Unknown chain slugs
+        // return an empty result rather than 400 — the chain dropdown is
         // client-driven and a stale slug shouldn't surface as an error.
         if ($chainSlug !== '') {
             $contexts = $this->filterContextsByChain($contexts, $chainSlug);

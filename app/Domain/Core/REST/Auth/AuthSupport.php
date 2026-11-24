@@ -478,6 +478,42 @@ final class AuthSupport
     public const JWT_TTL_SECONDS = JwtToken::TTL_SECONDS;
 
     /**
+     * Structure A: whether the frontend shows its "Admin" avatar group.
+     * Every response that carries `suspended` carries this too (the sign-in
+     * responses, /auth/refresh and /auth/session).
+     *
+     * It is exactly the admin routes' check (BearerAuth::requireAdmin(), the
+     * `manage_options` capability), applied to the user the response is
+     * about, through BearerAuth::userIsAdmin(), so the two cannot drift.
+     *
+     * ⛔ DISPLAY ONLY (security's condition on `in_good_standing`, applied
+     * here too). It hides or shows a menu group and nothing else; it must
+     * NEVER become an input to a server-side decision, not a trusted token
+     * claim and not a gate. The admin routes enforce on every request.
+     *
+     * A failed capability lookup is false (the group stays hidden) and never
+     * fails the auth response it decorates, as resolveInGoodStanding()'s
+     * lookup does not.
+     */
+    public static function resolveCanModerate(int $userId): bool
+    {
+        try {
+            return \BCC\Trust\Core\Support\BearerAuth::userIsAdmin($userId);
+        } catch (\Throwable $e) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                // The class and code, never the message (AuthLogPrivacyTest).
+                Logger::warning('[bcc-trust] admin capability lookup failed; the admin group is reported hidden', [
+                    'user_id'   => $userId,
+                    'exception' => get_class($e),
+                    'code'      => $e->getCode(),
+                ]);
+            }
+
+            return false;
+        }
+    }
+
+    /**
      * F-305 (user decision 2026-11-12): a suspended member may SIGN IN,
      * read-only, and must be told why they cannot post, comment or vote.
      * Every sign-in response, /auth/refresh and /auth/session carry this
@@ -626,6 +662,7 @@ final class AuthSupport
             // F-305: a suspended member signs in READ-ONLY; the client shows
             // the suspension notice from this flag. Every write gate refuses.
             'suspended'        => self::resolveSuspended($userId),
+            'can_moderate'     => self::resolveCanModerate($userId),
             // How many wallets are linked to the account the caller just
             // proved the email of. > 0 tells the frontend to show "this
             // account has a wallet linked — is it yours?" (it lists them via

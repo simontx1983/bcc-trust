@@ -909,6 +909,39 @@ class DisputeRepository
     }
 
     /**
+     * How many disputes `$userId` filed that are still open (status
+     * `reviewing`): the open subset of exactly what `GET /disputes/mine`
+     * lists. Drives the `disputes_open` badge (`GET /me/badges`).
+     *
+     * TRI-STATE: NULL when the read did not run (GuardsReadFailures::runRead,
+     * fail-closed), never 0, so a failed read can't show "no open cases".
+     * Uncached here; BadgesService caches the payload, keyed on this
+     * reporter's generation (bumped on create and on every status change).
+     * Bounded by idx_reporter.
+     */
+    public static function countOpenByReporter(int $userId): ?int
+    {
+        if ($userId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT COUNT(*) AS n FROM {$table} WHERE reporter_id = %d AND status = %s",
+                $userId,
+                DisputeStatus::REVIEWING
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return null;
+        }
+
+        return (int) ($rows[0]->n ?? 0);
+    }
+
+    /**
      * Paginated disputes filed by a user, with post/user display names.
      *
      * @param list<int> $excludePageIds as {@see countByReporter()}

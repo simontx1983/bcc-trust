@@ -81,14 +81,28 @@ final class DiscoveryOptOutAliasTest extends TestCase
         self::assertTrue(PrivacySettings::readAll(self::USER)['discovery_optout']);
     }
 
-    public function testTheLegacyKeyNoLongerDecidesTheAlias(): void
+    /**
+     * A pre-F-257 row with the flag since turned off through profile-prefs.
+     * Until the fold is done search still leaves this member out on the
+     * legacy row, so the alias says so (F-519); once it is done the legacy
+     * row no longer counts and the one flag decides.
+     */
+    public function testTheLegacyKeyDecidesTheAliasOnlyUntilTheFold(): void
     {
-        // A pre-F-257 row with the flag since turned off through
-        // profile-prefs: the one flag wins.
+        if (!\function_exists('get_option')) {
+            eval('function get_option(string $key, $default = false) { return $GLOBALS["__bcc_opts"][$key] ?? $default; }');
+        }
+        $GLOBALS['__bcc_opts'] = [];
         $GLOBALS['__bcc_um'][self::USER][PrivacySettings::LEGACY_DISCOVERY_OPTOUT_META] = '1';
         $GLOBALS['__bcc_um'][self::USER][PrivacySettings::HIDE_FROM_LISTING_META]       = '0';
 
-        self::assertFalse(PrivacySettings::flag(self::USER, 'discovery_optout'));
+        self::assertTrue(PrivacySettings::flag(self::USER, 'discovery_optout'), 'before the fold');
+        self::assertTrue(PrivacySettings::readAll(self::USER)['discovery_optout'], 'before the fold, /me/privacy');
+
+        $GLOBALS['__bcc_opts'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
+
+        self::assertFalse(PrivacySettings::flag(self::USER, 'discovery_optout'), 'after the fold: the one flag wins');
+        self::assertFalse(PrivacySettings::readAll(self::USER)['discovery_optout'], 'after the fold, /me/privacy');
     }
 
     public function testTheOtherPrivacyKeysKeepTheirOwnMeta(): void

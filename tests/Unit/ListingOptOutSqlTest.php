@@ -126,4 +126,38 @@ final class ListingOptOutSqlTest extends TestCase
         yield 'three parts'       => ['db.wp_users.ID'];
         yield 'trailing space'    => ['wp_users.ID '];
     }
+
+    /**
+     * anyRowOn() is the PHP form of the fragment's `meta_value IN (…)`: the
+     * same set, any case, nothing trimmed, any row.
+     *
+     * @param list<string> $rows
+     */
+    #[DataProvider('rowShapes')]
+    public function testAnyRowOnMatchesAsTheFragmentDoes(array $rows, bool $on): void
+    {
+        self::assertSame($on, UserSyncRepository::anyRowOn($rows));
+    }
+
+    /** @return iterable<string, array{list<string>, bool}> */
+    public static function rowShapes(): iterable
+    {
+        yield 'no row'       => [[], false];
+        yield "'1'"          => [['1'], true];
+        yield "'true'"       => [['true'], true];
+        yield "'on'"         => [['on'], true];
+        yield "'yes'"        => [['yes'], true];
+        yield "'YES'"        => [['YES'], true];
+        yield "'True'"       => [['True'], true];
+        yield "'0' then '1'" => [['0', '1'], true];
+        yield "'1' then '0'" => [['1', '0'], true];
+        yield "'0'"          => [['0'], false];
+        yield "''"           => [[''], false];
+        yield "'2'"          => [['2'], false];
+        yield "'y'"          => [['y'], false];
+        yield "' 1'"         => [[' 1'], false];
+        yield "'1\\n'"       => [["1\n"], false];
+        yield "' yes'"       => [[' yes'], false];
+        yield "'1 '"         => [['1 '], false];
+    }
 }
