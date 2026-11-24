@@ -1300,7 +1300,42 @@ class VoteRepository {
      */
     public function findSecretPageIdsReviewedBy(int $voterId): array
     {
-        if ($voterId <= 0) {
+        return $this->secretPageIdsReviewedBy([$voterId], __FUNCTION__);
+    }
+
+    /**
+     * The SECRET pages ANY of these members has an active review of, each
+     * once (F-571): findSecretPageIdsReviewedBy() for a whole list of member
+     * cards, in one read. The cards' reviews_written counts pass these
+     * through ONE PageAccess::hiddenAmong() for the viewer and leave the
+     * hidden ones out (countByVoters()), as the member's own Reviews list
+     * does (MemberSummaryPrefetcher::contentCountsFor()).
+     *
+     * ⚠ FAILS CLOSED: a read that did not run THROWS, and so does a list
+     * whose members together reviewed more than PageAccess::HIDDEN_LIST_CAP
+     * secret pages (logged and counted). The cap is the LIST's, so a list
+     * costs at most as many page checks as one member's tab.
+     *
+     * @param list<int> $voterIds
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public function findSecretPageIdsReviewedByAny(array $voterIds): array
+    {
+        return $this->secretPageIdsReviewedBy($voterIds, __FUNCTION__);
+    }
+
+    /**
+     * The one read behind both secret-page methods above.
+     *
+     * @param array<mixed> $voterIds
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    private function secretPageIdsReviewedBy(array $voterIds, string $method): array
+    {
+        $ids = self::positiveIds($voterIds);
+        if ($ids === []) {
             return [];
         }
         global $wpdb;
@@ -1309,16 +1344,15 @@ class VoteRepository {
         $rows = self::runRead((string) $wpdb->prepare(
             "SELECT DISTINCT v.page_id
                FROM {$this->table} v
-              WHERE v.voter_user_id = %d
+              WHERE v.voter_user_id IN (" . implode(',', array_fill(0, count($ids), '%d')) . ")
                 AND v.status        = 1
                 AND NOT ({$notSecret})
               LIMIT %d",
-            $voterId,
-            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
-        ), __FUNCTION__, true);
+            ...[...$ids, \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1]
+        ), $method, true);
 
         if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
-            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $voterId);
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, $method, ...$ids);
         }
 
         return self::positiveIds(array_map(
@@ -1471,9 +1505,13 @@ class VoteRepository {
      * Voters with no votes are absent from the map; callers default to 0.
      *
      * @param int[] $voterIds Bounded by caller.
+     * @param list<int> $excludePageIds pages whose votes these counts leave
+     *        out (F-571: on member cards, the SECRET pages the viewer may not
+     *        see, so a card's chip agrees with the member's Reviews list);
+     *        none by default
      * @return array<int, int> voter_user_id → count
      */
-    public function countByVoters( array $voterIds ): array {
+    public function countByVoters( array $voterIds, array $excludePageIds = [] ): array {
         if ($voterIds === []) {
             return [];
         }
@@ -1492,6 +1530,10 @@ class VoteRepository {
 
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $exclude      = self::positiveIds($excludePageIds);
+        $notIn        = $exclude === []
+            ? ''
+            : ' AND page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         /** @var list<array{voter_user_id: string, c: string}> $rows */
         $rows = $wpdb->get_results(
@@ -1499,9 +1541,9 @@ class VoteRepository {
                 "SELECT voter_user_id, COUNT(*) AS c
                    FROM {$this->table}
                   WHERE voter_user_id IN ({$placeholders})
-                    AND status = 1
+                    AND status = 1{$notIn}
                   GROUP BY voter_user_id",
-                ...$idList
+                ...[...$idList, ...$exclude]
             ),
             ARRAY_A
         );

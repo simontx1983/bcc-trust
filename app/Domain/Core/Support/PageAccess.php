@@ -59,16 +59,22 @@ final class PageAccess
      * `page_privacy` / `member_list_over_cap` means real members cannot be
      * read; the log line names the member and the list.
      *
+     * A list of member CARDS (F-571: their reviews and disputes counts,
+     * MemberSummaryPrefetcher::contentCountsFor()) is refused the same way
+     * when its members together pass the cap, and names every member. Those
+     * cards show the counts as 0 instead of the list answering 503.
+     *
      * @param string $repository the reading repository's class
      * @param string $method     its method, usually `__FUNCTION__`
+     * @param int    ...$memberIds the member, or every member of a card list
      * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure always
      */
-    public static function refuseOverCap(string $repository, string $method, int $memberId): never
+    public static function refuseOverCap(string $repository, string $method, int ...$memberIds): never
     {
         \BCC\Core\Log\Logger::error('[bcc-trust] member list over the secret-page cap: refused rather than checked page by page', [
             'repository' => $repository,
             'method'     => $method,
-            'member_id'  => $memberId,
+            ...(count($memberIds) === 1 ? ['member_id' => $memberIds[0]] : ['member_ids' => array_values($memberIds)]),
             'cap'        => self::HIDDEN_LIST_CAP,
         ]);
         \BCC\Core\Observability\DegradationMetrics::record('page_privacy', 'member_list_over_cap');

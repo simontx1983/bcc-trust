@@ -777,9 +777,13 @@ class DisputeRepository
      * are already prefetch-bounded).
      *
      * @param int[] $userIds Bounded by caller.
+     * @param list<int> $excludePageIds pages whose disputes these counts
+     *        leave out (F-571: on member cards, the SECRET pages the viewer
+     *        may not see, so a card's chip agrees with the member's Disputes
+     *        list); none by default
      * @return array<int, int> reporter_id => count
      */
-    public static function countByReporters(array $userIds): array
+    public static function countByReporters(array $userIds, array $excludePageIds = []): array
     {
         $clean = [];
         foreach ($userIds as $id) {
@@ -796,15 +800,19 @@ class DisputeRepository
         global $wpdb;
         $table = self::disputes_table();
         $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $exclude      = self::excludedPageIds($excludePageIds);
+        $notIn        = $exclude === []
+            ? ''
+            : ' AND page_id NOT IN (' . implode(',', array_fill(0, count($exclude), '%d')) . ')';
 
         /** @var list<array{reporter_id: string, c: string}> $rows */
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT reporter_id, COUNT(*) AS c
                    FROM {$table}
-                  WHERE reporter_id IN ({$placeholders})
+                  WHERE reporter_id IN ({$placeholders}){$notIn}
                   GROUP BY reporter_id",
-                ...$idList
+                ...[...$idList, ...$exclude]
             ),
             ARRAY_A
         );
@@ -1000,7 +1008,43 @@ class DisputeRepository
      */
     public static function findSecretPageIdsDisputedBy(int $reporterId): array
     {
-        if ($reporterId <= 0) {
+        return self::secretPageIdsDisputedBy([$reporterId], __FUNCTION__);
+    }
+
+    /**
+     * The SECRET pages ANY of these members has filed a dispute on, each once
+     * (F-571): findSecretPageIdsDisputedBy() for a whole list of member
+     * cards, in one read. The cards' disputes_signed counts pass these
+     * through ONE PageAccess::hiddenAmong() for the viewer and leave the
+     * hidden ones out (countByReporters()), as the member's own Disputes
+     * list does (MemberSummaryPrefetcher::contentCountsFor()).
+     *
+     * ⚠ FAILS CLOSED, and is NOT cached: a read that did not run THROWS, and
+     * so does a list whose members together disputed more than
+     * PageAccess::HIDDEN_LIST_CAP secret pages (logged and counted). The cap
+     * is the LIST's, so a list costs at most as many page checks as one
+     * member's tab.
+     *
+     * @param list<int> $reporterIds
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    public static function findSecretPageIdsDisputedByAny(array $reporterIds): array
+    {
+        return self::secretPageIdsDisputedBy($reporterIds, __FUNCTION__);
+    }
+
+    /**
+     * The one read behind both secret-page methods above.
+     *
+     * @param array<mixed> $reporterIds
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run, or over the cap
+     */
+    private static function secretPageIdsDisputedBy(array $reporterIds, string $method): array
+    {
+        $ids = self::excludedPageIds($reporterIds); // positive ids, each once: user ids here
+        if ($ids === []) {
             return [];
         }
         global $wpdb;
@@ -1010,15 +1054,14 @@ class DisputeRepository
         $rows = self::runRead((string) $wpdb->prepare(
             "SELECT DISTINCT d.page_id
                FROM {$table} d
-              WHERE d.reporter_id = %d
+              WHERE d.reporter_id IN (" . implode(',', array_fill(0, count($ids), '%d')) . ")
                 AND NOT ({$notSecret})
               LIMIT %d",
-            $reporterId,
-            \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1
-        ), __FUNCTION__, true);
+            ...[...$ids, \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP + 1]
+        ), $method, true);
 
         if (count($rows) > \BCC\Trust\Core\Support\PageAccess::HIDDEN_LIST_CAP) {
-            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, __FUNCTION__, $reporterId);
+            \BCC\Trust\Core\Support\PageAccess::refuseOverCap(self::class, $method, ...$ids);
         }
 
         return self::excludedPageIds(array_map(

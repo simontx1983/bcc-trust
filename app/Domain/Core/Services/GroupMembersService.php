@@ -145,7 +145,7 @@ final class GroupMembersService
             }
         }
 
-        $prefetched = $userIds === [] ? null : MemberSummaryPrefetcher::primeFor($userIds);
+        $prefetched = $userIds === [] ? null : MemberSummaryPrefetcher::primeFor($userIds, $viewerId);
 
         // ── 5. Hydrate each row. ─────────────────────────────────────
         $userView = Plugin::instance()->userViewService();
