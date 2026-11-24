@@ -77,6 +77,9 @@ if (!defined('ABSPATH')) {
  *     reads '0' (`pre_option_`, so nothing downstream sees another value)
  *     and PeepSo's `site_registration_disabled` reads 1. Members sign up
  *     at the app.
+ *   - PeepSo's built-in data export stays off: its `gdpr_enable` reads 0,
+ *     last word, whatever the stored setting says. BCC handles data
+ *     requests. Rationale: F-581 (private tracker).
  *
  * Also: RESERVED_PATH_WORDS can't become a group's slug (`wp_unique_post_slug`)
  * and HandleService reserves them as handles, so no app URL that names a
@@ -179,6 +182,7 @@ final class WordPressSignInGate
         add_filter('pings_open', [self::class, 'closedToCoreComments'], PHP_INT_MAX);
         add_filter('pre_option_users_can_register', [self::class, 'noNativeSignUp'], PHP_INT_MAX);
         add_filter('peepso_filter_get_option_site_registration_disabled', [self::class, 'peepsoSignUpDisabled'], PHP_INT_MAX);
+        add_filter('peepso_filter_get_option_gdpr_enable', [self::class, 'peepsoDataExportOff'], PHP_INT_MAX);
     }
 
     /**
@@ -261,6 +265,21 @@ final class WordPressSignInGate
         unset($value);
 
         return 1;
+    }
+
+    /**
+     * PeepSo's `gdpr_enable` option, last: PeepSo's built-in data export
+     * stays off for every caller, whatever the stored setting says. BCC
+     * handles data requests. Registered at boot with the rest of this
+     * class, so it is in place before `init`.
+     *
+     * @param mixed $value
+     */
+    public static function peepsoDataExportOff($value = 1): int
+    {
+        unset($value);
+
+        return 0;
     }
 
     /**
