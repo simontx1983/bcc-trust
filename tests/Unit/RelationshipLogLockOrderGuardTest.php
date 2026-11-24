@@ -20,6 +20,8 @@ final class RelationshipLogLockOrderGuardTest extends TestCase
 {
     private const APPEND = '/(?:ValidatorRelationshipLogRepository|\bLog)::append\(/';
     private const VRL    = '/AdvisoryLock::acquire\(\s*(?:ValidatorRelationshipLogRepository|Log)::LOCK_NAME/';
+    private const VRL_RELEASE = '/AdvisoryLock::release\(\s*(?:ValidatorRelationshipLogRepository|Log)::LOCK_NAME/';
+    private const ADVANCE     = '/RelationshipLogAnchor::advance\(/';
 
     public function testEveryLogAppendHoldsTheVrlLockFirst(): void
     {
@@ -57,5 +59,43 @@ final class RelationshipLogLockOrderGuardTest extends TestCase
             }
         }
         self::assertGreaterThanOrEqual(1, $checked, 'the scan found the known append paths (it is not scanning nothing)');
+    }
+
+    /**
+     * The anchor moves only after a COMMIT and while the vrl lock is held:
+     * every method that advances it takes the vrl lock, advances after the
+     * transaction ran, and releases the lock only after advancing.
+     */
+    public function testTheAnchorAdvancesAfterTheCommitAndBeforeTheVrlRelease(): void
+    {
+        $root    = dirname(__DIR__, 2);
+        $checked = 0;
+        $it      = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app', \FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $file) {
+            if (!$file instanceof \SplFileInfo || $file->getExtension() !== 'php') {
+                continue;
+            }
+            $relative = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+            $code     = GateOrder::code($relative);
+            if (preg_match(self::ADVANCE, $code) !== 1) {
+                continue;
+            }
+            preg_match_all('/function\s+(\w+)\s*\(/', $code, $m);
+            foreach ($m[1] as $method) {
+                $body = GateOrder::body($code, $method);
+                if (preg_match(self::ADVANCE, $body, $advance, PREG_OFFSET_CAPTURE) !== 1) {
+                    continue;
+                }
+                ++$checked;
+                $label = "{$relative} {$method}()";
+                self::assertSame(1, preg_match(self::VRL, $body, $vrl, PREG_OFFSET_CAPTURE), "{$label} advances the anchor without taking the vrl lock");
+                self::assertSame(1, preg_match('/TransactionManager::run\(/', $body, $run, PREG_OFFSET_CAPTURE), "{$label} advances outside a committed transaction");
+                self::assertSame(1, preg_match(self::VRL_RELEASE, $body, $release, PREG_OFFSET_CAPTURE), "{$label} never releases the vrl lock");
+                self::assertLessThan($advance[0][1], $vrl[0][1], "{$label}: the vrl lock comes before the advance");
+                self::assertLessThan($advance[0][1], $run[0][1], "{$label}: the advance comes after the transaction");
+                self::assertGreaterThan($advance[0][1], $release[0][1], "{$label}: the vrl lock is released only after the advance");
+            }
+        }
+        self::assertGreaterThanOrEqual(1, $checked, 'the scan found the known advance paths (it is not scanning nothing)');
     }
 }

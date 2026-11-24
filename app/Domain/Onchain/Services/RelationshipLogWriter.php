@@ -18,7 +18,9 @@ if (!defined('ABSPATH')) {
  * inside their own transaction instead (ValidatorRelationshipService).
  *
  * Lock order, as on every path: GET_LOCK bcc_vrl_append → START TRANSACTION
- * → append → COMMIT → RELEASE, the release in finally. A lock timeout or any
+ * → append → COMMIT → advance the anchor → RELEASE, the release in finally.
+ * The anchor moves only after a successful COMMIT and while the vrl lock is
+ * still held, so appends cannot move it out of order. A lock timeout or any
  * failure writes nothing, records a metric and returns false: a log row
  * about a failure must never turn into an error for the caller.
  *
@@ -38,21 +40,24 @@ final class RelationshipLogWriter
             return false;
         }
         try {
-            /** @var array{id: int, seq: int, row_hash: string} $appended */
-            $appended = TransactionManager::run(static fn (): array => Log::append($event));
-        } catch (\Throwable $e) {
-            \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'log_append_failed');
-            \BCC\Core\Log\Logger::error('[bcc-trust] relationship log: standalone append failed', [
-                'action' => $event['action'],
-                'error'  => $e->getMessage(),
-            ]);
-            return false;
+            try {
+                /** @var array{id: int, seq: int, row_hash: string} $appended */
+                $appended = TransactionManager::run(static fn (): array => Log::append($event));
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'log_append_failed');
+                \BCC\Core\Log\Logger::error('[bcc-trust] relationship log: standalone append failed', [
+                    'action' => $event['action'],
+                    'error'  => $e->getMessage(),
+                ]);
+                return false;
+            }
+
+            // Committed; the vrl lock is still held.
+            RelationshipLogAnchor::advance($appended['seq'], $appended['row_hash']);
+
+            return true;
         } finally {
             AdvisoryLock::release(Log::LOCK_NAME);
         }
-
-        RelationshipLogAnchor::advance($appended['seq'], $appended['row_hash']);
-
-        return true;
     }
 }

@@ -15,9 +15,14 @@ if (!defined('ABSPATH')) {
  * can: the verifier fails when the table's head is behind it, or when the
  * row at the anchor's seq no longer carries the anchored hash.
  *
- * The anchor only moves forward. It is advanced after each append commits
- * (by the relationship service) and after every clean verification (by the
- * health check).
+ * The anchor only moves forward, and only an APPENDER moves it: after its
+ * append COMMITS, while it still holds the bcc_vrl_append lock. Appends are
+ * serialized by that lock, so the read-compare-write below cannot race
+ * another append, and a seq that rolled back is never anchored.
+ *
+ * The option is a tripwire for rows deleted from the end, not a defence
+ * against a database writer: a deleted option reads as null, which the
+ * health check reports as a warning when the log is not empty.
  *
  * @package BCC\Trust\Onchain\Support
  */
@@ -43,7 +48,8 @@ final class RelationshipLogAnchor
 
     /**
      * Move the anchor to ($seq, $rowHash) when that is ahead of the stored
-     * one. Never moves it back.
+     * one. Never moves it back. Call ONLY after a successful COMMIT, while
+     * holding the bcc_vrl_append lock (RelationshipLogLockOrderGuardTest).
      */
     public static function advance(int $seq, string $rowHash): void
     {
