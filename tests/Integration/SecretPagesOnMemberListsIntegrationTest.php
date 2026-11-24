@@ -272,6 +272,32 @@ final class SecretPagesOnMemberListsIntegrationTest extends TestCase
         self::assertSame(2, $data['total']);
     }
 
+    /**
+     * F-571: the exclusion is for card PAGES. A vouch for a member whose user
+     * id happens to equal a hidden page's id is a member vouch, and stays.
+     */
+    public function testTheExclusionNeverTouchesAMemberVouchWithTheSameNumber(): void
+    {
+        global $wpdb;
+        self::assertNotFalse($wpdb->insert(TableRegistry::trustAttestations(), [
+            'attestor_user_id' => self::AUTHOR,
+            'target_kind'      => 'user_profile',
+            'target_id'        => self::SECRET, // a user id that equals the hidden page's id
+            'kind'             => 'vouch',
+            'weight_at_time'   => 1.0,
+            'created_at'       => gmdate('Y-m-d H:i:s', time() - 3600),
+        ]), $wpdb->last_error);
+        $this->viewAs(self::STRANGER);
+
+        $shown = array_map(
+            static fn (array $item): int => (int) $item['page_id'],
+            $this->ok($this->call('endorsements'))['items']
+        );
+
+        self::assertContains(MemberSelfPageService::selfPageId(self::SECRET), $shown, 'the member vouch is listed');
+        self::assertNotContains(self::SECRET, $shown, 'the secret page vouch is not');
+    }
+
     /** F-571: a vouch for a member is titled with the name OTHERS see. */
     public function testAVouchForAMemberWhoHidesTheirRealNameShowsTheirHandle(): void
     {
