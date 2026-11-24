@@ -311,8 +311,17 @@ class CronService
         try {
             $graph = Plugin::instance()->trustGraph();
 
-            // PageRank
-            $graph->batchCalculateAllRanks();
+            // PageRank. F-574: the edge reads FAIL CLOSED. A read that cannot
+            // be verified throws before any rank is computed or written, so
+            // this run leaves every stored rank as it was and the next run
+            // retries. Caught HERE only, so ring detection below still runs.
+            try {
+                $graph->batchCalculateAllRanks();
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] PageRank skipped: the edge graph could not be read; ranks unchanged', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
 
             // Ring / sybil detection (cache results for FraudDetector lookups)
             $ringMinSize = defined('BCC_TRUST_RING_MIN_SIZE') ? BCC_TRUST_RING_MIN_SIZE : 3;
@@ -958,6 +967,11 @@ class CronService
             // copy makes, so the sweep must run far more often than the
             // window it enforces, or a single missed run breaks the promise.
             'bcc_trust_post_reach_dedupe_sweep' => 'hourly',
+            // F-581: the PeepSo upkeep BCC depends on (trending hashtags,
+            // expired mayfly rows, registration-avatar temp files), run by
+            // BCC because PeepSo's own maintenance bundle is not run here.
+            // See Integration\PeepSoUpkeep for what it does and never does.
+            'bcc_trust_peepso_upkeep'          => 'bcc_five_minutes',
         ];
 
         /**

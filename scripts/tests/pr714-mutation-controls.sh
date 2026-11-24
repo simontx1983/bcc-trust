@@ -199,8 +199,14 @@ control 2 "Repository failure changed to empty success (evaluator reads the fold
   "testAWalletReadFailureIsUnknownNotIneligible|testJoinDuringAWalletReadFailureIsTemporarilyUnavailable|testTheSweepNeverRemovesAMemberOnAWalletReadFailure" \
   "testAFailedWalletQueryRemovesNobodyAndTheNextHealthyTickDoes"
 
+# ⚠ RE-ANCHORED 2026-11-24 (F-472). This read moved from
+#   get_results() + self::guardReadOrThrow('getForUserOrThrow')
+# to self::runRead($sql, <name>, $failClosed), so the old anchor planted
+# nothing and the script correctly reported #2b BROKEN rather than passing
+# quietly. The mutant is unchanged in MEANING: force the third argument to
+# false, so the repository logs and returns [] instead of throwing.
 control 2b "Repository failure changed to empty success (repository no longer throws)" "$WALLETS" \
-  "s = s.replace(\"            self::guardReadOrThrow('getForUserOrThrow');\", \"            self::guardRead('getForUserOrThrow');\")" \
+  "s = s.replace(\"            \$failClosed ? 'getForUserOrThrow' : 'getForUser',\n            \$failClosed\n        );\", \"            \$failClosed ? 'getForUserOrThrow' : 'getForUser',\n            false\n        );\")" \
   - \
   "testAFailedWalletQueryRemovesNobodyAndTheNextHealthyTickDoes"
 

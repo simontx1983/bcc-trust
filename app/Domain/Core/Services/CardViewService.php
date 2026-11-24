@@ -57,6 +57,7 @@ use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\ValidatorStatusProjection;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -1569,7 +1570,8 @@ final class CardViewService
         $comm   = $row->commission_rate !== null ? (float) $row->commission_rate / 100.0 : null;
 
         return [
-            'status'            => (string) $row->status,
+            // F-584: `unknown` while the chain has stopped answering.
+            'status'            => ValidatorStatusProjection::effective((string) $row->status, (int) $row->chain_id),
             'uptime_30d'        => $uptime,
             'commission_rate'   => $comm,
             'voting_power_rank' => $row->voting_power_rank !== null ? (int) $row->voting_power_rank : null,

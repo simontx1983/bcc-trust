@@ -70,6 +70,8 @@ final class PageDiscoveryRepository
      * Query the denormalized read model table for discovery pages.
      *
      * @param string[] $types
+     * @param array<int, int|string> $status_chain_ids the chains whose validator status is
+     *        current (F-584); used only with a `status` filter, where none matches nothing.
      * @return array{rows: list<object>, total: int, pages: int, page: int}
      * @phpstan-return array{
      *   rows: list<object{
@@ -109,7 +111,8 @@ final class PageDiscoveryRepository
         bool $good_standing_only = false,
         string $chain_slug = '',
         string $status = '',
-        ?float $min_self_stake = null
+        ?float $min_self_stake = null,
+        array $status_chain_ids = []
     ): array {
         global $wpdb;
 
@@ -186,6 +189,21 @@ final class PageDiscoveryRepository
             // present by $needs_validator_join above.
             $where[]  = 'v_chain.status = %s';
             $params[] = $status;
+
+            // F-584: a stored status counts only on a chain still answering
+            // ($status_chain_ids, from ValidatorStatusProjection). On any
+            // other chain it reads `unknown`, which no filter value selects.
+            // No current chain (or none passed) matches nothing.
+            $chainIds = array_values(array_unique(array_filter(
+                array_map('intval', $status_chain_ids),
+                static fn (int $id): bool => $id > 0
+            )));
+            if ($chainIds === []) {
+                $where[] = '1 = 0';
+            } else {
+                $where[] = 'v_chain.chain_id IN (' . implode(',', array_fill(0, count($chainIds), '%d')) . ')';
+                $params  = array_merge($params, $chainIds);
+            }
         }
         if ($min_self_stake !== null) {
             $where[]  = 'v_chain.self_stake >= %f';

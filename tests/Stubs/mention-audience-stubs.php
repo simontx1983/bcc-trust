@@ -144,7 +144,7 @@ namespace BCC\Core\PeepSo {
                 if (!empty($GLOBALS['__bcc_mna']['bell_write_fails'])) {
                     return ['ok' => false, 'reason' => 'simulated write failure'];
                 }
-                $GLOBALS['__bcc_mna']['bells'][] = ['to' => $to, 'from' => $from, 'type' => $type, 'external_id' => $externalId, 'act_id' => $actId];
+                $GLOBALS['__bcc_mna']['bells'][] = ['to' => $to, 'from' => $from, 'type' => $type, 'external_id' => $externalId, 'act_id' => $actId, 'message' => $message];
                 if (isset($GLOBALS['__bcc_mna']['next_bell_id'])) {
                     // F-516: the row id PeepSo's writer answers, when a test asks for one.
                     return ['ok' => true, 'notification_id' => $GLOBALS['__bcc_mna']['next_bell_id']++];

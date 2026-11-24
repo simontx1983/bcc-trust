@@ -436,18 +436,25 @@ final class ChainCheckpointRepository
             if ($wpdb->query('START TRANSACTION') === false) {
                 throw new \RuntimeException('START TRANSACTION failed');
             }
-            /** @var object{cu_used_today: int|string, cu_budget_reset_at: string}|null $row */
-            $row = $wpdb->get_row($wpdb->prepare(
+            $sql = (string) $wpdb->prepare(
                 "SELECT cu_used_today, cu_budget_reset_at
                    FROM {$table}
                   WHERE chain_id = %d
                   LIMIT 1
                     FOR UPDATE",
                 $chainId
-            ));
-            // Caught below: rolls back and logs, so a failed read can never
-            // be mistaken for the "no such chain" case on the next line.
-            self::guardReadOrThrow(__FUNCTION__);
+            );
+
+            // Caught below by `catch (\Throwable)`: rolls back and logs, so
+            // a read that did not run can never be mistaken for the "no such
+            // chain" case on the next line.
+            //
+            // runReadRow rather than get_row + a last_error check: the guard
+            // could not see a pre-flush bail, and here that would have
+            // skipped the CU increment for the day while the FOR UPDATE row
+            // lock this statement exists to take had never been held.
+            /** @var object{cu_used_today: int|string, cu_budget_reset_at: string}|null $row */
+            $row = self::runReadRow($sql, __FUNCTION__, true);
 
             if ($row === null) {
                 $wpdb->query('ROLLBACK');

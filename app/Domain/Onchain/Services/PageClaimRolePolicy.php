@@ -284,12 +284,34 @@ final class PageClaimRolePolicy
 
     /**
      * May $actorRole invite someone into $targetRole? Administrators are the
-     * owner's alone; representatives follow manage_representatives. Never
-     * into ownership.
+     * owner's alone. Representatives need manage_representatives AND, for a
+     * non-owner, every power the representative role carries under these
+     * settings: you cannot grant a power you do not hold (so an administrator
+     * whose announcements the owner switched off cannot add a second account
+     * as a representative and announce through it). Never into ownership.
      *
      * @param array<mixed>|null $settings
      */
     public static function mayInvite(?string $actorRole, string $targetRole, ?array $settings, bool $actorReconfirmed): bool
+    {
+        return match ($targetRole) {
+            self::ROLE_ADMINISTRATOR  => self::may($actorRole, self::LOCKED_MANAGE_ADMINISTRATORS, $settings, $actorReconfirmed),
+            self::ROLE_REPRESENTATIVE => self::may($actorRole, self::POWER_MANAGE_REPRESENTATIVES, $settings, $actorReconfirmed)
+                && self::holdsEveryPowerOf($actorRole, self::ROLE_REPRESENTATIVE, $settings, $actorReconfirmed),
+            default                   => false,
+        };
+    }
+
+    /**
+     * May $actorRole remove (or cancel the invite of) a member in
+     * $targetRole? Administrators are the owner's alone; representatives
+     * follow manage_representatives. Removing only takes power away, so the
+     * "hold every power" rule of inviting does not apply. An owner is never
+     * removed this way.
+     *
+     * @param array<mixed>|null $settings
+     */
+    public static function mayRemove(?string $actorRole, string $targetRole, ?array $settings, bool $actorReconfirmed): bool
     {
         return match ($targetRole) {
             self::ROLE_ADMINISTRATOR  => self::may($actorRole, self::LOCKED_MANAGE_ADMINISTRATORS, $settings, $actorReconfirmed),
@@ -299,14 +321,26 @@ final class PageClaimRolePolicy
     }
 
     /**
-     * May $actorRole remove (or cancel the invite of) a member in
-     * $targetRole? Same rule as inviting; an owner is never removed this way.
+     * Does $actorRole hold every power $targetRole carries under these
+     * settings? Always for the owner; never when the settings are unreadable.
      *
      * @param array<mixed>|null $settings
      */
-    public static function mayRemove(?string $actorRole, string $targetRole, ?array $settings, bool $actorReconfirmed): bool
+    private static function holdsEveryPowerOf(?string $actorRole, string $targetRole, ?array $settings, bool $actorReconfirmed): bool
     {
-        return self::mayInvite($actorRole, $targetRole, $settings, $actorReconfirmed);
+        if (self::isOwnerRole($actorRole)) {
+            return true;
+        }
+        if ($settings === null || !self::isTeamRole($targetRole)) {
+            return false;
+        }
+        foreach (self::effective($settings)[$targetRole] as $power => $granted) {
+            if ($granted && !self::may($actorRole, $power, $settings, $actorReconfirmed)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

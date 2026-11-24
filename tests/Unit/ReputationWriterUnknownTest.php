@@ -28,6 +28,7 @@ use BCC\Trust\Core\Services\AttestationScoreSynthesis;
 use BCC\Trust\Core\Services\ContributionRecoveryEvaluator;
 use BCC\Trust\Core\Services\ContributionScoreService;
 use BCC\Trust\Core\Services\TierUpgradeListener;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -77,6 +78,31 @@ final class ReputationWriterUnknownTest extends TestCase
             ->synthesize('user_profile', 7, new \DateTimeImmutable('2026-11-02 00:00:00', new \DateTimeZone('UTC')));
 
         self::assertGreaterThan(0.0, $bonus);
+    }
+
+    /**
+     * The attestation ROWS read (runRead(), fail-closed) failing stops the
+     * recompute before any write as well, both when wpdb reports the error
+     * and when it returns early without one.
+     */
+    public function testAnUnreadableAttestationRowSetWritesNoBonusEither(): void
+    {
+        foreach (['error', 'silent'] as $how) {
+            \ReputationWriterWorld::reset();
+            \ReputationWriterWorld::$results['attestor_user_id, weight_at_time']  = [self::attestationRow(5)];
+            \ReputationWriterWorld::$failures['attestor_user_id, weight_at_time'] = $how;
+            $scores = self::scoreRepo();
+
+            $thrown = null;
+            try {
+                self::synthesis(self::reputation(tiers: []), $scores)->recomputeFor('validator_card', 2015);
+            } catch (\Throwable $e) {
+                $thrown = $e;
+            }
+
+            self::assertInstanceOf(RepositoryReadFailure::class, $thrown, "{$how}: a failed read is not \"no attestations\"");
+            self::assertSame([], $scores->writes, "{$how}: no bonus written");
+        }
     }
 
     // ── ContributionScoreService ────────────────────────────────────────

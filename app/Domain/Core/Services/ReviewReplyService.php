@@ -52,6 +52,12 @@ final class ReviewReplyService
 {
     public const BODY_MAX_LENGTH = 1000;
 
+    /** {@see shownAuthors()}: the reply shows its author. */
+    public const SHOWN_AS_AUTHOR = 'author';
+
+    /** {@see shownAuthors()}: the reply stands as the page's response. */
+    public const SHOWN_AS_PAGE = 'page';
+
     /** Seconds a create waits for a concurrent create on the same review. */
     private const CREATE_LOCK_WAIT = 5;
 
@@ -86,10 +92,10 @@ final class ReviewReplyService
      * guessed "no reply yet" could offer a duplicate.
      *
      * The shown reply follows its AUTHOR's profile visibility for this
-     * viewer: one {@see ProfileAccess::filterVisible()} batch for the page
-     * (profile level, suspension, blocks either way; not the search opt-out,
-     * since this is not a search), and a reply whose author the viewer may
-     * not see is not shown, author and text alike. A check that cannot
+     * viewer, by {@see shownAuthors()} (one batch for the page: profile
+     * level, suspension, blocks either way; not the search opt-out, since
+     * this is not a search), and a reply whose author the viewer may not
+     * see is not shown, author and text alike. A check that cannot
      * answer shows none. `viewer_stale_reply` is the viewer's own and needs
      * no check. ⚠ filterVisible() reads the CURRENT user, so $viewerId must
      * be the request's viewer, as it is on both Reviews tabs.
@@ -146,8 +152,8 @@ final class ReviewReplyService
             ];
         }
 
-        // Each shown reply's author must be visible to this viewer: one
-        // ProfileAccess::filterVisible() batch for the page (see above).
+        // Each shown reply's author must be shown to this viewer: one
+        // decision for the page ({@see shownAuthors()}).
         $authorIds = [];
         foreach ($out as $bundle) {
             if ($bundle['reply'] !== null) {
@@ -155,35 +161,69 @@ final class ReviewReplyService
             }
         }
         if ($authorIds !== []) {
-            $visible = array_flip(ProfileAccess::filterVisible($authorIds, false));
-
-            $hidden = [];
-            foreach ($out as $bundle) {
-                if ($bundle['reply'] !== null && !isset($visible[$bundle['reply']['author_id']])) {
-                    $hidden[$bundle['reply']['author_id']] = $bundle['reply']['author_id'];
-                }
-            }
-            // Only for the page's own tab, and only the authors the viewer
-            // may not see for their profile level alone (see above).
-            $asPage = $pageMayAnswer && $hidden !== []
-                ? array_flip(ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)))
-                : [];
+            $shown = self::shownAuthors($authorIds, $pageMayAnswer);
 
             foreach ($out as $voteId => $bundle) {
                 $reply = $bundle['reply'];
-                if ($reply === null || isset($visible[$reply['author_id']])) {
+                if ($reply === null) {
                     continue;
                 }
-                if (isset($asPage[$reply['author_id']])) {
+                $as = $shown[$reply['author_id']] ?? null;
+                if ($as === self::SHOWN_AS_PAGE) {
                     $reply['as_page']      = true;
                     $out[$voteId]['reply'] = $reply;
-                } else {
+                } elseif ($as === null) {
                     $out[$voteId]['reply'] = null;
                 }
             }
         }
 
         return $out;
+    }
+
+    /**
+     * Of $authorIds (reply authors), how a Reviews tab shows each one's
+     * reply to the CURRENT viewer, keyed by author id:
+     *   - SHOWN_AS_AUTHOR: the viewer may see the author;
+     *   - SHOWN_AS_PAGE ($pageMayAnswer, the page's own tab only): the
+     *     author is hidden from the viewer ONLY by the level they chose for
+     *     their profile, so the reply stands as the page's response.
+     * An author missing from the result is not shown at all: a block either
+     * way, a suspension, a banned author, or anything that could not be read.
+     *
+     * The ONE decision for the Reviews tabs ({@see forReviews()}) and for
+     * reporting a reply (FeedItemReportVisibility), so a reply can be
+     * reported exactly where it is shown. One ProfileAccess::filterVisible()
+     * batch (not the search opt-out: this is not a search), then one
+     * ProfileAccess::hiddenOnlyByProfileLevel() batch for the authors it
+     * left out.
+     *
+     * ⚠ CURRENT VIEWER ONLY, as both of those are: a caller asking about
+     * another viewer must refuse instead of calling this.
+     *
+     * @param list<int> $authorIds
+     * @return array<int, 'author'|'page'>
+     */
+    public static function shownAuthors(array $authorIds, bool $pageMayAnswer): array
+    {
+        if ($authorIds === []) {
+            return [];
+        }
+        $shown = array_fill_keys(ProfileAccess::filterVisible($authorIds, false), self::SHOWN_AS_AUTHOR);
+
+        $hidden = [];
+        foreach ($authorIds as $id) {
+            if (!isset($shown[$id])) {
+                $hidden[$id] = $id;
+            }
+        }
+        if ($pageMayAnswer && $hidden !== []) {
+            foreach (ProfileAccess::hiddenOnlyByProfileLevel(array_values($hidden)) as $id) {
+                $shown[$id] = self::SHOWN_AS_PAGE;
+            }
+        }
+
+        return $shown;
     }
 
     /**
@@ -256,6 +296,11 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs FIRST, before anything about the review is
+        // looked up, so every attempt counts, refused ones included.
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -270,13 +315,15 @@ final class ReviewReplyService
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
+        // F-531: a review that is missing, removed or hidden, and one this
+        // viewer may not reply to, get the SAME answer.
         if ($review === null) {
-            return self::error('bcc_not_found', 'Review not found.');
+            return self::notFound();
         }
         $pageId  = (int) $review->page_id;
         $voterId = (int) $review->voter_user_id;
         if ($voterId === $viewerId || !$this->answersFor($pageId, $viewerId)) {
-            return self::error('bcc_forbidden', 'Only the reviewed member or page can reply to this review.');
+            return self::notFound();
         }
 
         // One create per review at a time, so two concurrent requests from
@@ -296,10 +343,6 @@ final class ReviewReplyService
                 }
             } catch (RepositoryReadFailure $e) {
                 return self::unavailable();
-            }
-
-            if (!self::withinRateLimit($viewerId)) {
-                return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
             }
 
             $written = $this->writer->publishReviewReply($viewerId, $voteId, $clean);
@@ -341,6 +384,10 @@ final class ReviewReplyService
         if ($viewerId <= 0) {
             return self::error('bcc_unauthorized', 'Sign in required.');
         }
+        // F-531: the throttle runs first, as in create().
+        if (!self::withinRateLimit($viewerId)) {
+            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        }
         $restricted = self::restricted($viewerId);
         if ($restricted !== null) {
             return $restricted;
@@ -353,21 +400,16 @@ final class ReviewReplyService
         try {
             $review = $this->votes->findReviewForReply($voteId);
             if ($review === null) {
-                return self::error('bcc_not_found', 'Review not found.');
+                return self::notFound();
             }
             $reply = $this->replies->findForVoteByAuthor($voteId, $viewerId);
         } catch (RepositoryReadFailure $e) {
             return self::unavailable();
         }
-        // Not theirs, gone, or frozen by a moderator: the same answer.
-        if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
-        }
-        if (!$this->answersFor((int) $review->page_id, $viewerId)) {
-            return self::error('bcc_forbidden', 'You no longer answer for this page, so this reply can no longer be edited.');
-        }
-        if (!self::withinRateLimit($viewerId)) {
-            return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
+        // F-531: no review, not theirs, frozen by a moderator, or handed
+        // over (the author no longer answers for the page): the same answer.
+        if ($reply === null || $reply['hidden'] || !$this->answersFor((int) $review->page_id, $viewerId)) {
+            return self::notFound();
         }
 
         // ⚠ F-361 — pinned. #772 pinned the reply PUBLISH (in
@@ -413,7 +455,7 @@ final class ReviewReplyService
             return self::unavailable();
         }
         if ($reply === null || $reply['hidden']) {
-            return self::error('bcc_not_found', 'Reply not found.');
+            return self::notFound();
         }
         if (!$this->writer->deleteReviewReply($reply['post_id'], $reply['act_id'])) {
             return self::unavailable();
@@ -548,7 +590,7 @@ final class ReviewReplyService
      * (§1.4.5). For the page's response its author answers for the page by
      * construction, so editing needs only authorship and good standing. A
      * $stale reply is the viewer's own after a hand-over: deletable, never
-     * editable (update() refuses it with 403).
+     * editable (update() refuses it with the one not-found answer, F-531).
      *
      * @param array{author_id: int} $row
      * @return array{can_edit: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_delete: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_report: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}
@@ -658,6 +700,23 @@ final class ReviewReplyService
     private static function error(string $code, string $message): array
     {
         return ['error' => $code, 'message' => $message];
+    }
+
+    /**
+     * F-531: the ONE refusal for anything about the review or the reply, so
+     * no answer tells a caller whether a review exists, is hidden, or is
+     * someone else's to answer: a missing, removed or hidden review, one the
+     * caller may not reply to, a reply that is not theirs or is frozen, and
+     * a reply whose author no longer answers for the page. Refusals about
+     * the CALLER (sign-in, suspension, the rate limit, the body) are
+     * unchanged; they say nothing about any review. Rationale: F-531
+     * (private tracker).
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function notFound(): array
+    {
+        return self::error('bcc_not_found', 'Not found.');
     }
 
     /** @return array{error: string, message: string} */

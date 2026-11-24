@@ -91,8 +91,13 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
         self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
         self::assertSame([[WordPressSignInGate::class, 'noXmlRpc'], PHP_INT_MAX, 1], $hooks['xmlrpc_enabled']);
+        self::assertSame([[WordPressSignInGate::class, 'noXmlRpcMethods'], PHP_INT_MAX, 1], $hooks['xmlrpc_methods']);
+        self::assertSame([[WordPressSignInGate::class, 'noPingbackHeader'], PHP_INT_MAX, 1], $hooks['wp_headers']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['comments_open']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['pings_open']);
         self::assertSame([[WordPressSignInGate::class, 'noNativeSignUp'], PHP_INT_MAX, 1], $hooks['pre_option_users_can_register']);
         self::assertSame([[WordPressSignInGate::class, 'peepsoSignUpDisabled'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_site_registration_disabled']);
+        self::assertSame([[WordPressSignInGate::class, 'peepsoDataExportOff'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_gdpr_enable']);
     }
 
     /**
@@ -126,6 +131,47 @@ final class WordPressSignInGateTest extends TestCase
         self::assertFalse(self::filtered('xmlrpc_enabled', true, [[static fn($on): bool => true, 99]]));
     }
 
+    /** No XML-RPC method answers, even after a later filter adds one back. */
+    public function testNoXmlRpcMethodAnswersWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        $core = ['core.methodOne' => 'this:methodOne', 'core.methodTwo' => 'this:methodTwo'];
+        self::assertSame([], self::filtered('xmlrpc_methods', $core, [[static fn($m): array => $m + ['demo.sayHello' => 'this:sayHello'], 99]]));
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function commentAndPingHooks(): iterable
+    {
+        yield 'comments' => ['comments_open'];
+        yield 'pings'    => ['pings_open'];
+    }
+
+    /**
+     * Core comments and pings are closed on every post: whatever core read
+     * from the post (open), and even after a later plugin opened them again,
+     * the answer core's comment handlers and trackbacks get is false.
+     */
+    #[DataProvider('commentAndPingHooks')]
+    public function testCoreCommentsAndPingsAreClosedWhateverCameBefore(string $hook): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertFalse(self::filtered($hook, true, [[static fn($open): bool => true, 99]]));
+        self::assertFalse(self::filtered($hook, '1', [[static fn($open): string => 'open', 10]]));
+        self::assertFalse(self::filtered($hook, false, []), 'a closed post stays closed');
+    }
+
+    /** X-Pingback is dropped; every other header passes through unchanged. */
+    public function testThePingbackHeaderIsDroppedAndNothingElse(): void
+    {
+        $headers = ['Content-Type' => 'text/html; charset=UTF-8', 'X-Pingback' => 'https://cms.example.test/xmlrpc.php', 'Link' => '<x>; rel=y'];
+
+        self::assertSame(['Content-Type' => 'text/html; charset=UTF-8', 'Link' => '<x>; rel=y'], WordPressSignInGate::noPingbackHeader($headers));
+        self::assertSame(['Content-Type' => 'text/html'], WordPressSignInGate::noPingbackHeader(['Content-Type' => 'text/html']));
+        self::assertSame('not headers', WordPressSignInGate::noPingbackHeader('not headers'), 'anything else passes through');
+    }
+
     /** WordPress's own sign-up reads '0', even after a filter turned it on. */
     public function testNativeSignUpIsOffWhateverCameBefore(): void
     {
@@ -140,6 +186,66 @@ final class WordPressSignInGateTest extends TestCase
         WordPressSignInGate::register();
 
         self::assertSame(1, self::filtered('peepso_filter_get_option_site_registration_disabled', 0, [[static fn($v): int => 0, 99]]));
+    }
+
+    /**
+     * PeepSo's built-in data export reads off (F-581), even when the stored
+     * setting is on and filters at every lower priority turn it back on.
+     */
+    public function testPeepSoDataExportIsOffWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertSame(0, self::filtered('peepso_filter_get_option_gdpr_enable', 1, []), 'the stored setting alone');
+        self::assertSame(0, self::filtered('peepso_filter_get_option_gdpr_enable', '1', [
+            [static fn($v): int => 1, 10],
+            [static fn($v): string => '1', 99],
+            [static fn($v): bool => true, PHP_INT_MAX - 1],
+        ]), 'filters that turn it back on, at every lower priority');
+    }
+
+    /**
+     * The gate registers at boot: bcc-trust.php calls register() at file
+     * scope, outside every function, closure and class, so its filters are
+     * in place when the plugin file loads, before `plugins_loaded` and
+     * `init` (F-581: PeepSo reads its data-export setting during `init`).
+     */
+    public function testTheGateRegistersAtBootBeforeInit(): void
+    {
+        $tokens = token_get_all((string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php'));
+
+        $stack   = [];   // one entry per open brace: 'scope' (function, closure, class) or 'block'
+        $pending = false;
+        $found   = [];
+        $count   = count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            $t    = $tokens[$i];
+            $id   = is_array($t) ? $t[0] : null;
+            $text = is_array($t) ? $t[1] : $t;
+
+            if (in_array($id, [T_FUNCTION, T_FN, T_CLASS, T_TRAIT, T_INTERFACE, T_ENUM], true)) {
+                $pending = true;
+            } elseif ($text === '{' || $id === T_CURLY_OPEN || $id === T_DOLLAR_OPEN_CURLY_BRACES) {
+                $stack[] = ($pending && $text === '{') ? 'scope' : 'block';
+                $pending = false;
+            } elseif ($text === '}') {
+                array_pop($stack);
+            } elseif ($text === ';') {
+                $pending = false;   // an abstract method or `fn` arrow ends here
+            }
+
+            // PHP 8 reads the fully qualified class name as one token.
+            if ($id === T_NAME_FULLY_QUALIFIED && $text === '\\BCC\\Trust\\Core\\Security\\WordPressSignInGate') {
+                $j = $i + 1;
+                while ($j < $count && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+                    $j++;
+                }
+                if (($tokens[$j][1] ?? $tokens[$j]) === '::' && ($tokens[$j + 1][1] ?? null) === 'register') {
+                    $found[] = !in_array('scope', $stack, true);
+                }
+            }
+        }
+        self::assertSame([true], $found, 'exactly one register() call, at file scope');
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
