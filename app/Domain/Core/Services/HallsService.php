@@ -33,6 +33,8 @@ use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\HallRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
@@ -483,6 +485,18 @@ final class HallsService
         $myMemberships = $this->loadViewerMemberships($viewerId, [$groupId]);
         $row = $myMemberships[$groupId] ?? null;
         if ($row === null) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Join the Hall before setting it as your home Hall.'];
+        }
+
+        // A home Hall accepts only published Halls. Anything else gets the
+        // same answer as a non-member, so the reply says nothing more about
+        // the group; a check that cannot be read is retryable, never a yes.
+        try {
+            $isHall = HallRepository::publishedHallIds([$groupId]) === [$groupId];
+        } catch (RepositoryReadFailure) {
+            return ['error' => 'bcc_unavailable', 'message' => "We couldn't check this Hall just now. Please try again in a moment."];
+        }
+        if (!$isHall) {
             return ['error' => 'bcc_forbidden', 'message' => 'Join the Hall before setting it as your home Hall.'];
         }
 

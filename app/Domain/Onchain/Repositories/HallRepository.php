@@ -28,6 +28,8 @@ if (!defined('ABSPATH')) {
 
 final class HallRepository {
 
+    use GuardsReadFailures;
+
     public const META_KIND      = '_bcc_group_kind';
     public const META_CHAIN_TAG = '_bcc_chain_tag';
 
@@ -73,6 +75,72 @@ final class HallRepository {
         ));
 
         return $row !== null ? (int) $row : null;
+    }
+
+    /**
+     * Of $groupIds, the ones that are published, non-secret Halls: a
+     * `peepso-group` post with status `publish`, a `_bcc_group_kind` row
+     * of 'hall' and no row of any other kind, and no secret privacy row
+     * (the shared PeepSoGroupPrivacy rule). Bounded by the given list.
+     *
+     * A home Hall accepts only published Halls; this is the one read that
+     * says which ids qualify, for the write and for every reader.
+     *
+     * @param list<int> $groupIds
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read cannot be verified
+     */
+    public static function publishedHallIds(array $groupIds): array {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $groupIds), static fn (int $id): bool => $id > 0)));
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $notSecret    = \BCC\Core\Repositories\PeepSoGroupPrivacy::notSecretSql('p.ID');
+
+        /** @var list<object{ID: numeric-string}> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT p.ID
+               FROM {$wpdb->posts} p
+              WHERE p.ID IN ({$placeholders})
+                AND p.post_type   = %s
+                AND p.post_status = %s
+                AND EXISTS (SELECT 1 FROM {$wpdb->postmeta} k
+                             WHERE k.post_id = p.ID AND k.meta_key = %s AND k.meta_value = %s)
+                AND NOT EXISTS (SELECT 1 FROM {$wpdb->postmeta} o
+                                 WHERE o.post_id = p.ID AND o.meta_key = %s AND o.meta_value <> %s)
+                AND {$notSecret}
+              LIMIT %d",
+            ...[...$ids, 'peepso-group', 'publish', self::META_KIND, self::KIND_HALL, self::META_KIND, self::KIND_HALL, count($ids)]
+        ), __FUNCTION__, true);
+
+        return array_values(array_map(static fn (object $r): int => (int) $r->ID, $rows));
+    }
+
+    /**
+     * Each user's home Hall, for list surfaces (member cards, the feed's
+     * cold-start panel): bcc-core's batched pointer read, kept only where
+     * the pointer names a published, non-secret Hall. A read that cannot
+     * be verified shows no home Hall for anyone, never an unchecked group.
+     *
+     * @param list<int> $userIds
+     * @return array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>
+     */
+    public static function primaryHallsForUsers(array $userIds): array {
+        $byUser = \BCC\Core\Repositories\PeepSoGroupRepository::getPrimaryHallForUsers($userIds);
+        if ($byUser === []) {
+            return [];
+        }
+
+        try {
+            $halls = array_flip(self::publishedHallIds(array_map(static fn (object $g): int => (int) $g->id, array_values($byUser))));
+        } catch (RepositoryReadFailure) {
+            return [];
+        }
+
+        return array_filter($byUser, static fn (object $g): bool => isset($halls[(int) $g->id]));
     }
 
     /**

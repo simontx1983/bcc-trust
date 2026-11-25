@@ -448,7 +448,7 @@ final class FeedColdStartService
 
         return [
             'follower_counts'              => \BCC\Core\Repositories\PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
+            'primary_halls'                => \BCC\Trust\Onchain\Repositories\HallRepository::primaryHallsForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => \BCC\Core\Repositories\PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             'endorsements_received_counts' => (new \BCC\Trust\Core\Repositories\AttestationRepository())
