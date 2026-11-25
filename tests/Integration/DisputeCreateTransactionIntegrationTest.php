@@ -73,6 +73,9 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
 
     protected function tearDown(): void
     {
+        if (method_exists($GLOBALS['wpdb'], 'clearFaultInjection')) {
+            $GLOBALS['wpdb']->clearFaultInjection();
+        }
         $this->restoreTable();
         $this->purge();
         (new \ReflectionProperty(\BCC\Core\ServiceLocator::class, 'cache'))->setValue(null, $this->locatorBefore);
@@ -237,6 +240,79 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
         $this->assertNoTransactionLeftOpen();
     }
 
+    // ── the INSERT and the vote lock, failing ────────────────────────────
+
+    /**
+     * A failed INSERT leaves insert_id holding the last SUCCESSFUL insert's
+     * id (wpdb does not reset it; here, the vote just seeded). The failure is
+     * reported as one, never as a dispute with that id.
+     */
+    public function testAFailedInsertIsNotReportedAsAnEarlierRowsId(): void
+    {
+        $voteId = $this->seedVote(1);
+        $wpdb   = $GLOBALS['wpdb'];
+        self::assertSame($voteId, (int) $wpdb->insert_id, 'the premise: insert_id holds the vote row');
+        $wpdb->failQueriesMatching = $this->disputeInsertPattern();
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertSame(1, $wpdb->injectedFailures, 'the dispute INSERT was the statement that failed');
+        self::assertSame(['id' => null, 'db_error' => 'injected fault'], $result);
+        self::assertSame(0, $this->disputeCount());
+        $this->assertNoTransactionLeftOpen();
+    }
+
+    /** A deadlocked INSERT throws, so TransactionManager retries the whole body, and the retry creates it. */
+    public function testADeadlockedInsertIsRetriedAndTheDisputeCreated(): void
+    {
+        $voteId = $this->seedVote(1);
+        $wpdb   = $GLOBALS['wpdb'];
+        $wpdb->failQueriesMatching  = $this->disputeInsertPattern();
+        $wpdb->injectedErrorMessage = 'Deadlock found when trying to get lock; try restarting transaction';
+        $wpdb->failQueriesLimit     = 1;
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertSame(1, $wpdb->injectedFailures, 'the first INSERT deadlocked');
+        self::assertNull($result['db_error'], (string) $result['db_error']);
+        self::assertIsInt($result['id']);
+        self::assertNotNull($this->disputeRow($result['id']), 'the retry committed the dispute');
+        self::assertSame(1, $this->disputeCount(), 'exactly one dispute');
+        $this->assertNoTransactionLeftOpen();
+    }
+
+    /** A lock-wait timeout that outlasts TransactionManager's retries is a transaction failure, retried first. */
+    public function testALockTimeoutThatOutlastsTheRetriesIsATransactionFailure(): void
+    {
+        $voteId = $this->seedVote(1);
+        $wpdb   = $GLOBALS['wpdb'];
+        $wpdb->failQueriesMatching  = $this->disputeInsertPattern();
+        $wpdb->injectedErrorMessage = 'Lock wait timeout exceeded; try restarting transaction';
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertSame(['id' => null, 'db_error' => 'tx_failed'], $result);
+        self::assertGreaterThan(1, $wpdb->injectedFailures, 'it was retried before giving up');
+        self::assertSame(0, $this->disputeCount());
+        $this->assertNoTransactionLeftOpen();
+    }
+
+    /** A vote-lock read that did not run is a transaction failure, never "the vote is no longer active". */
+    public function testAFailedVoteLockReadIsATransactionFailureNotAnInactiveVote(): void
+    {
+        $voteId = $this->seedVote(1);
+        $wpdb   = $GLOBALS['wpdb'];
+        $wpdb->failQueriesMatching = '/SELECT id FROM ' . preg_quote(TableRegistry::votes(), '/')
+            . ' WHERE id = \d+ AND status = 1 LIMIT 1 FOR UPDATE/';
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertGreaterThan(0, $wpdb->injectedFailures, 'the vote-lock read was the statement that failed');
+        self::assertSame(['id' => null, 'db_error' => 'tx_failed'], $result);
+        self::assertSame(0, $this->disputeCount());
+        $this->assertNoTransactionLeftOpen();
+    }
+
     public function testTheBodyRefusesToRunOutsideATransaction(): void
     {
         $body = new \ReflectionMethod(DisputeRepository::class, 'createDisputeInTransaction');
@@ -246,6 +322,12 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    /** The dispute INSERT, as the harness's insert() writes it. */
+    private function disputeInsertPattern(): string
+    {
+        return '/^INSERT INTO `' . preg_quote(DisputeRepository::disputes_table(), '/') . '`/';
+    }
 
     /** @return array<string, mixed> */
     private function disputeData(int $voteId): array

@@ -62,6 +62,20 @@ final class MysqliWpdb
     public int $injectedFailures = 0;
 
     /**
+     * The `last_error` an injected fault reports. null keeps 'injected
+     * fault'. Set it to a real driver message (e.g. a deadlock's) to drive
+     * code that reacts to WHICH error it got.
+     */
+    public ?string $injectedErrorMessage = null;
+
+    /**
+     * Break only the first N matching statements, then let them through.
+     * null breaks every match. Models a transient fault that a retry gets
+     * past.
+     */
+    public ?int $failQueriesLimit = null;
+
+    /**
      * Make every statement matching this regex fail the way wpdb's own
      * SILENT paths do: return `false` with `last_error` left EMPTY.
      *
@@ -90,6 +104,8 @@ final class MysqliWpdb
     {
         $this->failQueriesMatching  = null;
         $this->injectedFailures     = 0;
+        $this->injectedErrorMessage = null;
+        $this->failQueriesLimit     = null;
         $this->failSilentlyMatching = null;
         $this->silentFailures       = 0;
     }
@@ -116,6 +132,10 @@ final class MysqliWpdb
         }
 
         if (preg_match($this->failQueriesMatching, $sql) !== 1) {
+            return false;
+        }
+
+        if ($this->failQueriesLimit !== null && $this->injectedFailures >= $this->failQueriesLimit) {
             return false;
         }
 
@@ -351,7 +371,7 @@ final class MysqliWpdb
             return false;
         }
         if ($this->shouldFail($sql)) {
-            $this->last_error = 'injected fault';
+            $this->last_error = $this->injectedErrorMessage ?? 'injected fault';
             return false;
         }
         $this->queryCount++;
@@ -360,7 +380,14 @@ final class MysqliWpdb
             $this->last_error = $this->db->error;
             return false;
         }
-        $this->insert_id = (int) $this->db->insert_id;
+        // Real `wpdb::query()` takes note of insert_id ONLY for an INSERT or
+        // REPLACE, so it survives every later SELECT/UPDATE/DELETE, and a
+        // FAILED insert leaves the previous one's id in place. Modelled, so
+        // code that reads insert_id after a failed insert is tested against
+        // the stale value it would really see.
+        if (preg_match('/^\s*(insert|replace)\s/i', $sql) === 1) {
+            $this->insert_id = (int) $this->db->insert_id;
+        }
         if ($result === true) {
             // DML (INSERT/UPDATE/DELETE) → affected rows; DDL → 0 affected, still success.
             $affected            = $this->db->affected_rows;
@@ -446,7 +473,7 @@ final class MysqliWpdb
             // the ONLY thing that separates them, which is why every caller
             // in PR 6 has to consult it. Returning false here would let a
             // caller notice the failure by its type and never exercise that.
-            $this->last_error = 'injected fault';
+            $this->last_error = $this->injectedErrorMessage ?? 'injected fault';
             return [];
         }
         $this->queryCount++;
@@ -554,7 +581,7 @@ final class MysqliWpdb
             // reads as "the column is absent": exactly the conversion
             // these tests exist to forbid. Leaving `last_result` empty is
             // what makes the caller return null.
-            $this->last_error = 'injected fault';
+            $this->last_error = $this->injectedErrorMessage ?? 'injected fault';
             return;
         }
         $this->queryCount++;
