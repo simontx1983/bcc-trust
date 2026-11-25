@@ -196,28 +196,7 @@ class DisputeController
         $dispute_id = $result['id'];
 
         if (!$dispute_id) {
-            // Atomic limit check inside transaction returned this error
-            if ($result['db_error'] === 'dispute_limit_reached') {
-                return $this->error('dispute_limit_reached', 'This page has reached its dispute limit. Please try again later.', 429);
-            }
-            if ($result['db_error'] === 'reporter_limit_reached') {
-                return $this->error('reporter_limit_reached', 'You have too many active disputes. Please wait for existing disputes to resolve.', 429);
-            }
-            if ($result['db_error'] === 'vote_no_longer_active') {
-                return $this->error('vote_no_longer_active', 'This vote is no longer active and cannot be disputed.', 410);
-            }
-            if ($result['db_error'] === 'already_disputed') {
-                return $this->error('already_disputed', 'This vote already has an active dispute.', 409);
-            }
-            if ($result['db_error'] === 'tx_failed') {
-                // Transient DB failure (the transaction could not start or
-                // commit, a read inside it did not run, or a deadlock outlived
-                // TransactionManager's retries). Nothing was written. Surface
-                // as 503 so clients retry rather than treating the create as
-                // a hard failure.
-                return $this->error('db_transient', 'Dispute submission temporarily unavailable — please try again.', 503);
-            }
-            return $this->error('db_error', 'Failed to create dispute.', 500);
+            return $this->createDisputeFailure($result['db_error']);
         }
 
         // Open the community-vote poll — the seam where panel assignment
@@ -854,6 +833,37 @@ class DisputeController
     private function error(string $code, string $message, int $status): WP_REST_Response
     {
         return ApiResponse::error($code, $message, $status);
+    }
+
+    /**
+     * The response for a DisputeRepository::createDispute() that created
+     * nothing, by its `db_error` code (pinned by
+     * DisputeCreateFailureMappingTest).
+     */
+    private function createDisputeFailure(?string $dbError): WP_REST_Response
+    {
+        // Atomic limit check inside transaction returned this error
+        if ($dbError === 'dispute_limit_reached') {
+            return $this->error('dispute_limit_reached', 'This page has reached its dispute limit. Please try again later.', 429);
+        }
+        if ($dbError === 'reporter_limit_reached') {
+            return $this->error('reporter_limit_reached', 'You have too many active disputes. Please wait for existing disputes to resolve.', 429);
+        }
+        if ($dbError === 'vote_no_longer_active') {
+            return $this->error('vote_no_longer_active', 'This vote is no longer active and cannot be disputed.', 410);
+        }
+        if ($dbError === 'already_disputed') {
+            return $this->error('already_disputed', 'This vote already has an active dispute.', 409);
+        }
+        if ($dbError === 'tx_failed') {
+            // Transient DB failure (the transaction could not start or
+            // commit, a read inside it did not run, or a deadlock outlived
+            // TransactionManager's retries). Nothing was written. Surface
+            // as 503 so clients retry rather than treating the create as
+            // a hard failure.
+            return $this->error('db_transient', 'Dispute submission temporarily unavailable — please try again.', 503);
+        }
+        return $this->error('db_error', 'Failed to create dispute.', 500);
     }
 
 }
