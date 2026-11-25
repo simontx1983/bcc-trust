@@ -8,6 +8,7 @@ use BCC\Core\Repositories\UserMetaRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\PublicIdentity;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -131,5 +132,49 @@ final class PrivacyFlagsFailClosedTest extends TestCase
 
         self::assertCount(1, UserMetaRepository::$calls);
         self::assertSame([self::MEMBER, self::VIEWER], UserMetaRepository::$calls[0]['users'], 'deduplicated, no id 0');
+    }
+    // -- strictest(): the boolean-truthy vocabulary -----------------------
+
+    /**
+     * RE-POINTED COVERAGE, not new coverage. This table used to live in
+     * UserViewFlagsTest, exercising PrivacySettings::strictest() INDIRECTLY
+     * through UserViewService::metaFlag() and the three moderation flags that
+     * read usermeta. F-582 removed those flags and metaFlag with them - and
+     * strictest() is live code with two callers in this class, so deleting
+     * those tests would have dropped the only unit coverage of this parser
+     * while nothing went red.
+     *
+     * The rule: wp_usermeta stores strings, so a `(bool)` cast on "false",
+     * "no", "off" or "0" is TRUE and would surface phantom truthy values.
+     * FILTER_VALIDATE_BOOLEAN is what makes those four read as false.
+     *
+     * ANY row that reads as on wins: WordPress permits duplicate rows, and a
+     * '0' row beside a '1' row must not mask the '1'.
+     *
+     * @param list<mixed> $rows
+     */
+    #[DataProvider('truthinessVocabulary')]
+    public function testStrictestReadsTheBooleanTruthyVocabulary(array $rows, bool $expected): void
+    {
+        self::assertSame($expected, PrivacySettings::strictest($rows));
+    }
+
+    /** @return iterable<string, array{list<mixed>, bool}> */
+    public static function truthinessVocabulary(): iterable
+    {
+        yield 'no rows at all'          => [[], false];
+        yield 'string one'              => [['1'], true];
+        yield 'string true'             => [['true'], true];
+        yield 'string yes'              => [['yes'], true];
+        yield 'string on'               => [['on'], true];
+        yield 'real true'               => [[true], true];
+        yield 'string zero'             => [['0'], false];
+        yield 'string false'            => [['false'], false];
+        yield 'string no'               => [['no'], false];
+        yield 'string off'              => [['off'], false];
+        yield 'empty string'            => [[''], false];
+        yield 'null'                    => [[null], false];
+        yield 'an on row beside an off' => [['0', '1'], true];
+        yield 'only off rows'           => [['0', 'false', 'off'], false];
     }
 }

@@ -27,9 +27,11 @@
  * excludes on it alone. The legacy `bcc_privacy_discovery_optout` rows are
  * left in place but nothing reads them once the migration is done.
  *
- * Boolean-truthy parsing (FILTER_VALIDATE_BOOLEAN) follows the same
- * convention as UserViewService::metaFlag — wp_usermeta stores strings,
- * so a `(bool)` cast on "false" or "0" surfaces phantom truthy values.
+ * Boolean-truthy parsing uses FILTER_VALIDATE_BOOLEAN, never a `(bool)`
+ * cast — wp_usermeta stores strings, so casting "false" or "0" surfaces
+ * phantom truthy values. (This was the convention
+ * `UserViewService::metaFlag` carried; that method retired with the
+ * F-582 flags, and the rule lives here now.)
  *
  * ⚠ Reads go through bcc-core's UserMetaRepository, never get_user_meta(),
  * so a flag that could not be read is known to be unread, and it reads as
@@ -300,7 +302,8 @@ final class PrivacySettings
     }
 
     /**
-     * Single-flag read. Boolean-truthy parsing per UserViewService::metaFlag.
+     * Single-flag read, with the boolean-truthy parsing described in the
+     * class docblock above.
      *
      * ⚠⚠ AN UNREADABLE FLAG READS AS ON, i.e. HIDDEN. Every key here is a
      * "hide this" switch, so ON is the closed answer. {@see flagOrUnknown()}

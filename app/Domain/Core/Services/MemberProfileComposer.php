@@ -45,6 +45,15 @@ if (!defined('ABSPATH')) {
 final class MemberProfileComposer
 {
     /**
+     * The reputation tiers whose members are kept out of other people's
+     * feeds (the §O4.1 caution/risky shadow-limit list).
+     *
+     * ⚠ Not every tier: `neutral`, `trusted` and `elite` are unlimited.
+     * If the feed's list ever stops being tier-derived, this constant is
+     * the thing that has to move with it.
+     */
+    private const REACH_LIMITED_TIERS = ['caution', 'risky'];
+    /**
      * §A2: server-rendered "Pulled by", "Trust", "Reviews" strip values.
      * Stat keys + labels are stable so the frontend can apply per-key
      * styling without reading values.
@@ -225,7 +234,10 @@ final class MemberProfileComposer
         $base['card'] = $card ?? self::buildPlaceholderCard($userId, $base);
 
         // ── Standing (Good Standing ribbon).
-        $base['standing'] = self::buildStanding($base);
+        $base['standing'] = self::buildStanding(
+            $base,
+            UserViewService::viewerMaySeeFlags($viewerId, $userId)
+        );
 
         // ── Verified-wallet COUNT. Sourced from the repository, never by
         //   counting `$base['wallets']` — that array is own-account-only
@@ -592,7 +604,7 @@ final class MemberProfileComposer
      * @param array<string, mixed> $base
      * @return array{is_in_good_standing: bool, since_label: string, facts: list<string>}
      */
-    private static function buildStanding(array $base): array
+    private static function buildStanding(array $base, bool $viewerMaySeeFlags): array
     {
         $isGood = isset($base['is_in_good_standing']) && $base['is_in_good_standing'] === true;
         $joinedAt = isset($base['joined_at']) && is_string($base['joined_at']) ? $base['joined_at'] : '';
@@ -616,16 +628,78 @@ final class MemberProfileComposer
             $facts[] = 'Rank: ' . $rankLabel;
         }
 
-        $flags = isset($base['flags']) && is_array($base['flags']) ? $base['flags'] : [];
-        if ($flags === []) {
-            $facts[] = 'No active moderation flags';
+        // ⛔ THE FACT IS OMITTED ENTIRELY FOR A VIEWER WHO MAY NOT SEE
+        // THE FLAGS, and that is the whole point of the bool above.
+        //
+        // `$base['flags']` is gated upstream (UserViewService::
+        // flagsForViewer), so for anyone but the member and admins it is
+        // ALWAYS empty — and inferring from that emptiness would make this
+        // line assert "No active moderation flags" about a member who IS
+        // suspended. A true statement withheld is a leak; a FALSE one
+        // stated in the server's own voice is worse.
+        //
+        // ⚠ Silence, not a neutral phrase: "no flags" and "withheld"
+        // must not render the same, so the viewer is told nothing rather
+        // than something unfalsifiable.
+        if ($viewerMaySeeFlags) {
+            $flags = isset($base['flags']) && is_array($base['flags']) ? $base['flags'] : [];
+            if ($flags === []) {
+                $facts[] = 'No active moderation flags';
+            }
         }
 
         return [
             'is_in_good_standing' => $isGood,
             'since_label'         => $sinceLabel,
             'facts'               => array_slice($facts, 0, 3),
+            'reach_limited'       => self::reachLimitedForSelf($base),
         ];
+    }
+    /**
+     * M1 — does a Caution or Risky tier currently limit this member's
+     * reach, told ONLY to the member themselves?
+     *
+     * A member on the §O4.1 caution/risky list has their posts kept out
+     * of other people's feeds. Until now nobody was told: the Standing
+     * tab said the opposite ("your posts surface to other members"), and
+     * the landing page promises "no silent shadowbans". This is the field
+     * that makes that promise true.
+     *
+     * ⛔ TRI-STATE, AND NULL IS NOT FALSE.
+     *   true  — you are the member, and your reach IS limited
+     *   false — you are the member, and it is not
+     *   null  — NOT DISCLOSED (you are not this member)
+     * Returning `false` to anyone else would assert "this member's reach
+     * is not limited", which is a statement we must not make about
+     * someone else's standing — the same mistake as reading an empty
+     * flags list as "no flags". A client MUST treat null as "no answer".
+     *
+     * ⚠ MEMBER ONLY, NOT member-or-admin. The flags list above is
+     * visible to administrators too; this is not. Phillip's ruling was
+     * "on their own Standing tab only", and an administrator reading
+     * someone's reach from the caution list is a moderation question
+     * with its own surface.
+     *
+     * ⚠ Keyed on the DISPLAYED TIER (`reputation_tier`), which the member
+     * already sees on their own byline, rather than on a fresh read of the
+     * caution list the feed consults. The two are derived from the same
+     * score, so they agree; the tier costs no extra read, and telling the
+     * member something that contradicts what their own profile shows them
+     * would be worse than telling them nothing.
+     *
+     * @param array<string, mixed> $base
+     */
+    private static function reachLimitedForSelf(array $base): ?bool
+    {
+        if (($base['is_self'] ?? null) !== true) {
+            return null;
+        }
+
+        $tier = isset($base['reputation_tier']) && is_string($base['reputation_tier'])
+            ? $base['reputation_tier']
+            : '';
+
+        return in_array($tier, self::REACH_LIMITED_TIERS, true);
     }
 
     private static function formatJoinedYear(string $iso): string

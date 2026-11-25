@@ -14,10 +14,7 @@
  *      through the fragment the directory shares). The legacy opt-out counts
  *      only while PrivacySettings::legacyOptOutStillRead(), read once per
  *      call here and handed down, so the list and `indexable` always agree;
- *   2. none of the three moderation flags is set (hidden, shadow-limited,
- *      under review), read the way UserViewService::resolveFlags() reads
- *      them: set when ANY stored row reads as on (PrivacySettings::strictest());
- *   3. a current handle exists and has the current handle shape: runs of
+ *   2. a current handle exists and has the current handle shape: runs of
  *      [a-z0-9] joined by single hyphens, and not the `member-{id}` fallback.
  *      Legacy handles (an email address, say) are never advertised.
  *
@@ -61,19 +58,22 @@ final class PublicProfileIndex
     /** The system fallback handle (PublicIdentity), never chosen by a member. */
     private const FALLBACK_HANDLE_PATTERN = '/\Amember-\d+\z/';
 
-    /** The usermeta keys read per member after the SQL pass. */
+    /**
+     * The usermeta keys read per member after the SQL pass.
+     *
+     * ⚠ F-582 retired `bcc_hidden`, `bcc_shadow_limited` and
+     * `bcc_under_review`, which were read here to drop a flagged member
+     * from the index. Nothing ever wrote them — a read-only count found
+     * zero rows for all three on production and staging — so no member
+     * was being dropped by that check, and removing it changes no
+     * listing.
+     *
+     * ⚠⚠ SUSPENSION IS NOT AFFECTED and never came through these keys:
+     * a suspended member is excluded by the SQL pass itself
+     * (UserInfoRepository's listing clause), which still runs.
+     */
     private const MEMBER_META_KEYS = [
         HandleService::META_HANDLE,
-        UserViewService::META_HIDDEN,
-        UserViewService::META_SHADOW_LIMITED,
-        UserViewService::META_UNDER_REVIEW,
-    ];
-
-    /** The moderation flags among {@see MEMBER_META_KEYS}. */
-    private const MODERATION_FLAG_KEYS = [
-        UserViewService::META_HIDDEN,
-        UserViewService::META_SHADOW_LIMITED,
-        UserViewService::META_UNDER_REVIEW,
     ];
 
     public function __construct(
@@ -223,14 +223,6 @@ final class PublicProfileIndex
         $out = [];
         foreach ($ids as $id) {
             $values = $meta[$id] ?? [];
-
-            // ANY row that reads as on sets a flag: a member with a '0' and
-            // a '1' row is flagged, as on the profile (resolveFlags()).
-            foreach (self::MODERATION_FLAG_KEYS as $flagKey) {
-                if (PrivacySettings::strictest($values[$flagKey] ?? [])) {
-                    continue 2;
-                }
-            }
 
             // The handle is the first row, as get_user_meta(…, true) reads it.
             $handle = $values[HandleService::META_HANDLE][0] ?? '';

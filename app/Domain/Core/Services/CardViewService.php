@@ -24,7 +24,9 @@
  *   - stats[uptime|commission|*]  → omitted              (validator-specific signals deferred)
  *
  * Previously stubbed, now wired (kept for changelog clarity):
- *   - flags     → buildFlags() routes through UserViewService::resolveFlags;
+ *   - flags     → buildFlags() routes through UserViewService::
+ *                 flagsForViewer (VIEWER-GATED — the member and admins
+ *                 only, F-582), never resolveFlags directly;
  *                 page cards derive from `post_author` (the page owner),
  *                 member cards from the user themselves. V1 contract is
  *                 `string[]` of slugs (NOT the legacy {code,message,severity}
@@ -415,7 +417,7 @@ final class CardViewService
             'rank_label'          => null,
             'current_rank_label'  => null,
             'is_in_good_standing' => self::isInGoodStanding($tier),
-            'flags'               => self::buildFlags((int) $post->post_author),
+            'flags'               => self::buildFlags((int) $post->post_author, $viewerId),
             'is_claimed'          => $isClaimed,
             // On-chain claim-verified: true when this page has a verified
             // operator/creator claim. Read straight from the read-model row
@@ -847,7 +849,7 @@ final class CardViewService
             'current_rank_label'  => $summary['current_rank_label'],
             'member_state'        => $summary['member_state'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
-            'flags'               => self::buildFlags($userId),
+            'flags'               => self::buildFlags($userId, $viewerId),
             // §V1.5 endorse fields stay present on member cards for
             // contract uniformity, but always null/false — endorsements
             // target page cards only.
@@ -1734,9 +1736,20 @@ final class CardViewService
      *
      * @return list<string>
      */
-    private static function buildFlags(int $ownerId): array
+    /**
+     * ⚠ THE GATE LIVES HERE, not at the two call sites, because this is
+     * the single place both card payloads get their flags. One copy of
+     * the rule; add a third card and it inherits it.
+     *
+     * ⚠⚠ An empty result is AMBIGUOUS — "no flags" or "not yours to
+     * see" — so nothing downstream may read emptiness as a statement
+     * about the owner. See `UserViewService::flagsForViewer()`.
+     *
+     * @return list<string>
+     */
+    private static function buildFlags(int $ownerId, int $viewerId): array
     {
-        return UserViewService::resolveFlags($ownerId);
+        return UserViewService::flagsForViewer($ownerId, $viewerId);
     }
 
     // ──────────────────────────────────────────────────────────────────
