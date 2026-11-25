@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Exceptions\VoteEligibilityException;
-use BCC\Trust\Core\REST\PostsEndpoint;
+use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Services\PostsService;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -76,12 +76,21 @@ final class ReviewVoteRefusalTest extends TestCase
         self::assertSame(429, VoteEligibilityException::RATE_LIMITED);
     }
 
-    /** The endpoint turns the error code into the status: bcc_rate_limited is a 429. */
+    /**
+     * The endpoint turns the error code into the status: bcc_rate_limited is a 429.
+     *
+     * PostsEndpoint forwards service errors through
+     * ApiResponse::fromServiceError(), so the status comes from the shared
+     * map (every arm pinned in ServiceErrorStatusTest).
+     */
     public function testThePostsRouteAnswersBccRateLimitedWith429(): void
     {
-        $status = (new \ReflectionMethod(PostsEndpoint::class, 'statusForCode'))->invoke(null, 'bcc_rate_limited');
-        self::assertSame(429, $status);
-        $status = (new \ReflectionMethod(PostsEndpoint::class, 'statusForCode'))->invoke(null, 'bcc_forbidden');
-        self::assertSame(403, $status);
+        self::assertSame(429, ApiResponse::statusForServiceCode('bcc_rate_limited'));
+        self::assertSame(403, ApiResponse::statusForServiceCode('bcc_forbidden'));
+        self::assertStringContainsString(
+            'ApiResponse::fromServiceError(',
+            (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/PostsEndpoint.php'),
+            'the posts route forwards through the shared map'
+        );
     }
 }
