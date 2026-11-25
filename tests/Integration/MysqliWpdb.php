@@ -125,6 +125,18 @@ final class MysqliWpdb
         return true;
     }
 
+    /**
+     * Real `wpdb::query()` zeroes insert_id when an INSERT or REPLACE fails
+     * with a driver error (class-wpdb.php: "Clear insert_id on a subsequent
+     * failed insert"). A failure before the query runs does not reach this.
+     */
+    private function resetInsertIdOnFailedInsert(string $sql): void
+    {
+        if (preg_match('/^\s*(insert|replace)\s/i', $sql) === 1) {
+            $this->insert_id = 0;
+        }
+    }
+
     private function shouldFail(string $sql): bool
     {
         if ($this->failQueriesMatching === null) {
@@ -372,19 +384,22 @@ final class MysqliWpdb
         }
         if ($this->shouldFail($sql)) {
             $this->last_error = $this->injectedErrorMessage ?? 'injected fault';
+            $this->resetInsertIdOnFailedInsert($sql);
             return false;
         }
         $this->queryCount++;
         $result = @$this->db->query($sql);
         if ($result === false) {
             $this->last_error = $this->db->error;
+            $this->resetInsertIdOnFailedInsert($sql);
             return false;
         }
         // Real `wpdb::query()` takes note of insert_id ONLY for an INSERT or
-        // REPLACE, so it survives every later SELECT/UPDATE/DELETE, and a
-        // FAILED insert leaves the previous one's id in place. Modelled, so
-        // code that reads insert_id after a failed insert is tested against
-        // the stale value it would really see.
+        // REPLACE, so it survives every later SELECT/UPDATE/DELETE. A
+        // driver-error INSERT/REPLACE resets it to 0 (resetInsertIdOnFailedInsert);
+        // a failure BEFORE the query runs (failSilentlyMatching) leaves the
+        // previous id in place. Modelled, so code that reads insert_id after
+        // a failed insert sees what it would really see.
         if (preg_match('/^\s*(insert|replace)\s/i', $sql) === 1) {
             $this->insert_id = (int) $this->db->insert_id;
         }

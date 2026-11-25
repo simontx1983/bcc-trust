@@ -243,20 +243,39 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
     // ── the INSERT and the vote lock, failing ────────────────────────────
 
     /**
-     * A failed INSERT leaves insert_id holding the last SUCCESSFUL insert's
-     * id (wpdb does not reset it; here, the vote just seeded). The failure is
-     * reported as one, never as a dispute with that id.
+     * An INSERT that fails BEFORE the query runs (insert() refusing a value,
+     * or one of wpdb's silent bails) leaves insert_id holding the last
+     * SUCCESSFUL insert's id: here, the vote just seeded. The failure is
+     * reported as one, never as a dispute with that id. (A driver error
+     * resets insert_id to 0; the next case covers that path.)
      */
     public function testAFailedInsertIsNotReportedAsAnEarlierRowsId(): void
     {
         $voteId = $this->seedVote(1);
         $wpdb   = $GLOBALS['wpdb'];
         self::assertSame($voteId, (int) $wpdb->insert_id, 'the premise: insert_id holds the vote row');
+        $wpdb->failSilentlyMatching = $this->disputeInsertPattern();
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertSame(1, $wpdb->silentFailures, 'the dispute INSERT was the statement that failed');
+        self::assertSame($voteId, (int) $wpdb->insert_id, 'the premise held: insert_id was still the vote row');
+        self::assertSame(['id' => null, 'db_error' => 'insert_failed'], $result);
+        self::assertSame(0, $this->disputeCount());
+        $this->assertNoTransactionLeftOpen();
+    }
+
+    /** A driver-error INSERT (insert_id reset to 0) is reported with its own error. */
+    public function testADriverErrorInsertIsReportedWithItsError(): void
+    {
+        $voteId = $this->seedVote(1);
+        $wpdb   = $GLOBALS['wpdb'];
         $wpdb->failQueriesMatching = $this->disputeInsertPattern();
 
         $result = DisputeRepository::createDispute($this->disputeData($voteId));
 
         self::assertSame(1, $wpdb->injectedFailures, 'the dispute INSERT was the statement that failed');
+        self::assertSame(0, (int) $wpdb->insert_id, 'a driver error resets insert_id, as wpdb does');
         self::assertSame(['id' => null, 'db_error' => 'injected fault'], $result);
         self::assertSame(0, $this->disputeCount());
         $this->assertNoTransactionLeftOpen();

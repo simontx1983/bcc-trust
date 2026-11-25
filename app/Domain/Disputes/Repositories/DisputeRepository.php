@@ -671,10 +671,12 @@ class DisputeRepository
             'created_at'   => gmdate('Y-m-d H:i:s'),
         ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%s']);
 
-        // ⚠ Checked BEFORE insert_id is read. A failed INSERT leaves
-        // insert_id holding whatever the last SUCCESSFUL insert on this
-        // connection wrote (wpdb does not reset it), so reading it first could
-        // report an earlier row's id as this dispute.
+        // ⚠ Checked BEFORE insert_id is read. A failure BEFORE the query
+        // runs (insert() refusing a value, or one of wpdb's silent bails)
+        // leaves insert_id holding the last SUCCESSFUL insert's id on this
+        // connection, so reading it first could report an earlier row as this
+        // dispute. (A driver error resets it to 0.) The INSERT's own result is
+        // the truth either way.
         if ($inserted === false) {
             // Capture last_error FIRST — the next $wpdb call (COMMIT
             // included) clears it, which previously meant production logs
