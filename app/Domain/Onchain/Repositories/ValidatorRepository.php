@@ -1301,6 +1301,25 @@ final class ValidatorRepository
      */
     public static function getCountsByChain(): array
     {
+        return self::countsByChain() ?? [];
+    }
+
+    /**
+     * The same counts, or null when they could not be read, so a display
+     * that must not show a guessed 0 (a Hall card's Validators stat) can
+     * leave the number out instead. Shares getCountsByChain()'s cache: a
+     * cached map is a good read; a failed read is never cached.
+     *
+     * @return array<int, ValidatorCountByChain>|null Keyed by chain_id.
+     */
+    public static function getCountsByChainOrUnknown(): ?array
+    {
+        return self::countsByChain();
+    }
+
+    /** @return array<int, ValidatorCountByChain>|null null when the read could not be trusted */
+    private static function countsByChain(): ?array
+    {
         global $wpdb;
         $table = self::table();
 
@@ -1323,10 +1342,10 @@ final class ValidatorRepository
             );
         } catch (RepositoryReadFailure $e) {
             // F-101 class: a failed read is NOT "no validators on any chain".
-            // Answer empty for this request (callers are display surfaces)
-            // but never CACHE it — the old code stored the empty map for an
-            // hour, so one blip blanked every chain's count until expiry.
-            return [];
+            // Unknown for this request (getCountsByChain() answers empty to
+            // its display callers), and never CACHED — the old code stored the
+            // empty map for an hour, so one blip blanked every chain's count.
+            return null;
         }
 
         $map = [];

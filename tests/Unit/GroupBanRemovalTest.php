@@ -64,8 +64,12 @@ final class GroupBanRemovalTest extends TestCase
         );
     }
 
+    // Reaches the suspension read (a Permissions stub), so it runs alone.
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    #[\PHPUnit\Framework\Attributes\PreserveGlobalState(false)]
     public function testAnUnbannedHolderIsStillOfferedJoin(): void
     {
+        require_once dirname(__DIR__) . '/Stubs/permissions-suspension-stub.php';
         $service = (new \ReflectionClass(GroupsService::class))->newInstanceWithoutConstructor();
         $method  = new \ReflectionMethod(GroupsService::class, 'resolveCanJoin');
         $ctx     = new GroupContext(1, GroupType::Nft, PeepSoPrivacy::Open, false, 'g', 1, null);

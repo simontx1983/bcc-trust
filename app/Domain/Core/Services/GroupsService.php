@@ -47,6 +47,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\GroupPostPolicyRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\HallCardFacts;
 use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
@@ -311,6 +312,10 @@ final class GroupsService
                 // then shows no posts or active stat (GroupActivityHeatService).
                 'posts_last_7d'    => $activity['posts_last_7d'],
                 'active_members_7d' => $activity['active_members_7d'] ?? null,
+                // Topic Halls (F-597): a Hall's kind, topic and validators.
+                ...($ctx->type === GroupType::Hall
+                    ? (HallCardFacts::forHalls([$groupId], [$groupId => $chainTag])[$groupId] ?? [])
+                    : []),
                 // F-244: the page's own verdicts (real holder check here),
                 // so the hero card and the membership strip cannot disagree.
                 'can_join'                 => $permissions['can_join'],
@@ -874,6 +879,19 @@ final class GroupsService
                 'allowed'     => false,
                 'unlock_hint' => 'A moderator removed you from this community.',
                 'reason_code' => 'removed',
+            ];
+        }
+
+        // Every join door refuses a suspended account (HallsEndpoint::join,
+        // MyGroupsEndpoint), so the button must not be offered. The doors'
+        // own setting: no admin bypass. An UNKNOWN suspension state is
+        // `unavailable`, never a guessed Join and never a false "suspended".
+        $suspended = \BCC\Core\Permissions\Permissions::suspensionState($viewerId, false);
+        if ($suspended !== false) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => $suspended === true ? 'Your account is suspended.' : null,
+                'reason_code' => $suspended === true ? 'suspended' : 'unavailable',
             ];
         }
 

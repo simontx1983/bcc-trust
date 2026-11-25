@@ -40,6 +40,8 @@ final class GroupDetailJoinVerdictTest extends TestCase
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/group-detail-holder-stubs.php';
+        // The join verdict reads the viewer's suspension (not suspended here).
+        require_once dirname(__DIR__) . '/Stubs/permissions-suspension-stub.php';
         $GLOBALS['__bcc_gdh'] = [
             'configs'     => [self::GROUP => new GatedGroupConfig(self::GROUP, 1, '0xabc', 1, self::COLLECTION)],
             'collections' => [self::COLLECTION => self::collectionRow()],
