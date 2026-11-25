@@ -119,6 +119,9 @@ if (!defined('ABSPATH')) {
  *   viewer_is_member: bool,
  *   posts_last_7d: int|null,
  *   active_members_7d?: int|null,
+ *   hall_kind?: 'chain'|'topic'|null,
+ *   topic_label?: string|null,
+ *   validator_count?: int|null,
  *   can_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
  *   can_request_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
  *   viewer_membership_status?: string|null
@@ -1028,10 +1031,21 @@ final class CardViewService
      * that test nothing asserted these strings at all, which is how this
      * map and contract §3.2.4 were free to drift apart.
      */
+    /**
+     * A Hall's kicker by its kind (topic Halls, F-597): a chain Hall and a
+     * topic Hall say which they are. A Hall whose kind is unknown (or has
+     * neither) keeps the neutral COMMUNITY_KICKER_BY_TYPE['hall'], never a
+     * guessed kind. bcc-search's GroupSearchService::KIND_LABEL mirrors this.
+     */
+    private const HALL_KICKER_BY_KIND = [
+        'chain' => 'CHAIN HALL',
+        'topic' => 'TOPIC HALL',
+    ];
+
     private const COMMUNITY_KICKER_BY_TYPE = [
         'nft'       => 'HOLDER GROUP',
         'validator' => 'DELEGATOR GROUP',
-        'hall'      => 'CHAIN HALL',
+        'hall'      => 'HALL',
         'system'    => 'SYSTEM COMMUNITY',
         'user'      => 'COMMUNITY',
     ];
@@ -1080,6 +1094,12 @@ final class CardViewService
         // Active stat then, never a guessed number (GroupActivityHeatService).
         $posts7d     = $groupData['posts_last_7d'];
         $actives     = $groupData['active_members_7d'] ?? null;
+        // Hall-only facts (HallCardFacts); null on every other kind.
+        $hallKind       = $type === 'hall' ? ($groupData['hall_kind'] ?? null) : null;
+        $topicLabel     = $hallKind === 'topic' ? ($groupData['topic_label'] ?? null) : null;
+        // A chain Hall's Validators stat: its chain's count, left out when
+        // the count could not be read (or on a topic Hall), never a 0 guess.
+        $validatorCount = $hallKind === 'chain' ? ($groupData['validator_count'] ?? null) : null;
         // Defensive: membership is only meaningful for authed viewers.
         $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
 
@@ -1124,7 +1144,7 @@ final class CardViewService
             // named two unrelated things depending on card_kind. Now its own
             // field, and `card_tier: 'common'` (a pure color key, never a
             // rarity claim) is gone with the rest of the rarity vocabulary.
-            'kicker'              => self::COMMUNITY_KICKER_BY_TYPE[$type] ?? 'COMMUNITY',
+            'kicker'              => self::communityKicker($type, $hallKind),
             'rank_label'          => null,
             'current_rank_label'  => null,
             'is_in_good_standing' => true,
@@ -1161,6 +1181,10 @@ final class CardViewService
                 'chain_tag'        => $chainTag !== '' ? $chainTag : null,
                 'trust_min'        => $groupData['trust_min'],
                 'collection_stats' => $groupData['collection_stats'],
+                // Topic Halls (F-597): what kind of Hall, and its topic's
+                // label. Null on every other kind.
+                'hall_kind'        => $hallKind,
+                'topic_label'      => $topicLabel,
                 'viewer_is_member' => $viewerIsMember,
                 // F-244: the server's join verdicts, computed by the caller
                 // through GroupsService (one source of truth with the group
@@ -1194,6 +1218,10 @@ final class CardViewService
                 ['key' => 'members',  'label' => 'Members',    'value' => (string) $memberCount, 'raw' => $memberCount, 'format' => 'count'],
                 $posts7d === null ? null
                     : ['key' => 'posts_7d', 'label' => 'Posts (7d)', 'value' => (string) $posts7d, 'raw' => $posts7d, 'format' => 'count'],
+                // A chain Hall's validators, right after Posts (Phillip:
+                // Members · Posts 7d · Validators).
+                $validatorCount === null ? null
+                    : ['key' => 'validators', 'label' => 'Validators', 'value' => (string) $validatorCount, 'raw' => $validatorCount, 'format' => 'count'],
                 $actives === null ? null
                     : ['key' => 'active',   'label' => 'Active',     'value' => (string) $actives, 'raw' => $actives, 'format' => 'count'],
                 // Access is a word, not a number — but it answers "can I
@@ -1219,6 +1247,16 @@ final class CardViewService
                 ],
             ],
         ];
+    }
+
+    /** The card's group-type word: a Hall's says which kind it is. */
+    private static function communityKicker(string $type, ?string $hallKind): string
+    {
+        if ($type === 'hall' && $hallKind !== null && isset(self::HALL_KICKER_BY_KIND[$hallKind])) {
+            return self::HALL_KICKER_BY_KIND[$hallKind];
+        }
+
+        return self::COMMUNITY_KICKER_BY_TYPE[$type] ?? 'COMMUNITY';
     }
 
     /**

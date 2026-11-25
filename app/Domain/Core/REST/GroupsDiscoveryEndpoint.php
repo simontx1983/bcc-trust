@@ -42,6 +42,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\PageDiscoveryRepository;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\HallCardFacts;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -321,6 +322,16 @@ final class GroupsDiscoveryEndpoint
             : [];
 
         $cardView = Plugin::instance()->cardViewService();
+
+        // Topic Halls (F-597): the page's Halls carry their kind, topic and
+        // validators on the card. One helper for every Hall card producer.
+        $hallFacts = HallCardFacts::forHalls(
+            array_values(array_map(
+                static fn (array $row): int => (int) $row['group_id'],
+                array_filter($pagedRows, static fn (array $row): bool => $row['context']->type === GroupType::Hall)
+            )),
+            array_column($pagedRows, 'chain_tag', 'group_id')
+        );
         $groups   = Plugin::instance()->groupsService();
 
         $items = [];
@@ -359,6 +370,7 @@ final class GroupsDiscoveryEndpoint
                     // (GroupActivityHeatService): no stat, never a guessed 0.
                     'posts_last_7d'    => $row['activity']['posts_last_7d'] ?? null,
                     'active_members_7d' => $row['activity']['active_members_7d'] ?? null,
+                    ...($hallFacts[$groupId] ?? []),
                     'can_join'                 => $joinFields['can_join'],
                     'can_request_join'         => $joinFields['can_request_join'],
                     'viewer_membership_status' => $joinFields['viewer_membership_status'],

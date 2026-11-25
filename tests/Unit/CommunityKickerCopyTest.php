@@ -56,7 +56,9 @@ final class CommunityKickerCopyTest extends TestCase
         return [
             'holder group (on-chain gated)'    => ['nft', 'HOLDER GROUP'],
             'delegator group (on-chain gated)' => ['validator', 'DELEGATOR GROUP'],
-            'chain hall'                       => ['hall', 'CHAIN HALL'],
+            // A Hall's kicker names its kind (below); with no kind known it
+            // is the neutral word, never a guessed "CHAIN HALL".
+            'hall of unknown kind'             => ['hall', 'HALL'],
             'system community'                 => ['system', 'SYSTEM COMMUNITY'],
             'member-made community'            => ['user', 'COMMUNITY'],
         ];
@@ -66,6 +68,24 @@ final class CommunityKickerCopyTest extends TestCase
     public function testEachGroupTypeGetsItsOwnKicker(string $type, string $expected): void
     {
         self::assertSame($expected, self::kickerFor($type));
+    }
+
+    /** @return array<string, array{string, string|null, string}> type, hall_kind, kicker */
+    public static function hallKickers(): array
+    {
+        return [
+            'a chain Hall'                => ['hall', 'chain', 'CHAIN HALL'],
+            'a topic Hall'                => ['hall', 'topic', 'TOPIC HALL'],
+            'a Hall of neither kind'      => ['hall', null, 'HALL'],
+            'a Hall kind on another type' => ['nft', 'topic', 'HOLDER GROUP'],
+        ];
+    }
+
+    /** Topic Halls (F-597): a Hall's kicker says which kind it is (bcc-search's kind_label mirrors it). */
+    #[DataProvider('hallKickers')]
+    public function testAHallsKickerSaysItsKind(string $type, ?string $hallKind, string $expected): void
+    {
+        self::assertSame($expected, self::kickerFor($type, ['hall_kind' => $hallKind]));
     }
 
     /**
@@ -99,11 +119,12 @@ final class CommunityKickerCopyTest extends TestCase
     }
 
     /** The composed card's `kicker` for one group type. */
-    private static function kickerFor(string $type): string
+    /** @param array<string, mixed> $extra */
+    private static function kickerFor(string $type, array $extra = []): string
     {
         $service = (new ReflectionClass(CardViewService::class))->newInstanceWithoutConstructor();
 
-        $card = $service->getCommunityCardFromGroupData(self::groupData($type), 0);
+        $card = $service->getCommunityCardFromGroupData([...self::groupData($type), ...$extra], 0);
 
         self::assertArrayHasKey('kicker', $card, 'the card stopped carrying a kicker');
 

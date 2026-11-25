@@ -85,6 +85,16 @@ namespace BCC\Core\Permissions {
                 $GLOBALS['__bcc_gjr']['bypass_args'][] = $allowAdminBypass;
                 return !in_array((int) $user_id, $GLOBALS['__bcc_gjr']['suspended'] ?? [], true);
             }
+
+            /** Tri-state, as bcc-core's: true suspended, false not, null unknown (`suspension_unknown` ids). */
+            public static function suspensionState(?int $user_id = null, bool $allowAdminBypass = true): ?bool
+            {
+                $GLOBALS['__bcc_gjr']['bypass_args'][] = $allowAdminBypass;
+                if (in_array((int) $user_id, $GLOBALS['__bcc_gjr']['suspension_unknown'] ?? [], true)) {
+                    return null;
+                }
+                return in_array((int) $user_id, $GLOBALS['__bcc_gjr']['suspended'] ?? [], true);
+            }
         }
     }
 }

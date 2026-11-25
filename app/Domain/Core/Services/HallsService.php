@@ -28,7 +28,9 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoGroupWriter;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\HallCardFacts;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -88,7 +90,8 @@ final class HallsService
      *     validator_count: int,
      *     collection_count: int,
      *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
-     *     links: array{self: string}
+     *     links: array{self: string},
+     *     card: array<string, mixed>|null
      *   }>,
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
@@ -123,6 +126,7 @@ final class HallsService
         $chainSlugs     = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
         $contentCounts  = $this->loadChainContentCounts($chainSlugs);
         $kindFacts      = self::loadKindFacts($groupIds);
+        $cards          = $this->hallCards($groupIds, $viewerId, $chainSlugs);
 
         $items = [];
         foreach ($rows as $row) {
@@ -144,6 +148,7 @@ final class HallsService
                     $primaryGroupId
                 ),
                 'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
+                'card'              => $cards[$groupId] ?? null,
             ];
         }
 
@@ -219,7 +224,8 @@ final class HallsService
      *     validator_count: int,
      *     collection_count: int,
      *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
-     *     links: array{self: string}
+     *     links: array{self: string},
+     *     card: array<string, mixed>|null
      *   }>,
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
@@ -300,6 +306,79 @@ final class HallsService
             ),
             'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
         ];
+    }
+
+    /**
+     * Each Hall's community card (topic Halls, F-597), from the same builder
+     * and the same inputs as GET /groups' cards, so a Hall's card is the
+     * same wherever it appears:
+     *  - the join verdict from GroupsService::listJoinFields() over the
+     *    viewer's raw membership statuses (one batched read; a failed read
+     *    is `unavailable`, never a guessed Join), which is the Hall join
+     *    door's rule: sign-in, membership, ban, suspension, open privacy;
+     *  - the 7-day activity (GroupActivityHeatService, uncast: null when the
+     *    moderated posts could not be read, and the card leaves the stats out);
+     *  - the Hall's kind, topic and validators (HallCardFacts);
+     *  - `links.self` = /communities/{slug} (CardUrlMap, F-594).
+     * Bounded: a handful of batched reads for the page. A Hall whose group
+     * context cannot be resolved gets no card (null), never a wrong one.
+     *
+     * @param list<int>               $groupIds
+     * @param array<int, string|null> $chainSlugs
+     * @return array<int, array<string, mixed>>
+     */
+    private function hallCards(array $groupIds, int $viewerId, array $chainSlugs): array
+    {
+        if ($groupIds === []) {
+            return [];
+        }
+
+        $plugin   = Plugin::instance();
+        $contexts = $this->groupContext->forManyGroups($groupIds);
+        $groups   = PeepSoGroupRepository::findManyByIds($groupIds);
+        $activity = $plugin->groupActivityHeatService()->forGroups($groupIds);
+        $facts    = HallCardFacts::forHalls($groupIds, $chainSlugs);
+        // F-244: the viewer's RAW status per Hall (pending and banned too); a
+        // failed read is null, so every card says `unavailable`.
+        $statuses = $viewerId > 0 ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $groupIds) : [];
+
+        $cards = [];
+        foreach ($groupIds as $groupId) {
+            $ctx   = $contexts[$groupId] ?? null;
+            $group = $groups[$groupId] ?? null;
+            if ($ctx === null || $group === null) {
+                continue;
+            }
+            $rawStatus  = $statuses === null ? false : ($statuses[$groupId] ?? null);
+            $joinFields = $plugin->groupsService()->listJoinFields($ctx, $viewerId, $rawStatus);
+
+            $cards[$groupId] = $plugin->cardViewService()->getCommunityCardFromGroupData(
+                [
+                    'group_id'          => $groupId,
+                    'slug'              => (string) $group->post_name,
+                    'name'              => (string) $group->post_title,
+                    'type'              => $ctx->type->value,
+                    'privacy'           => $ctx->privacy->value,
+                    'member_count'      => (int) $group->member_count,
+                    'description'       => (string) $group->post_content,
+                    'image_url'         => null,
+                    'verification'      => $ctx->verification?->toApiResponse(),
+                    'collection_stats'  => null,
+                    'chain_tag'         => $chainSlugs[$groupId] ?? null,
+                    'trust_min'         => null,
+                    'viewer_is_member'  => $joinFields['viewer_membership_status'] === 'member',
+                    'posts_last_7d'     => $activity[$groupId]['posts_last_7d'] ?? null,
+                    'active_members_7d' => $activity[$groupId]['active_members_7d'] ?? null,
+                    ...($facts[$groupId] ?? []),
+                    'can_join'                 => $joinFields['can_join'],
+                    'can_request_join'         => $joinFields['can_request_join'],
+                    'viewer_membership_status' => $joinFields['viewer_membership_status'],
+                ],
+                $viewerId
+            );
+        }
+
+        return $cards;
     }
 
     /**
