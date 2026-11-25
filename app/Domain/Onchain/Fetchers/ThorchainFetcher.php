@@ -26,6 +26,29 @@ use BCC\Trust\Onchain\Support\StakeAmount;
  */
 class ThorchainFetcher implements FetcherInterface
 {
+    /**
+     * The thornode API the validator index reads when the chain row names
+     * none: Liquify's gateway, the THORChain registry's listed REST API
+     * (verified 2026-11-24: `/thorchain/nodes` answers 200 with the full
+     * node list, no redirect). Also the seed's value (schema-chains.php).
+     */
+    public const DEFAULT_REST_URL = 'https://gateway.liquify.com/chain/thorchain_api';
+
+    /**
+     * Earlier SEEDED values that no longer serve: thornode.ninerealms.com no
+     * longer resolves, and thornode.thorchain.liquify.com answers with an
+     * expired TLS certificate (Liquify moved to its gateway). A chain row
+     * still holding EXACTLY one of these is repointed once
+     * (includes/database/repoint-validator-feed-endpoints.php); any other value is
+     * an operator's choice and is never touched.
+     *
+     * @var list<string>
+     */
+    public const RETIRED_REST_URLS = [
+        'https://thornode.ninerealms.com',
+        'https://thornode.thorchain.liquify.com',
+    ];
+
     /** @var ChainRow */
     private object $chain;
     private string $base_url;
@@ -43,7 +66,8 @@ class ThorchainFetcher implements FetcherInterface
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
-        $this->base_url = rtrim($chain->rest_url ?? 'https://thornode.ninerealms.com', '/');
+        $restUrl        = trim((string) ($chain->rest_url ?? ''));
+        $this->base_url = rtrim($restUrl !== '' ? $restUrl : self::DEFAULT_REST_URL, '/');
     }
 
     /** @return ChainRow */

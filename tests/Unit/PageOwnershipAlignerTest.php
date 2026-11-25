@@ -124,6 +124,20 @@ final class PageOwnershipAlignerTest extends TestCase
         self::assertContains([A::HOOK, [777]], \AlignWorld::$scheduled, 'the page\'s own single event still runs');
     }
 
+    /**
+     * Another process added a page after this request cached the list: the
+     * read-modify-write re-reads the database, so that page is kept.
+     */
+    public function testThePendingListIsReReadPastTheRequestCache(): void
+    {
+        \AlignWorld::$optionCache[A::PENDING] = [self::PAGE];            // what this request read earlier
+        \AlignWorld::$options[A::PENDING]     = [self::PAGE, 777];       // what another process wrote since
+
+        A::schedule(888);
+
+        self::assertSame([self::PAGE, 777, 888], \AlignWorld::$options[A::PENDING], 'the other process\'s page is not dropped');
+    }
+
     public function testAnUnreadableDepartureNeverSwaps(): void
     {
         \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];

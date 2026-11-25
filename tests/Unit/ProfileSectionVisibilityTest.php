@@ -58,13 +58,32 @@ final class ProfileSectionVisibilityTest extends TestCase
     protected function tearDown(): void
     {
         unset($GLOBALS['__bcc_psv']);
+        // The meta double's state is STATIC. Left set, an unreadable
+        // member or a duplicate-row fixture would leak into every later
+        // test in this process and hide sections they never asked to hide.
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
+        \BCC\Core\Repositories\UserMetaRepository::$rows       = [];
+        \BCC\Core\Repositories\UserMetaRepository::$memo       = [];
+        \BCC\Core\Repositories\UserMetaRepository::$reads      = [];
+        // Back OFF for whatever runs next, wherever it runs.
+        \BCC\Core\Repositories\UserMetaRepository::$memoize    = false;
         parent::tearDown();
     }
 
-    /** @param array<string, mixed> $meta */
+    /**
+     * @param array<string, mixed> $meta
+     *
+     * ⚠ Also drops that member from the meta double's memo, because this
+     * stands in for a WRITE: the real `UserMetaRepository` is wired to
+     * every user-meta write, and a fixture assignment cannot be seen that
+     * way. It is a no-op while the double's memo is off (its default),
+     * and it is what keeps THIS file correct — the read-count tests below
+     * turn the memo on, so a rewrite here must behave as a write does.
+     */
     private function storeFor(int $userId, array $meta): void
     {
         $GLOBALS['__bcc_psv']['meta'][$userId] = $meta;
+        \BCC\Core\Repositories\UserMetaRepository::forget($userId);
     }
 
     // ── controls ────────────────────────────────────────────────────
@@ -86,10 +105,19 @@ final class ProfileSectionVisibilityTest extends TestCase
         }
     }
 
-    /** ⭐ CONTROL. Admins keep the §F-02 exemption, on every section. */
+    /**
+     * ⭐ CONTROL. Admins keep the §F-02 exemption, on every section.
+     *
+     * ⚠ The exemption belongs to the VIEWER being asked about, so the
+     * fixture says this viewer holds `manage_options` rather than only
+     * that the request's user is an admin. {@see
+     * testAnAdminRequestDoesNotExemptADifferentViewer()} is the other
+     * half of that distinction.
+     */
     public function testAnAdminSeesEverySection(): void
     {
-        $GLOBALS['__bcc_psv']['is_admin'] = true;
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [self::VIEWER];
         $this->storeFor(self::OWNER, self::ALL_OFF);
 
         foreach (PSV::SECTIONS as $section) {
@@ -97,6 +125,191 @@ final class ProfileSectionVisibilityTest extends TestCase
         }
     }
 
+    /**
+     * The four sections whose storage is a `bcc_show_*` flag read
+     * through bcc-core's `UserMetaRepository`.
+     *
+     * ⚠ Halls is NOT among them: it delegates to F-270's
+     * `ProfileAccess::showsGroupsOnProfile()`, a separate read. Reviews
+     * and disputes are not either — they are §K2 flags, and
+     * `PrivacySettings::flag()` already answers "hidden" for an
+     * untrusted read.
+     *
+     * @return list<string>
+     */
+    private static function showMetaSections(): array
+    {
+        return [
+            PSV::SECTION_ABOUT,
+            PSV::SECTION_VERIFICATIONS,
+            PSV::SECTION_OPERATOR,
+            PSV::SECTION_BLOGS,
+        ];
+    }
+
+    /**
+     * ⭐⭐ A PRIMED LIST COSTS ONE READ, WHATEVER ITS LENGTH.
+     *
+     * This is what keeps a member list off N+1. The flag read is
+     * memoized per (user, key) inside `UserMetaRepository`, but nothing
+     * primes THESE keys for a list — `PrivacySettings::prime()` reads
+     * its own `ALL_KEYS`, which does not include the
+     * `bcc_show_*_on_profile` ones — so without
+     * {@see ProfileSectionVisibility::prime()} every member card issues
+     * its own statement.
+     *
+     * Asserted as N vs 2N: the count must not move with the length of
+     * the list. A single fixed number would pass just as well against a
+     * per-member read if the fixture happened to be one member long.
+     */
+    public function testAPrimedListCostsOneReadWhateverItsLength(): void
+    {
+        self::assertSame(1, $this->showFlagReadsForList(8), 'N members');
+        self::assertSame(1, $this->showFlagReadsForList(16), '2N members');
+    }
+
+    /**
+     * ⚠ THE CONTROL, and the reason the test above is worth having:
+     * WITHOUT the prime, the same list costs one read per member.
+     *
+     * If this ever reports 1, something else is filling the memo and the
+     * prime has stopped being what prevents the N+1 — at which point the
+     * test above would be passing for the wrong reason.
+     */
+    public function testWithoutThePrimeEachMemberReadsForItself(): void
+    {
+        self::assertSame(8, $this->showFlagReadsForList(8, false));
+        self::assertSame(16, $this->showFlagReadsForList(16, false));
+    }
+
+    /**
+     * Resolve About for a list of members, optionally priming first, and
+     * count the reads that actually touched a show-flag key.
+     *
+     * ⚠ `$reads`, not `$calls`: the double records every call in
+     * `$calls`, including the ones its memo serves. Counting those would
+     * measure call sites rather than queries and this test would say
+     * nothing.
+     */
+    private function showFlagReadsForList(int $count, bool $prime = true): int
+    {
+        $ids = [];
+        for ($i = 0; $i < $count; $i++) {
+            $ids[] = 9000 + $i;
+        }
+
+        // ⚠ The double's memo is OPT-IN and off by default, because the
+        // double is autoloaded into every unit process and an always-on
+        // memo would leak between tests in a shared-process suite. This
+        // measurement is ABOUT the memo, so it turns it on and clears
+        // both counters; tearDown() puts it back.
+        \BCC\Core\Repositories\UserMetaRepository::$memoize = true;
+        \BCC\Core\Repositories\UserMetaRepository::$calls   = [];
+        \BCC\Core\Repositories\UserMetaRepository::$reads   = [];
+        \BCC\Core\Repositories\UserMetaRepository::$memo    = [];
+
+        if ($prime) {
+            PSV::prime($ids);
+        }
+        foreach ($ids as $id) {
+            PSV::hides(PSV::SECTION_ABOUT, $id, self::VIEWER);
+        }
+
+        $reads = 0;
+        foreach (\BCC\Core\Repositories\UserMetaRepository::$reads as $read) {
+            if (in_array('bcc_show_about_on_profile', $read['keys'], true)) {
+                $reads++;
+            }
+        }
+
+        return $reads;
+    }
+    /**
+     * ⭐ A FLAG THAT COULD NOT BE READ HIDES THE SECTION.
+     *
+     * This is the case a plain `get_user_meta()` cannot express: it
+     * answers `''` for BOTH "no row" and "the read did not happen".
+     * `UserMetaRepository::valuesOrUnknown()` separates them, and an
+     * untrusted read hides.
+     *
+     * Stored as SHOWN here, so nothing but the failed read can hide it.
+     * The unit double fails a member's read via `$unreadable[$id]`.
+     */
+    public function testAnUnreadableFlagHidesTheSectionFromOthers(): void
+    {
+        $this->storeFor(self::OWNER, [
+            'bcc_show_about_on_profile'         => '1',
+            'bcc_show_verifications_on_profile' => '1',
+            'bcc_show_operator_on_profile'      => '1',
+            'bcc_show_blogs_on_profile'         => '1',
+        ]);
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::hides($section, self::OWNER, self::VIEWER),
+                $section . ' stayed visible on a read that did not happen'
+            );
+        }
+    }
+
+    /**
+     * ⚠ … AND STILL SHOWS IT TO THE OWNER.
+     *
+     * The owner returns before any flag is read, so a failed read must
+     * not blank their own profile — that would turn a transient read
+     * failure into "your profile is empty", and the owner is the one
+     * viewer who is entitled to see it regardless.
+     */
+    public function testAnUnreadableFlagStillShowsTheOwnerTheirOwnSections(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::shows($section, self::OWNER, self::OWNER),
+                $section . ' was hidden from its own owner'
+            );
+        }
+    }
+
+    /**
+     * ⭐ AN ADMIN REQUEST DOES NOT EXEMPT A DIFFERENT VIEWER.
+     *
+     * The exemption belongs to the viewer being served. A card list can
+     * be composed for one member while another is signed in, and an
+     * async or fan-out build has no current user at all, so the two
+     * identities have to be kept apart.
+     *
+     * `is_admin` true (the request's user is an admin) with `admin_ids`
+     * not containing the viewer is exactly that split.
+     */
+    public function testAnAdminRequestDoesNotExemptADifferentViewer(): void
+    {
+        $GLOBALS['__bcc_psv']['is_admin']  = true;
+        $GLOBALS['__bcc_psv']['admin_ids'] = [];
+        $this->storeFor(self::OWNER, self::ALL_OFF);
+
+        foreach (self::showMetaSections() as $section) {
+            self::assertTrue(
+                PSV::hides($section, self::OWNER, self::VIEWER),
+                $section . " borrowed the request user's exemption"
+            );
+        }
+    }
+
+    /**
+     * ⚠ DUPLICATE ROWS: the strictest wins, in the direction that
+     * hides. WordPress allows several rows per (user, key), and
+     * `PrivacySettings` resolves its §K2 flags the same way, so one OFF
+     * row hides even when another says ON.
+     */
+    public function testTheStrictestStoredRowWins(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$rows[self::OWNER]['bcc_show_about_on_profile'] = ['1', '0'];
+
+        self::assertTrue(PSV::hides(PSV::SECTION_ABOUT, self::OWNER, self::VIEWER));
+    }
     /**
      * ⭐ CONTROL, the other way. With nothing stored, a STRANGER sees
      * everything — the permissive default that keeps F-341 from changing

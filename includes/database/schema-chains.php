@@ -277,26 +277,34 @@ function bcc_onchain_create_chains_table(): void {
 
         // THORChain (custom API — uses ThorchainFetcher, not CosmosFetcher).
         // Endpoint history: thornode.ninerealms.com was the historical default
-        // until ~2025 when NineRealms retired the public thornode subdomain.
-        // Liquify (community-run) is the current canonical replacement; same
-        // /thorchain/nodes shape as the original.
+        // until ~2025 when NineRealms retired the public thornode subdomain;
+        // thornode.thorchain.liquify.com replaced it until Liquify moved to its
+        // gateway (the old host now answers with an expired certificate). The
+        // gateway serves the same /thorchain/nodes shape. Rows seeded with a
+        // retired value are repointed once (repoint-validator-feed-endpoints.php).
+        // Must equal ThorchainFetcher::DEFAULT_REST_URL.
         [
             'slug'           => 'thorchain',
             'name'           => 'THORChain',
             'chain_type'     => 'thorchain',
-            'rest_url'       => 'https://thornode.thorchain.liquify.com',
+            'rest_url'       => 'https://gateway.liquify.com/chain/thorchain_api',
             'explorer_url'   => 'https://runescan.io',
             'native_token'   => 'RUNE',
             'decimals'       => 8,
             'bech32_prefix'  => 'thor',
         ],
 
-        // Polkadot (Subscan API — requires BCC_SUBSCAN_API_KEY in wp-config.php)
+        // Polkadot (Subscan API — requires BCC_SUBSCAN_API_KEY in wp-config.php).
+        // Endpoint history: polkadot.api.subscan.io (the relay chain) until
+        // Polkadot staking moved to Asset Hub; the relay API now answers the
+        // validator list with count 0. Rows seeded with the relay value are
+        // repointed once (repoint-validator-feed-endpoints.php).
+        // Must equal PolkadotFetcher::DEFAULT_REST_URL.
         [
             'slug'           => 'polkadot',
             'name'           => 'Polkadot',
             'chain_type'     => 'polkadot',
-            'rest_url'       => 'https://polkadot.api.subscan.io',
+            'rest_url'       => 'https://assethub-polkadot.api.subscan.io',
             'explorer_url'   => 'https://polkadot.subscan.io',
             'native_token'   => 'DOT',
             'decimals'       => 10,
