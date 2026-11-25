@@ -127,6 +127,11 @@ namespace BCC\Trust\Core\REST {
                 return false;
             }
             $GLOBALS['__bcc_prefs_meta'][$userId][$key] = $value;
+            // A WRITE BUSTS THE READ MEMO, as in production: the real
+            // UserMetaRepository memoizes per (user, key) and is wired to
+            // every user-meta write. Without this a PATCH would echo the
+            // value read before it.
+            \BCC\Core\Repositories\UserMetaRepository::forget($userId);
 
             return true;
         }
@@ -184,6 +189,11 @@ namespace BCC\Trust\Core\Support {
                 return false;
             }
             $GLOBALS['__bcc_prefs_meta'][$userId][$key] = $value;
+            // A WRITE BUSTS THE READ MEMO, as in production: the real
+            // UserMetaRepository memoizes per (user, key) and is wired to
+            // every user-meta write. Without this a PATCH would echo the
+            // value read before it.
+            \BCC\Core\Repositories\UserMetaRepository::forget($userId);
 
             return true;
         }

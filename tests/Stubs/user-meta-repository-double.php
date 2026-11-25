@@ -47,6 +47,25 @@ if (!class_exists(UserMetaRepository::class, false)) {
         public static array $calls = [];
 
         /**
+         * Only the calls that actually TOUCHED the fixture - i.e. what
+         * would have been a query. A call served entirely from the memo
+         * does not appear here, which is how a test tells a primed list
+         * from one read member-by-member.
+         *
+         * @var list<array{users: list<int>, keys: list<string>}>
+         */
+        public static array $reads = [];
+
+        /**
+         * user => key => values, as the REAL class memoizes. Without it
+         * the double answered a primed list and an unprimed one
+         * identically, so no test could see the difference.
+         *
+         * @var array<int, array<string, list<string>>>
+         */
+        public static array $memo = [];
+
+        /**
          * Several stored rows for one (member, key), in umeta_id order, which
          * a get_user_meta() shim cannot express: `$rows[$id][$key] = ['0', '1']`.
          * Answers for that pair instead of the shim.
@@ -64,22 +83,63 @@ if (!class_exists(UserMetaRepository::class, false)) {
         {
             self::$calls[] = ['users' => array_values($userIds), 'keys' => array_values($keys), 'fresh' => $fresh];
 
+            // Which (user, key) pairs are not held yet? The real class asks
+            // exactly this before reading anything.
+            $toRead = [];
+            foreach ($userIds as $id) {
+                if ((int) $id <= 0) {
+                    continue;
+                }
+                foreach ($keys as $key) {
+                    if ($fresh || !isset(self::$memo[(int) $id][$key])) {
+                        $toRead[(int) $id] = true;
+                        break;
+                    }
+                }
+            }
+
+            if ($toRead !== []) {
+                self::$reads[] = ['users' => array_keys($toRead), 'keys' => array_values($keys)];
+
+                foreach (array_keys($toRead) as $id) {
+                    if (isset(self::$unreadable[$id])) {
+                        // An untrusted read memoizes NOTHING, as in the real
+                        // class - so the next caller reads again rather than
+                        // inheriting a value that was never read.
+                        return null;
+                    }
+                    foreach ($keys as $key) {
+                        if (isset(self::$rows[$id][$key])) {
+                            self::$memo[$id][$key] = self::$rows[$id][$key];
+                            continue;
+                        }
+                        $raw = self::getUserMeta($id, $key);
+                        self::$memo[$id][$key] = ($raw !== '' && $raw !== null && $raw !== false)
+                            ? [is_scalar($raw) ? (string) $raw : '']
+                            : [];
+                    }
+                }
+            }
+
+            // An unreadable member poisons a call it merely appears in, even
+            // when every pair was already held: the real class cannot read
+            // part of a set and call it trusted.
+            foreach ($userIds as $id) {
+                if (isset(self::$unreadable[(int) $id])) {
+                    return null;
+                }
+            }
+
             $out = [];
             foreach ($userIds as $id) {
+                $id = (int) $id;
                 if ($id <= 0) {
                     continue;
                 }
-                if (isset(self::$unreadable[$id])) {
-                    return null;
-                }
                 foreach ($keys as $key) {
-                    if (isset(self::$rows[$id][$key])) {
-                        $out[$id][$key] = self::$rows[$id][$key];
-                        continue;
-                    }
-                    $raw = self::getUserMeta($id, $key);
-                    if ($raw !== '' && $raw !== null && $raw !== false) {
-                        $out[$id][$key] = [is_scalar($raw) ? (string) $raw : ''];
+                    $values = self::$memo[$id][$key] ?? [];
+                    if ($values !== []) {
+                        $out[$id][$key] = $values;
                     }
                 }
             }
@@ -110,7 +170,7 @@ if (!class_exists(UserMetaRepository::class, false)) {
 
         public static function forget(int $userId): void
         {
-            unset($userId);
+            unset(self::$memo[$userId]);
         }
 
         /** @return mixed */

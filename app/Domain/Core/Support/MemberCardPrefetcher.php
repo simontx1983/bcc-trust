@@ -58,6 +58,7 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\MessagesService;
@@ -94,6 +95,13 @@ final class MemberCardPrefetcher
             // WP user rows + usermeta (handle, privacy, moderation
             // flags) — two queries for the whole page.
             cache_users($idList);
+
+            // F-341's section show-flags, in ONE statement for the page.
+            // `cache_users()` above does NOT cover them: these keys are
+            // read through bcc-core's UserMetaRepository, whose memo is
+            // separate from WP's meta cache, and nothing else primes
+            // them. Without this, every member card reads its own.
+            ProfileSectionVisibility::prime($idList);
 
             $reputationIds = $idList;
             if ($viewerId > 0 && !isset($ids[$viewerId])) {

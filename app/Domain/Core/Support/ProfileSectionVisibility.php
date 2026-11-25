@@ -101,6 +101,54 @@ final class ProfileSectionVisibility
     ];
 
     /**
+     * Read every show-flag for a LIST of members in one statement.
+     *
+     * ⚠⚠ WITHOUT THIS, A LIST IS N+1. {@see hides()} reads through
+     * `UserMetaRepository::valuesOrUnknown()`, which memoizes per
+     * (user, key) — but nothing primed these particular keys:
+     * `PrivacySettings::prime()` reads its own `ALL_KEYS`, and the
+     * `bcc_show_*_on_profile` keys are not among them. So each member
+     * card issued its own read, which on a directory or watchers page
+     * is one statement per member.
+     *
+     * This is a prime, not a cache of its own: the call populates
+     * `UserMetaRepository`'s memo and the return value is deliberately
+     * ignored. Every later `hides()` for a primed member is a memo
+     * hit.
+     *
+     * ⚠ All four show-flags are primed, not only the one a given
+     * surface needs, because `read()` takes them in ONE statement
+     * (`MAX_KEYS` is 10) — so a narrower prime would cost the same
+     * query and serve fewer callers.
+     *
+     * ⚠ An UNTRUSTED read memoizes nothing, by design: each member
+     * then reads for itself and {@see hides()} answers "hidden" for
+     * each. Slower and private, rather than fast and wrong.
+     *
+     * ⚠ `valuesOrUnknown()` REFUSES more than `BATCH_MAX` (1000)
+     * members rather than truncating, which would silently leave the
+     * tail unprimed. Card lists are bounded far below that; a caller
+     * that is not must chunk.
+     *
+     * @param list<int> $ownerIds
+     */
+    public static function prime(array $ownerIds): void
+    {
+        $ids = [];
+        foreach ($ownerIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return;
+        }
+
+        UserMetaRepository::valuesOrUnknown(array_keys($ids), array_values(self::SHOW_META));
+    }
+
+    /**
      * Is `$section` hidden from this viewer on `$ownerId`'s profile?
      *
      * The owner always sees their own sections, and an admin keeps the

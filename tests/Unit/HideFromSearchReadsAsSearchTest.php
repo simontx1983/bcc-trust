@@ -71,10 +71,19 @@ final class HideFromSearchReadsAsSearchTest extends TestCase
      *
      * @param list<string> $values
      */
+    /**
+     * ⚠ Also drops the member from the meta double's memo, because this
+     * stands in for a WRITE. The real `UserMetaRepository` memoizes per
+     * (user, key) and is wired to every user-meta write, so a stored
+     * change busts the memo in production; assigning a fixture cannot be
+     * seen that way. Without the bust, a test that rewrites rows mid-test
+     * keeps reading the first set.
+     */
     private static function rows(string $key, array $values): void
     {
         UserMetaRepository::$rows[self::USER_ID][$key] = $values;
         $GLOBALS['__bcc_prefs_meta'][self::USER_ID][$key] = $values[0];
+        UserMetaRepository::forget(self::USER_ID);
     }
 
     private static function foldDone(): void

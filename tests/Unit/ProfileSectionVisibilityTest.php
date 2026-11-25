@@ -66,10 +66,20 @@ final class ProfileSectionVisibilityTest extends TestCase
         parent::tearDown();
     }
 
-    /** @param array<string, mixed> $meta */
+    /**
+     * @param array<string, mixed> $meta
+     *
+     * ⚠ Also drops that member from the meta double's memo, because this
+     * is standing in for a WRITE. The real `UserMetaRepository` memoizes
+     * per (user, key) and is wired to every user-meta write, so a stored
+     * change busts the memo in production; a fixture assignment cannot be
+     * seen that way, so the bust is explicit here. Without it a test that
+     * rewrites the fixture mid-test would keep reading its first value.
+     */
     private function storeFor(int $userId, array $meta): void
     {
         $GLOBALS['__bcc_psv']['meta'][$userId] = $meta;
+        \BCC\Core\Repositories\UserMetaRepository::forget($userId);
     }
 
     // ── controls ────────────────────────────────────────────────────
@@ -133,6 +143,77 @@ final class ProfileSectionVisibilityTest extends TestCase
         ];
     }
 
+    /**
+     * ⭐⭐ A PRIMED LIST COSTS ONE READ, WHATEVER ITS LENGTH.
+     *
+     * This is what keeps a member list off N+1. The flag read is
+     * memoized per (user, key) inside `UserMetaRepository`, but nothing
+     * primes THESE keys for a list — `PrivacySettings::prime()` reads
+     * its own `ALL_KEYS`, which does not include the
+     * `bcc_show_*_on_profile` ones — so without
+     * {@see ProfileSectionVisibility::prime()} every member card issues
+     * its own statement.
+     *
+     * Asserted as N vs 2N: the count must not move with the length of
+     * the list. A single fixed number would pass just as well against a
+     * per-member read if the fixture happened to be one member long.
+     */
+    public function testAPrimedListCostsOneReadWhateverItsLength(): void
+    {
+        self::assertSame(1, $this->showFlagReadsForList(8), 'N members');
+        self::assertSame(1, $this->showFlagReadsForList(16), '2N members');
+    }
+
+    /**
+     * ⚠ THE CONTROL, and the reason the test above is worth having:
+     * WITHOUT the prime, the same list costs one read per member.
+     *
+     * If this ever reports 1, something else is filling the memo and the
+     * prime has stopped being what prevents the N+1 — at which point the
+     * test above would be passing for the wrong reason.
+     */
+    public function testWithoutThePrimeEachMemberReadsForItself(): void
+    {
+        self::assertSame(8, $this->showFlagReadsForList(8, false));
+        self::assertSame(16, $this->showFlagReadsForList(16, false));
+    }
+
+    /**
+     * Resolve About for a list of members, optionally priming first, and
+     * count the reads that actually touched a show-flag key.
+     *
+     * ⚠ `$reads`, not `$calls`: the double records every call in
+     * `$calls`, including the ones its memo serves. Counting those would
+     * measure call sites rather than queries and this test would say
+     * nothing.
+     */
+    private function showFlagReadsForList(int $count, bool $prime = true): int
+    {
+        $ids = [];
+        for ($i = 0; $i < $count; $i++) {
+            $ids[] = 9000 + $i;
+        }
+
+        \BCC\Core\Repositories\UserMetaRepository::$calls = [];
+        \BCC\Core\Repositories\UserMetaRepository::$reads = [];
+        \BCC\Core\Repositories\UserMetaRepository::$memo  = [];
+
+        if ($prime) {
+            PSV::prime($ids);
+        }
+        foreach ($ids as $id) {
+            PSV::hides(PSV::SECTION_ABOUT, $id, self::VIEWER);
+        }
+
+        $reads = 0;
+        foreach (\BCC\Core\Repositories\UserMetaRepository::$reads as $read) {
+            if (in_array('bcc_show_about_on_profile', $read['keys'], true)) {
+                $reads++;
+            }
+        }
+
+        return $reads;
+    }
     /**
      * ⭐ A FLAG THAT COULD NOT BE READ HIDES THE SECTION.
      *

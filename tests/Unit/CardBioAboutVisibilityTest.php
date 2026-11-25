@@ -85,7 +85,7 @@ final class CardBioAboutVisibilityTest extends TestCase
         self::assertSame(self::BIO, $this->bioFor(self::VIEWER));
     }
 
-    /** The defect: About hidden, and a stranger used to get the bio anyway. */
+    /** About hidden: a stranger gets no bio. */
     public function testAHiddenAboutSectionWithholdsTheBioFromOthers(): void
     {
         $this->givenAboutSetting('0');
