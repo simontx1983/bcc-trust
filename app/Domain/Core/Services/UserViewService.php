@@ -9,9 +9,12 @@
  *   - is_self === false → omits the four own-only blocks entirely
  *
  * V1 wiring status (all real, no Phase-1 stubs remain):
- *   - flags                        → resolveFlags() composes V1 slugs
- *                                    from Permissions + wp_usermeta
- *                                    (suspended/shadow_limited/hidden/under_review)
+ *   - flags                        → resolveFlags() composes the V1 slug
+ *                                    list from Permissions ALONE. The only
+ *                                    slug is `suspended` (F-582).
+ *                                    ⚠ That is the UNGATED list. A payload
+ *                                    carries flagsForViewer(), which decides
+ *                                    whether this viewer may be told at all.
  *   - wallets                      → resolveWallets() reads WalletRepository::getForUser
  *   - living                       → delegated to LivingService::compose
  *   - counts.disputes_signed       → DisputeRepository::countByReporter
@@ -846,14 +849,16 @@ final class UserViewService
     }
 
     /**
-     * Pure decision function: maps four boolean signals to the V1
-     * flag-slug list, in deterministic order. Extracted for testability
-     * — exercised directly by tests/UserViewServiceFlagsTest.php without
-     * needing WordPress / Permissions / wp_usermeta in scope.
+     * Pure decision function: maps the one boolean signal V1 has to the
+     * flag-slug list. Extracted for testability — exercised directly by
+     * tests/Unit/UserViewFlagsTest.php without needing WordPress or
+     * Permissions in scope.
      *
-     * Order is stable (suspended → shadow_limited → hidden → under_review)
-     * so frontend rendering and snapshot tests don't churn on flag-set
-     * changes. Each slug appears at most once by construction.
+     * ⚠ `suspended` is the ONLY slug this can emit (F-582), so there is
+     * no ordering left to keep stable and nothing to dedupe. A
+     * reintroduction guard in that test pins the one-slug shape, so
+     * widening this signature goes red rather than quietly shipping a
+     * slug no contract describes.
      *
      * @return list<string>
      */

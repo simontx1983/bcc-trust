@@ -61,9 +61,9 @@ namespace BCC\Trust\Core\Tests\Unit {
      * that is covered by UserViewFlagsViewerScopeTest.
      *
      * ⚠ F-582 reduced this to ONE slug. `shadow_limited`, `hidden` and
-     * `under_review` were removed: nothing ever set them, and a read-only
-     * count found zero rows for all three usermeta keys on production and
-     * staging. The 16-case truth table and the filter_var truthiness cases
+     * `under_review` were removed because NOTHING IN THE CODEBASE EVER
+     * WROTE THEM — no service, admin screen or command — so no behaviour
+     * was orphaned. The 16-case truth table and the filter_var cases
      * went with them — the boolean-truthy vocabulary they happened to
      * exercise belongs to `PrivacySettings::strictest()`, which survives, and
      * is now tested directly in PrivacyFlagsFailClosedTest rather than
