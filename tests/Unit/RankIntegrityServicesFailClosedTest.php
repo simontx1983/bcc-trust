@@ -24,7 +24,8 @@ require_once __DIR__ . '/../Stubs/rank-unit-stubs.php';
  *     nothing. It throws; the subscriber wiring records
  *     `evidence_ingest_failed`.
  *   - The own-view progression findings block: display only, so a failed
- *     read shows an empty list instead of failing the whole progression.
+ *     read does not fail the whole progression. F-539: it says the findings
+ *     could not be loaded (`unavailable`), never an empty list as if none.
  */
 final class RankIntegrityServicesFailClosedTest extends TestCase
 {
@@ -125,7 +126,7 @@ final class RankIntegrityServicesFailClosedTest extends TestCase
         }
     }
 
-    public function testTheProgressionFindingsBlockShowsAnEmptyListOnAFailedRead(): void
+    public function testTheProgressionFindingsBlockIsUnavailableOnAFailedRead(): void
     {
         $findings = new class extends FindingsRepository {
             public function __construct()
@@ -148,6 +149,33 @@ final class RankIntegrityServicesFailClosedTest extends TestCase
         (new \ReflectionProperty(RankStateService::class, 'findings'))->setValue($service, $findings);
         $block = new \ReflectionMethod(RankStateService::class, 'findingsBlock');
 
-        self::assertSame([], $block->invoke($service, 7), 'display only: an empty list, not a fatal');
+        self::assertSame(['items' => [], 'unavailable' => true], $block->invoke($service, 7), 'display only, not a fatal; never "no findings"');
+    }
+
+    /** F-539: a failed recently-reversed read is "could not be loaded" too, and the active list is not shown partially. */
+    public function testAFailedReversedReadIsUnavailableToo(): void
+    {
+        $findings = new class extends FindingsRepository {
+            public function __construct()
+            {
+            }
+
+            public function getActiveForUser(int $userId): array
+            {
+                unset($userId);
+                return [(object) ['id' => 1]];
+            }
+
+            public function getRecentlyReversedForUser(int $userId, string $since): array
+            {
+                throw new RepositoryReadFailure(self::class, __FUNCTION__, 'simulated');
+            }
+        };
+
+        $service = (new \ReflectionClass(RankStateService::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(RankStateService::class, 'findings'))->setValue($service, $findings);
+        $block = new \ReflectionMethod(RankStateService::class, 'findingsBlock');
+
+        self::assertSame(['items' => [], 'unavailable' => true], $block->invoke($service, 7));
     }
 }
