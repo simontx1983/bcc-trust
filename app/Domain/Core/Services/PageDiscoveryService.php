@@ -328,18 +328,11 @@ class PageDiscoveryService {
             cache_users($all_user_ids);
         }
 
-        // 4. Bulk-fetch user_info rows and prime wp_cache so
-        //    UserInfoRepository::getByUserId() hits cache.
-        $user_infos = $this->users->getBulkByUserIds($all_user_ids);
-        foreach ($user_infos as $uid => $info) {
-            wp_cache_set('user_info_' . $uid, $info, 'bcc_trust', BCC_TRUST_CACHE_USER);
-        }
-        // Prime cache misses too (users with no user_info row).
-        foreach ($all_user_ids as $uid) {
-            if (!isset($user_infos[$uid])) {
-                wp_cache_set('user_info_' . $uid, '', 'bcc_trust', BCC_TRUST_CACHE_USER);
-            }
-        }
+        // 4. Warm the user_info cache so UserInfoRepository::getByUserId()
+        //    hits it: one read for the authors and owners not already
+        //    cached. primeByUserIds() caches nothing on a failed read and
+        //    never overwrites an entry that is already there.
+        $this->users->primeByUserIds(array_values(array_map('intval', $all_user_ids)));
     }
 
     /**

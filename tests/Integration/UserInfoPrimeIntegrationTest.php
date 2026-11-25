@@ -184,6 +184,38 @@ final class UserInfoPrimeIntegrationTest extends TestCase
         self::assertSame(0, $wpdb->queryCount, 'each member answered from the primed cache');
     }
 
+    /**
+     * Page discovery warms user_info through primeByUserIds() too, so a read
+     * that fails while it warms caches nothing (it used to cache '' for every
+     * author and owner, which reads as "not suspended"), and an entry already
+     * cached is left as it was.
+     */
+    public function testPageDiscoveryCachesNothingOnAFailedRead(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-groups-integration-stubs.php';
+        if (!function_exists('_prime_post_caches')) {
+            // WordPress's post-cache primer: nothing to warm in this harness.
+            eval('function _prime_post_caches(array $ids, bool $updateTermCache = true, bool $updateMetaCache = true): void {}');
+        }
+        global $wpdb;
+        $cached = (object) ['user_id' => (string) self::WITH_ROW_B, 'is_suspended' => '1', 'marker' => 'cached'];
+        wp_cache_set('user_info_' . self::WITH_ROW_B, $cached, 'bcc_trust');
+        $wpdb->failQueriesMatching = self::PRIME_READ;
+
+        $rows = [
+            (object) ['ID' => 957901, 'post_author' => self::WITH_ROW_A],
+            (object) ['ID' => 957902, 'post_author' => self::WITH_ROW_B],
+            (object) ['ID' => 957903, 'post_author' => self::NO_ROW],
+        ];
+        (new \ReflectionMethod(\BCC\Trust\Core\Services\PageDiscoveryService::class, 'primeCaches'))
+            ->invoke(new \BCC\Trust\Core\Services\PageDiscoveryService(), $rows);
+
+        self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault hit the warming read');
+        self::assertFalse(wp_cache_get('user_info_' . self::WITH_ROW_A, 'bcc_trust'), 'nothing cached for a member with a row');
+        self::assertFalse(wp_cache_get('user_info_' . self::NO_ROW, 'bcc_trust'), "no '' cached either");
+        self::assertSame($cached, wp_cache_get('user_info_' . self::WITH_ROW_B, 'bcc_trust'), 'a cached entry is left as it was');
+    }
+
     private function purge(): void
     {
         global $wpdb;
