@@ -153,6 +153,15 @@ final class WatchingEndpoint
                 'enum'              => ['cards'],
                 'sanitize_callback' => 'sanitize_key',
             ],
+            // Structure A row 14: search the list by what it shows. Same
+            // bound and wiring as GET /cards' q; the handler checks again.
+            'q' => [
+                'required'          => false,
+                'type'              => 'string',
+                'maxLength'         => CardsListEndpoint::Q_MAX_LENGTH,
+                'validate_callback' => 'rest_validate_request_arg',
+                'sanitize_callback' => 'sanitize_text_field',
+            ],
         ];
     }
 
@@ -232,8 +241,25 @@ final class WatchingEndpoint
         // anything else, so this is belt-and-braces for a missing param.
         $includeCards = ((string) $request->get_param('include') === 'cards');
 
+        $query = (string) ($request->get_param('q') ?? '');
+        // Structure A row 14. Searches only, before any query work: the same
+        // throttle and bound as GET /cards (CardsListEndpoint::Q_RATE_LIMIT).
+        if ($query !== '' && !\BCC\Core\Security\Throttle::allow('me_watching_q', CardsListEndpoint::Q_RATE_LIMIT, CardsListEndpoint::Q_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many searches. Please wait a few seconds.', 429);
+        }
+        if (mb_strlen($query) > CardsListEndpoint::Q_MAX_LENGTH) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('q must be at most %d characters.', CardsListEndpoint::Q_MAX_LENGTH),
+                400
+            );
+        }
+
         $payload = Plugin::instance()->watchingService()
-            ->getWatching($userId, $page, $pageSize, $includeCards);
+            ->getWatching($userId, $page, $pageSize, $includeCards, $query);
+        if ($payload === null) {
+            return ApiResponse::error('bcc_unavailable', 'Search is not available yet. Please try again later.', 503);
+        }
 
         $response = ApiResponse::ok($payload);
         $response->header('Cache-Control', 'no-store');

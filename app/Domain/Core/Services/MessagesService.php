@@ -176,12 +176,18 @@ final class MessagesService
     /**
      * Paginated conversation list for a viewer.
      *
+     * `$nameQuery` (structure A row 14) narrows it to the conversations with
+     * a participant the viewer is shown who matches by @handle, or by
+     * display name only where others see it (F-512). Message text is never
+     * searched. The read is bcc-core's: when the deployed bcc-core does not
+     * have it yet, a search answers 503 rather than an unfiltered list.
+     *
      * @return array{
      *     items: list<array<string, mixed>>,
      *     pagination: array{page: int, per_page: int, total: int, total_pages: int}
      * }|array{error: string, message: string}
      */
-    public function listInbox(int $viewerId, int $page, int $perPage): array
+    public function listInbox(int $viewerId, int $page, int $perPage, string $nameQuery = ''): array
     {
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -191,13 +197,24 @@ final class MessagesService
         $perPage = max(1, min($perPage, self::INBOX_PER_PAGE_MAX));
         $offset  = ($page - 1) * $perPage;
 
-        // F-300: a failed read is a retryable 503, never an empty inbox
-        // ("No conversations yet" over a DB error).
-        $rows = self::readInboxRows($viewerId, $perPage, $offset);
-        if ($rows === null) {
-            return self::dmReadUnavailable();
+        if (trim($nameQuery) !== '') {
+            if (!self::coreHasInboxSearch()) {
+                return self::dmReadUnavailable();
+            }
+            $rows  = PeepSoMessageRepository::findConversationsMatchingOrUnknown($viewerId, $nameQuery, $perPage, $offset);
+            $total = $rows === null ? null : PeepSoMessageRepository::countConversationsMatchingOrUnknown($viewerId, $nameQuery);
+            if ($rows === null || $total === null) {
+                return self::dmReadUnavailable();
+            }
+        } else {
+            // F-300: a failed read is a retryable 503, never an empty inbox
+            // ("No conversations yet" over a DB error).
+            $rows = self::readInboxRows($viewerId, $perPage, $offset);
+            if ($rows === null) {
+                return self::dmReadUnavailable();
+            }
+            $total = PeepSoMessageRepository::countConversationsForUser($viewerId);
         }
-        $total = PeepSoMessageRepository::countConversationsForUser($viewerId);
 
         if ($rows === []) {
             return [
@@ -1926,6 +1943,16 @@ final class MessagesService
             return PeepSoMessageRepository::findMessagesInConversationOrUnknown($rootMsgId, $viewerId, $limit, $offset);
         }
         return PeepSoMessageRepository::findMessagesInConversation($rootMsgId, $viewerId, $limit, $offset);
+    }
+
+    /**
+     * Does the deployed bcc-core have the inbox search (structure A row 14)?
+     * Its count and its list ship together, so one method stands for both.
+     */
+    private static function coreHasInboxSearch(): bool
+    {
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        return method_exists(PeepSoMessageRepository::class, 'countConversationsMatchingOrUnknown');
     }
 
     /**

@@ -77,6 +77,11 @@ final class NotificationPrefs
         NotificationType::GROUP_INVITED,
         NotificationType::ANNOUNCEMENT_HIDDEN,
         NotificationType::ANNOUNCEMENT_RESTORED,
+        NotificationType::VALIDATOR_OWNER_LINKED,
+        NotificationType::VALIDATOR_OWNER_REVOKED,
+        NotificationType::VALIDATOR_OWNER_LINK_CANCELLED,
+        NotificationType::VALIDATOR_OWNERSHIP_GRANTED,
+        NotificationType::VALIDATOR_OWNERSHIP_REMOVED,
         NotificationType::REVIEW_REPLY,
     ];
 
@@ -146,6 +151,11 @@ final class NotificationPrefs
         'bell_bcc_group_invited'                             => true,
         'bell_bcc_announcement_hidden'                       => true,
         'bell_bcc_announcement_restored'                     => true,
+        'bell_bcc_validator_owner_linked'                    => true,
+        'bell_bcc_validator_owner_revoked'                   => true,
+        'bell_bcc_validator_owner_link_cancelled'            => true,
+        'bell_bcc_validator_ownership_granted'               => true,
+        'bell_bcc_validator_ownership_removed'               => true,
         'bell_bcc_review_reply'                              => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,

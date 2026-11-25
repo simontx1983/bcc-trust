@@ -61,6 +61,17 @@ final class MessagesEndpoint
                             'type'              => 'integer',
                             'sanitize_callback' => 'absint',
                         ],
+                        // Structure A row 14: search by name or @handle.
+                        // Same bound and wiring as GET /cards' q: WordPress
+                        // checks maxLength only through its schema
+                        // validator, and the handler checks it again.
+                        'q' => [
+                            'required'          => false,
+                            'type'              => 'string',
+                            'maxLength'         => CardsListEndpoint::Q_MAX_LENGTH,
+                            'validate_callback' => 'rest_validate_request_arg',
+                            'sanitize_callback' => 'sanitize_text_field',
+                        ],
                     ],
                 ],
                 [
@@ -187,8 +198,22 @@ final class MessagesEndpoint
 
         $page    = (int) ($request->get_param('page') ?? 1);
         $perPage = (int) ($request->get_param('per_page') ?? MessagesService::INBOX_PER_PAGE_DEFAULT);
+        $query   = (string) ($request->get_param('q') ?? '');
 
-        $result = $this->service()->listInbox($viewerId, $page, $perPage);
+        // Structure A row 14. Searches only, before any query work: the same
+        // throttle and bound as GET /cards (CardsListEndpoint::Q_RATE_LIMIT).
+        if ($query !== '' && !\BCC\Core\Security\Throttle::allow('me_conversations_q', CardsListEndpoint::Q_RATE_LIMIT, CardsListEndpoint::Q_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many searches. Please wait a few seconds.', 429);
+        }
+        if (mb_strlen($query) > CardsListEndpoint::Q_MAX_LENGTH) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('q must be at most %d characters.', CardsListEndpoint::Q_MAX_LENGTH),
+                400
+            );
+        }
+
+        $result = $this->service()->listInbox($viewerId, $page, $perPage, $query);
         if (isset($result['error'])) {
             return self::errorFromResult($result);
         }

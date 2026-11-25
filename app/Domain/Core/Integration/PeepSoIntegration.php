@@ -507,6 +507,110 @@ class PeepSoIntegration
     }
 
     /**
+     * Move a page from an owner who LOST their claim to the page's new
+     * verified owner (a wallet proof superseded a staff approval). Run only
+     * by PageOwnershipAligner, from cron, under its per-page lock, after it
+     * re-read the claims:
+     *   - nothing happens if EITHER user is banned on the page (F-360: no
+     *     ban is lifted; one `page_owner_swap_skipped` audit row asks for
+     *     manual review), or a status read fails;
+     *   - the old owner's `member_owner` row is demoted FIRST (a stop here
+     *     leaves the page fully the old owner's);
+     *   - post_author moves old → new only if it is still the old owner, by
+     *     one compare-and-set UPDATE (no post-save handlers run);
+     *   - owned-page counts move, the new owner's PeepSo owner row is
+     *     ensured, and the score rows keyed to the old owner move to the new
+     *     one; one `page_owner_swapped` audit row records it.
+     *
+     * Answers false on any failure, never throws.
+     */
+    public function swapClaimedPageOwner(int $pageId, int $fromUserId, int $toUserId): bool
+    {
+        if ($pageId <= 0 || $fromUserId <= 0 || $toUserId <= 0 || $fromUserId === $toUserId) {
+            return false;
+        }
+
+        try {
+            $from = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::claimerPageStatus($pageId, $fromUserId);
+            $to   = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::claimerPageStatus($pageId, $toUserId);
+            if ($from === null || $to === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap: status read failed - page left as is', [
+                    'page_id' => $pageId,
+                    'from'    => $fromUserId,
+                    'to'      => $toUserId,
+                ]);
+                return false;
+            }
+            if ($from['status'] === 'banned' || $to['status'] === 'banned') {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page owner swap skipped for manual review - a ban is on the page', [
+                    'page_id' => $pageId,
+                    'from'    => $fromUserId,
+                    'to'      => $toUserId,
+                ]);
+                AuditLogger::log('page_owner_swap_skipped', $pageId, [
+                    'old_owner' => $fromUserId,
+                    'new_owner' => $toUserId,
+                    'reason'    => 'banned',
+                ], 'page');
+                return false;
+            }
+
+            if ($from['status'] === 'member_owner') {
+                if (!class_exists('PeepSoPageUser')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap: PeepSo Pages is not loaded - page left as is', ['page_id' => $pageId]);
+                    return false;
+                }
+                $member = new \PeepSoPageUser($pageId, $fromUserId);
+                if ($member->member_modify('member') !== true) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap: member_owner demotion failed - page left as is', [
+                        'page_id' => $pageId,
+                        'from'    => $fromUserId,
+                    ]);
+                    return false;
+                }
+            }
+
+            $moved = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::compareAndSetPageAuthor($pageId, $fromUserId, $toUserId);
+            clean_post_cache($pageId);
+            if ($moved !== true) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap: post_author not moved', [
+                    'page_id' => $pageId,
+                    'from'    => $fromUserId,
+                    'to'      => $toUserId,
+                    'reason'  => $moved === null ? 'write_failed' : 'author_changed',
+                ]);
+                return false;
+            }
+
+            $this->userInfoRepo->decrementPageCount($fromUserId, $pageId);
+            $this->userInfoRepo->incrementPageCount($toUserId, $pageId);
+            $meta = [
+                'old_owner' => $fromUserId,
+                'new_owner' => $toUserId,
+                'owner_row' => self::ensurePageOwnerMembership($pageId, $toUserId),
+            ];
+            try {
+                $meta['score_rows_moved'] = $this->scoreRepo->releaseOwner($pageId, $fromUserId, $toUserId);
+            } catch (\Throwable $e) {
+                $meta['score_rows_move_failed'] = true;
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap: score rows not moved', [
+                    'page_id' => $pageId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+            AuditLogger::log('page_owner_swapped', $pageId, $meta, 'page');
+
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] page owner swap failed', [
+                'page_id' => $pageId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
+    /**
      * F-299: make $userId the PeepSo `member_owner` of $pageId, through
      * PeepSo's own model — the same `member_join()` + `member_modify(
      * 'member_owner')` pair PeepSoPage::create() runs for a page's creator,

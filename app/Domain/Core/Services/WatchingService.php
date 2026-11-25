@@ -33,6 +33,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoFollowWriter;
 use BCC\Core\Repositories\PeepSoBlockRepository;
+use BCC\Core\Repositories\UserMetaRepository;
 use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\PageFollowRepository;
 use BCC\Trust\Core\Repositories\WatchMetaRepository;
@@ -138,18 +139,43 @@ final class WatchingService
      *     unclamped identifier-only request. That is the clamp, not
      *     row dropping.
      *
+     * `$nameQuery` (structure A row 14) narrows BOTH sources, and `total`
+     * counts the narrowed list. A followed member matches by @handle or by
+     * display name only where others see it (bcc-core's shared filter,
+     * F-512), or by the title or slug of one of their published, non-secret
+     * pages. A followed placeholder page matches by its title or slug when
+     * it is published and not secret. A secret page's title is never
+     * searched. NULL when the deployed bcc-core has no name filter yet: the
+     * caller answers 503 rather than an unfiltered list.
+     *
      * @return array{
      *   items: list<WatchingItem>,
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
-     * }
+     * }|null
      */
-    public function getWatching(int $userId, int $page, int $pageSize, bool $includeCards = false): array
+    public function getWatching(int $userId, int $page, int $pageSize, bool $includeCards = false, string $nameQuery = ''): ?array
     {
         $page = max(1, $page);
         // Clamp BEFORE the offset math so the LIMIT, the offset and the
         // echoed pagination.page_size can never disagree.
         $pageSize = self::clampPageSize($pageSize, $includeCards);
         $offset   = ($page - 1) * $pageSize;
+
+        // Structure A row 14: the one normalised LIKE argument, or no filter.
+        $like = null;
+        if (trim($nameQuery) !== '') {
+            if (!self::coreHasNameSearch()) {
+                return null;
+            }
+            $like = UserMetaRepository::nameQueryLike($nameQuery);
+            if ($like === false) {
+                // Not valid UTF-8: it matches nothing.
+                return [
+                    'items'      => [],
+                    'pagination' => ['page' => $page, 'page_size' => $pageSize, 'total' => 0, 'total_pages' => 0],
+                ];
+            }
+        }
 
         // ────────────────────────────────────────────────────────────
         //  Two-source watchlist (V1.6+), paged as ONE ordered list:
@@ -174,8 +200,8 @@ final class WatchingService
         //  findPageCandidatesByUserIds + one batched page-privacy read +
         //  bulk get_post for the page-follow rows.
         // ────────────────────────────────────────────────────────────
-        $pageFollowTotal = $this->pageFollowRepo->countByUserId($userId);
-        $peepsoTotal     = $this->watchingRepo->countItemsForUser($userId);
+        $pageFollowTotal = $this->pageFollowRepo->countByUserId($userId, $like);
+        $peepsoTotal     = $this->watchingRepo->countItemsForUser($userId, $like);
         $slice           = self::sliceWatchlist($offset, $pageSize, $pageFollowTotal);
 
         // ── Page-follows (placeholder pages, pre-claim) ──────────────
@@ -184,7 +210,8 @@ final class WatchingService
             $pageFollowRows = $this->pageFollowRepo->findByUserId(
                 $userId,
                 $slice['page_follow_take'],
-                $slice['page_follow_offset']
+                $slice['page_follow_offset'],
+                $like
             );
             if ($pageFollowRows !== []) {
                 $pageIds = array_map(fn($r) => (int) $r->page_id, $pageFollowRows);
@@ -200,7 +227,7 @@ final class WatchingService
 
         // ── PeepSo follows ───────────────────────────────────────────
         $rows = $slice['peepso_take'] > 0
-            ? $this->watchingRepo->findItemsForUser($userId, $slice['peepso_offset'], $slice['peepso_take'])
+            ? $this->watchingRepo->findItemsForUser($userId, $slice['peepso_offset'], $slice['peepso_take'], $like)
             : [];
 
         $followeeUserIds = [];
@@ -246,6 +273,17 @@ final class WatchingService
                 'total_pages' => $totalPages,
             ],
         ];
+    }
+
+    /**
+     * Does the deployed bcc-core have the shared member-name filter
+     * (structure A row 14)? nameQueryLike() and publicNameMatchSql() ship
+     * together, so one method stands for both.
+     */
+    private static function coreHasNameSearch(): bool
+    {
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        return method_exists(UserMetaRepository::class, 'publicNameMatchSql');
     }
 
     /**

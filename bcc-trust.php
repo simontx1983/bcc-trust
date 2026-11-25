@@ -1144,9 +1144,16 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
+    }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
     }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
@@ -1298,6 +1305,25 @@ $bccClaimReverify = static function (): void {
 };
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
+
+// Validator relationships: align a page's PeepSo ownership to its claims
+// (one-off after a change, plus the bounded retry sweep). Cron only: no
+// current user.
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::HOOK, static function ($pageId): void {
+    \BCC\Trust\Onchain\Services\PageOwnershipAligner::align((int) $pageId);
+});
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK, [\BCC\Trust\Onchain\Services\PageOwnershipAligner::class, 'sweep']);
+// The bells for a committed validator relationship change.
+add_action('bcc_validator_relationship_changed', static function (string $action, int $pageId, int $subjectUserId, ?int $actorId, int $linkId, array $replaced = []): void {
+    \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onValidatorRelationshipChanged($action, $pageId, $subjectUserId, $actorId, $linkId, $replaced);
+}, 10, 6);
+add_action(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK, static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::run();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] relationship log health check failed', ['error' => $e->getMessage()]);
+    }
+});
 
 // Validator staff step-ups: purge rows that expired more than a day ago.
 add_action('bcc_validator_step_up_purge', static function (): void {
@@ -2330,6 +2356,10 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
+    \WP_CLI::add_command(
+        'bcc-trust claims-revoke-user',
+        \BCC\Trust\Onchain\CLI\ClaimRevokeUserCommand::class
+    );
     // ── `bcc-trust cosmwasm` IS GONE ────────────────────────────────────
     //
     // The one-shot supervised pass was the last way to START a full-chain
@@ -2468,9 +2498,16 @@ function bcc_trust_activate() {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
+    }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

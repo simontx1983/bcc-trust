@@ -117,7 +117,7 @@ final class MemberSummaryPrefetcher
             // watches. Batched for the identical reason the passive side
             // is: N × getCounts() would issue 2N sequential COUNTs.
             'following_counts'             => PeepSoFollowerRepository::getFollowingCountForUsers($userIds),
-            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
+            'primary_halls'                => \BCC\Trust\Onchain\Repositories\HallRepository::primaryHallsForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             // Attestation-backed since the endorsements-table retirement:

@@ -80,7 +80,14 @@ class ClaimService {
      * F-14: why a claim was revoked. A closed list — it is written to the
      * audit log and handed to `bcc_onchain_claim_revoked` listeners.
      */
-    public const REVOKE_REASONS = ['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator', 'wallet_unlinked', 'account_deleted'];
+    public const REVOKE_REASONS = [
+        'wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator', 'wallet_unlinked', 'account_deleted',
+        // Validator relationship changes (ValidatorRelationshipService):
+        // a staff revoke's reasons, a staff link cancelled, and a staff or
+        // node-key owner replaced by a wallet proof.
+        'linked_in_error', 'evidence_withdrawn', 'owner_requested', 'ownership_disputed',
+        'link_cancelled', 'superseded_by_proof',
+    ];
 
     /**
      * Max wallets checked per claim match (Phase 8). Each wallet on the
@@ -111,9 +118,15 @@ class ClaimService {
      * Checks if the user has a connected wallet that matches the entity's
      * on-chain owner/operator. If matched, records a verified claim.
      *
-     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string}
+     * A VALIDATOR operator claim goes through
+     * ValidatorRelationshipService::claimByWallet(): the relationship lock
+     * order, the log rows, the supersede of a staff-approved owner, and the
+     * page mirror for $pageId in the same run (`mirror_written`). A
+     * collection claim keeps createExclusiveClaim(), and its caller mirrors it.
+     *
+     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool, reason_code?: string, mirror_written?: bool}
      */
-    public static function claim(int $userId, string $entityType, int $entityId): array {
+    public static function claim(int $userId, string $entityType, int $entityId, int $pageId = 0): array {
         // §M suspension gate at the SERVICE boundary (F-109), admin bypass
         // OFF. PagesEndpoint gates first; this holds for any future caller.
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
@@ -197,14 +210,16 @@ class ClaimService {
 
         // ── Exclusivity gate: only one operator/creator per entity ────────
         if (in_array($match['role'], self::EXCLUSIVE_ROLES, true)) {
-            $result = ClaimRepository::createExclusiveClaim(
-                $userId,
-                $entityType,
-                $entityId,
-                $match['wallet_address'],
-                $match['chain_id'],
-                $match['role']
-            );
+            $result = ($entityType === 'validator' && $match['role'] === 'operator')
+                ? ValidatorRelationshipService::claimByWallet($userId, $entityId, $match['wallet_address'], $match['chain_id'], $pageId)
+                : ClaimRepository::createExclusiveClaim(
+                    $userId,
+                    $entityType,
+                    $entityId,
+                    $match['wallet_address'],
+                    $match['chain_id'],
+                    $match['role']
+                );
 
             if (!$result['success']) {
                 return $result;
@@ -216,11 +231,12 @@ class ClaimService {
             do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
 
             return [
-                'success'    => true,
-                'message'    => self::successMessage($entityType, $match['role']),
-                'claim_id'   => $claimId,
-                'role'       => $match['role'],
-                'is_primary' => true,
+                'success'        => true,
+                'message'        => self::successMessage($entityType, $match['role']),
+                'claim_id'       => $claimId,
+                'role'           => $match['role'],
+                'is_primary'     => true,
+                'mirror_written' => (bool) ($result['mirror_written'] ?? false),
             ];
         }
 
@@ -683,6 +699,26 @@ class ClaimService {
             return false;
         }
 
+        self::afterRevokeCommitted($claimId, $result, $reason, true);
+
+        return true;
+    }
+
+    /**
+     * The post-commit steps of a revoke: audit, page release, bonus, read
+     * model, hooks. Shared by revokeClaim() and by revokes committed inside
+     * a larger transaction (ValidatorRelationshipService).
+     *
+     * $releasePagesInline false leaves the page OWNERSHIP move (PeepSo owner
+     * role, post_author, score rows, the unowned-page bonus clear) to the
+     * PageOwnershipAligner, which runs it asynchronously with no current
+     * user: a release run inline from a staff request would fire the page
+     * save handlers as that editor.
+     *
+     * @param array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>} $result
+     */
+    public static function afterRevokeCommitted(int $claimId, array $result, string $reason, bool $releasePagesInline): void
+    {
         // ── COMMITTED. Nothing below may report the revoke as failed. ──
         // A throw here used to escape after the commit: the next sweep sees
         // the claim as already revoked and returns early, so the lost event
@@ -711,7 +747,7 @@ class ClaimService {
         // ⚠ BEFORE the bonus step: with the rows moved, getPageForOwner()
         // no longer resolves the user to a page they lost, so their bonus is
         // recomputed onto a page they still own.
-        foreach ($result['mirror_page_ids'] as $lostPageId) {
+        foreach ($releasePagesInline ? $result['mirror_page_ids'] : [] as $lostPageId) {
             self::afterCommit('page_release', $claimId, static function () use ($lostPageId, $userId): void {
                 \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->releaseClaimedPage((int) $lostPageId, $userId);
             });
@@ -758,8 +794,6 @@ class ClaimService {
                 $reason
             );
         });
-
-        return true;
     }
 
     /**
@@ -799,6 +833,30 @@ class ClaimService {
     }
 
     /**
+     * Revoke up to $limit of the user's verified claims (or one wallet's),
+     * oldest first, through revokeClaim(): for a user with more than
+     * REVOKE_ALL_MAX claims, worked through in batches before an unlink or
+     * a deletion. A failed read or revoke throws; earlier revokes stand.
+     *
+     * @return int how many were revoked
+     */
+    public static function revokeBatchForUser(int $userId, string $reason, int $limit, ?string $walletAddress = null, ?int $chainId = null): int
+    {
+        if (!in_array($reason, self::REVOKE_REASONS, true)) {
+            throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
+        }
+
+        $revoked = 0;
+        foreach (ClaimRepository::verifiedEntityClaimIdsBatch($userId, $limit, $walletAddress, $chainId) as $claimId) {
+            if (self::revokeClaim($claimId, $reason)) {
+                ++$revoked;
+            }
+        }
+
+        return $revoked;
+    }
+
+    /**
      * F-521: an account deletion's claim purge. Every verified claim is
      * revoked through {@see revokeClaim()} with `account_deleted` first, so
      * each is audited and frees the page it granted; then all of the user's
@@ -816,25 +874,44 @@ class ClaimService {
         if ($userId <= 0) {
             return;
         }
+        $readFailed = false;
         try {
             $claimIds = ClaimRepository::verifiedEntityClaimIdsForUser($userId);
         } catch (\Throwable $e) {
-            $claimIds = [];
+            $claimIds   = [];
+            $readFailed = true;
             \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim read failed, claims purged without revoke', [
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
         }
+        $notRevoked = 0;
         foreach ($claimIds as $claimId) {
             try {
                 self::revokeClaim($claimId, 'account_deleted');
             } catch (\Throwable $e) {
+                ++$notRevoked;
                 \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
                     'user_id'  => $userId,
                     'claim_id' => $claimId,
                     'error'    => $e->getMessage(),
                 ]);
             }
+        }
+
+        // Claims about to be purged without their audited revoke (their pages
+        // may still name the deleted user): counted and put on the record,
+        // so the admin health view can find them. Best-effort.
+        if ($readFailed || $notRevoked > 0) {
+            self::afterCommit('purge_without_revoke_audit', 0, static function () use ($userId, $notRevoked, $readFailed): void {
+                \BCC\Trust\Core\Security\AuditLogger::log('claims_purged_without_revoke', $userId, [
+                    'count'       => $readFailed ? null : $notRevoked,
+                    'read_failed' => $readFailed,
+                ], 'user', 0);
+            });
+            self::afterCommit('purge_without_revoke_metric', 0, static function (): void {
+                \BCC\Core\Observability\DegradationMetrics::record('validator_relationships', 'deletion_revoke_failed');
+            });
         }
         ClaimRepository::deleteForUser($userId);
     }

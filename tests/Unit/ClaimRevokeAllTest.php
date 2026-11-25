@@ -39,6 +39,9 @@ final class ClaimRevokeAllTest extends TestCase
     {
         $out = [];
         foreach (\ClaimRevokeWorld::$audits as $audit) {
+            if (($audit[0] ?? '') !== 'claim_revoked') {
+                continue;
+            }
             $meta  = is_array($audit[2] ?? null) ? $audit[2] : [];
             $out[] = (string) ($meta['reason'] ?? '');
         }
@@ -162,8 +165,43 @@ final class ClaimRevokeAllTest extends TestCase
         self::assertSame(['account_deleted', 'account_deleted'], self::auditedReasons(), 'the first and third are revoked');
         self::assertCount(2, \ClaimRevokeWorld::$released, 'their pages are released');
         self::assertSame([5], \ClaimRevokeWorld::$deletedFor, 'the rows are still purged');
-        $logged = array_column(array_column(\ClaimRevokeWorld::$errors, 1), 'claim_id');
+        $revokeFailures = array_filter(\ClaimRevokeWorld::$errors, static fn (array $e): bool => str_contains($e[0], 'claim revoke failed'));
+        $logged         = array_values(array_column(array_column($revokeFailures, 1), 'claim_id'));
         self::assertSame([42], $logged, 'the failed claim is logged by id');
+        self::assertContains(['claims_purged_without_revoke', 5, ['count' => 1, 'read_failed' => false], 'user', 0], \ClaimRevokeWorld::$audits, 'L3: the purge without a revoke is on the record');
+    }
+
+    public function testAFailedDeletionReadIsOnTheRecord(): void
+    {
+        \ClaimRevokeWorld::$idsThrow = new \RuntimeException('read failed');
+
+        ClaimService::purgeForDeletedUser(5);
+
+        self::assertContains(['claims_purged_without_revoke', 5, ['count' => null, 'read_failed' => true], 'user', 0], \ClaimRevokeWorld::$audits);
+    }
+
+    public function testACleanDeletionWritesNoPurgeRecord(): void
+    {
+        \ClaimRevokeWorld::$userClaimIds = [41];
+
+        ClaimService::purgeForDeletedUser(5);
+
+        self::assertNotContains('claims_purged_without_revoke', array_column(\ClaimRevokeWorld::$audits, 0));
+    }
+
+    public function testABatchRevokesAtMostTheBatchThroughTheAuditedPath(): void
+    {
+        \ClaimRevokeWorld::$userClaimIds = [41, 42, 43];
+
+        self::assertSame(2, ClaimService::revokeBatchForUser(5, 'account_deleted', 2));
+        self::assertSame([41, 42], \ClaimRevokeWorld::$revokeCalls);
+        self::assertSame(['account_deleted', 'account_deleted'], self::auditedReasons());
+    }
+
+    public function testABatchRefusesAnUnknownReason(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        ClaimService::revokeBatchForUser(5, 'because', 10);
     }
 
     public function testNoUserIsANoOp(): void

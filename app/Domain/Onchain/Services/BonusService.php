@@ -86,7 +86,12 @@ final class BonusService
         // Resolve chain_id so deletion is scoped to the specific chain.
         // Prevents collateral deletion of claims on other chains sharing
         // the same address format (e.g., Ethereum + Polygon + Arbitrum).
-        $chainId = \BCC\Trust\Onchain\Repositories\ChainRepository::resolveId($chainSlug);
+        // A since-deactivated chain is still that chain: resolve it too, so
+        // the unlink stays scoped to it rather than matching the address on
+        // every chain. Only a truly unknown slug falls back to the wallet
+        // alone (the revoke stays audited either way).
+        $chainId = \BCC\Trust\Onchain\Repositories\ChainRepository::resolveId($chainSlug)
+            ?? ($chainSlug !== '' ? \BCC\Trust\Onchain\Repositories\ChainRepository::resolveIdAnyState($chainSlug) : null);
 
         try {
             // F-521: revoke-and-release FIRST. Each verified claim on this
