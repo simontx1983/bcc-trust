@@ -53,7 +53,7 @@ final class AdminHallsEndpointTest extends TestCase
 
     /**
      * @param array<string, mixed> $params
-     * @return array{status: int, code: mixed, message: mixed, cache: mixed}
+     * @return array{status: int, code: mixed, message: mixed, data: mixed, cache: mixed}
      */
     private static function call(string $handler, array $params = []): array
     {
@@ -69,6 +69,7 @@ final class AdminHallsEndpointTest extends TestCase
             'status'  => $res->get_status(),
             'code'    => $err['code'] ?? null,
             'message' => $err['message'] ?? null,
+            'data'    => $err['data'] ?? null,
             'cache'   => $res->get_headers()['Cache-Control'] ?? null,
         ];
     }
@@ -91,7 +92,7 @@ final class AdminHallsEndpointTest extends TestCase
         }
         sort($seen);
 
-        self::assertSame(['GET /admin/halls', 'PATCH /admin/halls/(?P<id>\d+)', 'POST /admin/halls'], $seen, 'anti-vacuity: all three were registered');
+        self::assertSame(['GET /admin/halls', 'GET /admin/halls/(?P<id>\d+)', 'PATCH /admin/halls/(?P<id>\d+)', 'POST /admin/halls'], $seen, 'anti-vacuity: all four were registered');
     }
 
     // ── the handlers' own gate ──────────────────────────────────────────
@@ -99,7 +100,7 @@ final class AdminHallsEndpointTest extends TestCase
     /** @return array<string, array{string}> */
     public static function handlers(): array
     {
-        return ['GET /admin/halls' => ['list'], 'POST /admin/halls' => ['create'], 'PATCH /admin/halls/:id' => ['update']];
+        return ['GET /admin/halls' => ['list'], 'POST /admin/halls' => ['create'], 'GET /admin/halls/:id' => ['show'], 'PATCH /admin/halls/:id' => ['update']];
     }
 
     #[DataProvider('handlers')]
@@ -130,6 +131,7 @@ final class AdminHallsEndpointTest extends TestCase
 
         self::assertSame([400, 'bcc_invalid_request'], [$res['status'], $res['code']]);
         self::assertSame('kind must be one of: chain, topic.', $res['message']);
+        self::assertSame(['reason' => 'invalid_value', 'field' => 'kind', 'rule' => 'format'], $res['data']);
     }
 
     public function testAnOverlongSearchIsA400(): void
@@ -158,6 +160,7 @@ final class AdminHallsEndpointTest extends TestCase
         $res = self::call($handler, ['id' => 501, $field => ['not', 'a', 'string']]);
 
         self::assertSame([400, 'bcc_invalid_request', "{$field} must be a string."], [$res['status'], $res['code'], $res['message']]);
+        self::assertSame(['reason' => 'invalid_value', 'field' => $field, 'rule' => 'format'], $res['data']);
     }
 
     // ── a create result's HTTP status ───────────────────────────────────
@@ -181,5 +184,29 @@ final class AdminHallsEndpointTest extends TestCase
     public function testACreateResultMapsToItsStatus(string $status, ?string $failure, int $http, ?string $code): void
     {
         self::assertSame([$http, $code], AdminHallsEndpoint::createStatus($status, $failure));
+    }
+
+    /** @return array<string, array{string, string|null, array<string, int|string>}> */
+    public static function createRefusals(): array
+    {
+        return [
+            'the topic has one'   => ['exists', null, ['reason' => 'topic_exists', 'group_id' => 55]],
+            'another run'         => ['busy', HallProvisioningService::FAIL_LOCK_CONTENDED, ['reason' => 'create_in_progress']],
+            'the address taken'   => ['skipped', HallProvisioningService::FAIL_SLUG_TAKEN, ['reason' => 'address_taken']],
+            'invalid input'       => ['skipped', HallProvisioningService::FAIL_TOPIC_INVALID, ['reason' => 'invalid_value']],
+            'an unreadable check' => ['error', HallProvisioningService::FAIL_READ_UNVERIFIED, ['reason' => 'unverified']],
+            'a failed create'     => ['error', HallProvisioningService::FAIL_CREATE_FAILED, ['reason' => 'create_failed']],
+        ];
+    }
+
+    /**
+     * ⭐ Each 409 says which conflict it is (and the existing Hall when the topic has one).
+     *
+     * @param array<string, int|string> $data
+     */
+    #[DataProvider('createRefusals')]
+    public function testACreateRefusalSaysWhy(string $status, ?string $failure, array $data): void
+    {
+        self::assertSame($data, AdminHallsEndpoint::createErrorData($status, $failure, 55));
     }
 }

@@ -110,6 +110,7 @@ final class AdminHallEditTest extends TestCase
             'a chain Hall\'s topic'           => [self::CHAIN, ['topic_label' => 'New']],
             'name and description on a chain' => [self::CHAIN, ['name' => 'New', 'description' => 'Fine.']],
             'a topic on a Hall without one'   => [self::NEITHER, ['topic_label' => 'New']],
+            'the name of a Hall of no kind'   => [self::NEITHER, ['name' => 'New']],
         ];
     }
 
@@ -119,44 +120,73 @@ final class AdminHallEditTest extends TestCase
     {
         $this->boot();
 
-        self::assertSame('bcc_invalid_request', self::edit($groupId, $changes)['error'] ?? null);
+        $result = self::edit($groupId, $changes);
+
+        self::assertSame('bcc_invalid_request', $result['error'] ?? null);
+        self::assertSame('not_editable', $result['data']['reason'] ?? null);
+        self::assertContains($result['data']['field'] ?? null, ['name', 'topic_label']);
         self::assertNothingWritten();
     }
 
-    public function testAHallWithNeitherKindTakesANameAndADescription(): void
+    /** ⭐ Fail closed: a Hall not known to be a topic Hall has only its description editable. */
+    public function testAHallWithNeitherKindTakesADescriptionOnly(): void
     {
         $this->boot();
 
-        $result = self::edit(self::NEITHER, ['name' => 'Old Hall', 'description' => 'Still here.']);
+        $result = self::edit(self::NEITHER, ['description' => 'Still here.']);
 
         self::assertArrayNotHasKey('error', $result);
-        self::assertSame(['name' => true, 'description' => true, 'topic_label' => false], $result['hall']['editable']);
+        self::assertSame(['name' => false, 'description' => true, 'topic_label' => false], $result['hall']['editable']);
     }
 
     // ── the values ──────────────────────────────────────────────────────
 
-    /** @return array<string, array{array<string, string>}> */
+    /** @return array<string, array{array<string, string>, array<string, string>}> changes, error.data */
     public static function badValues(): array
     {
         return [
-            'an empty name'        => [['name' => '   ']],
-            'a long name'          => [['name' => str_repeat('n', 81)]],
-            'an empty topic label' => [['topic_label' => '']],
-            'a long topic label'   => [['topic_label' => str_repeat('l', 61)]],
-            'a long description'   => [['description' => str_repeat('d', 1001)]],
-            'an unknown field'     => [['slug' => 'defi-2']],
-            'nothing at all'       => [[]],
+            'an empty name'        => [['name' => '   '], ['reason' => 'invalid_value', 'field' => 'name', 'rule' => 'empty']],
+            'a long name'          => [['name' => str_repeat('n', 81)], ['reason' => 'invalid_value', 'field' => 'name', 'rule' => 'too_long']],
+            'an empty topic label' => [['topic_label' => ''], ['reason' => 'invalid_value', 'field' => 'topic_label', 'rule' => 'empty']],
+            'a long topic label'   => [['topic_label' => str_repeat('l', 61)], ['reason' => 'invalid_value', 'field' => 'topic_label', 'rule' => 'too_long']],
+            'a long description'   => [['description' => str_repeat('d', 1001)], ['reason' => 'invalid_value', 'field' => 'description', 'rule' => 'too_long']],
+            'an unknown field'     => [['slug' => 'defi-2'], ['reason' => 'unknown_field', 'field' => 'slug']],
+            'nothing at all'       => [[], ['reason' => 'nothing_to_change']],
         ];
     }
 
-    /** @param array<string, string> $changes */
+    /**
+     * Every refusal names its reason (and the field and rule), which admin UIs key their copy on.
+     *
+     * @param array<string, string> $changes
+     * @param array<string, string> $data
+     */
     #[DataProvider('badValues')]
-    public function testABadValueWritesNothing(array $changes): void
+    public function testABadValueWritesNothingAndSaysWhy(array $changes, array $data): void
     {
         $this->boot();
 
-        self::assertSame('bcc_invalid_request', self::edit(self::TOPIC, $changes)['error'] ?? null);
+        $result = self::edit(self::TOPIC, $changes);
+
+        self::assertSame('bcc_invalid_request', $result['error'] ?? null);
+        self::assertSame($data, $result['data'] ?? null);
         self::assertNothingWritten();
+    }
+
+    // ── one Hall ────────────────────────────────────────────────────────
+
+    public function testOneHallIsReadForTheEditPage(): void
+    {
+        $this->boot();
+
+        $result = (new AdminHallsService())->get(self::TOPIC);
+
+        self::assertSame(self::TOPIC, $result['hall']['id'] ?? null);
+        self::assertSame(['slug' => 'defi', 'label' => 'DeFi'], $result['hall']['topic'] ?? null);
+        self::assertSame('bcc_not_found', (new AdminHallsService())->get(999)['error'] ?? null);
+
+        HallRepository::$isHall = null;
+        self::assertSame('bcc_unavailable', (new AdminHallsService())->get(self::TOPIC)['error'] ?? null);
     }
 
     public function testValuesAreTrimmed(): void

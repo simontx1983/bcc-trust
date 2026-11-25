@@ -305,10 +305,14 @@ final class HallProvisioningService {
      * (HallTopicRules, the same rules the admin edit applies).
      */
     private static function invalidTopicInput(string $name, string $slug, string $label, string $description): ?string {
-        return HallTopicRules::nameError($name)
-            ?? HallTopicRules::labelError($label)
-            ?? HallTopicRules::descriptionError($description)
-            ?? HallTopicRules::slugError($slug);
+        $error = HallTopicRules::firstError([
+            'name'        => $name,
+            'topic_slug'  => $slug,
+            'topic_label' => $label,
+            'description' => $description,
+        ]);
+
+        return $error === null ? null : $error['field'] . ': ' . $error['message'];
     }
 
     /**

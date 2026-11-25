@@ -66,15 +66,23 @@ final class AdminHallsService
     }
 
     /**
-     * Create a topic Hall. The provisioning result is passed through for the
-     * REST layer to map; on `created` (or `incomplete`, where the Hall exists
-     * but its ownership awaits repair) it carries the new Hall.
+     * Create a topic Hall. Each field is checked first, so an invalid one is
+     * refused with its field and rule (provisionTopic() checks them again).
+     * Otherwise the provisioning result is passed through for the REST layer
+     * to map; on `created` (or `incomplete`, where the Hall exists but its
+     * ownership awaits repair) it carries the new Hall.
      *
-     * @return array{status: string, group_id: int, message: string, failure_code: string|null, owner_id: int, audit_degraded: bool, hall: AdminHall|null}
+     * @return array{status: string, group_id: int, message: string, failure_code: string|null, owner_id: int, audit_degraded: bool, hall: AdminHall|null}|array{error: string, message: string, data: array<string, string>}
      */
     public function create(string $name, string $topicSlug, string $topicLabel, string $description): array
     {
-        $result = OnchainPlugin::instance()->hallProvisioningService()->provisionTopic($name, $topicSlug, $topicLabel, $description);
+        $fields = array_map('trim', ['name' => $name, 'topic_slug' => $topicSlug, 'topic_label' => $topicLabel, 'description' => $description]);
+        $error  = HallTopicRules::firstError($fields);
+        if ($error !== null) {
+            return self::invalidValue($error);
+        }
+
+        $result = OnchainPlugin::instance()->hallProvisioningService()->provisionTopic($fields['name'], $fields['topic_slug'], $fields['topic_label'], $fields['description']);
 
         $hall = null;
         if (in_array($result['status'], ['created', 'incomplete'], true) && $result['group_id'] > 0) {
@@ -82,6 +90,25 @@ final class AdminHallsService
         }
 
         return [...$result, 'hall' => $hall];
+    }
+
+    /**
+     * One Hall, in any post status, for the admin edit page.
+     *
+     * @return array{hall: AdminHall}|array{error: string, message: string}
+     */
+    public function get(int $groupId): array
+    {
+        $isHall = HallRepository::isHallOrUnknown($groupId);
+        if ($isHall === null) {
+            return ['error' => 'bcc_unavailable', 'message' => "This Hall couldn't be read just now."];
+        }
+        $hall = $isHall ? ($this->adminHalls([$groupId])[0] ?? null) : null;
+        if ($hall === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Hall not found.'];
+        }
+
+        return ['hall' => $hall];
     }
 
     /**
@@ -93,14 +120,22 @@ final class AdminHallsService
      * does, a correct edit whose audit row could not be written is kept and
      * reported (`audit_degraded`), never silently undone.
      *
+     * The name/description write (PeepSo) and the topic-label write (post
+     * meta) are two writes, not one transaction: if the second fails after
+     * the first, the answer is 503 with the first part kept. An edit is
+     * idempotent, so resending the same body completes it.
+     *
      * @param array{name?: string, description?: string, topic_label?: string} $changes
-     * @return array{hall: AdminHall, audit_degraded: bool}|array{error: string, message: string}
+     * Every refusal carries `data.reason` (and `data.field` / `data.rule`
+     * for a bad value), which admin UIs key their copy on.
+     *
+     * @return array{hall: AdminHall, audit_degraded: bool}|array{error: string, message: string, data?: array<string, string>}
      */
     public function update(int $groupId, array $changes, int $adminId): array
     {
         $changes = array_map('trim', $changes);
         if ($changes === []) {
-            return ['error' => 'bcc_invalid_request', 'message' => 'Send a name, description or topic_label to change.'];
+            return ['error' => 'bcc_invalid_request', 'message' => 'Send a name, description or topic_label to change.', 'data' => ['reason' => 'nothing_to_change']];
         }
 
         $isHall = HallRepository::isHallOrUnknown($groupId);
@@ -115,7 +150,7 @@ final class AdminHallsService
 
         $refused = self::refusedChange($kind, $changes);
         if ($refused !== null) {
-            return ['error' => 'bcc_invalid_request', 'message' => $refused];
+            return ['error' => 'bcc_invalid_request', ...$refused];
         }
         if (!class_exists('\\PeepSoGroup')) {
             return ['error' => 'bcc_unavailable', 'message' => "Halls can't be edited just now. Nothing was changed."];
@@ -167,37 +202,63 @@ final class AdminHallsService
     }
 
     /**
-     * Why these changes are refused for a Hall of this kind, or null.
+     * Why these changes are refused for a Hall of this kind, or null: a
+     * message, and `data` with a machine-readable `reason` (`unknown_field`,
+     * `not_editable`, or `invalid_value` with the field and its rule).
      *
      * @param array<string, string> $changes
+     * @return array{message: string, data: array<string, string>}|null
      */
-    public static function refusedChange(?string $kind, array $changes): ?string
+    public static function refusedChange(?string $kind, array $changes): ?array
     {
-        $unknown = array_diff(array_keys($changes), ['name', 'description', 'topic_label']);
+        $unknown = array_values(array_diff(array_keys($changes), ['name', 'description', 'topic_label']));
         if ($unknown !== []) {
-            return 'Only name, description and topic_label can be changed.';
+            return ['message' => 'Only name, description and topic_label can be changed.', 'data' => ['reason' => 'unknown_field', 'field' => (string) $unknown[0]]];
         }
-        if ($kind === 'chain' && (isset($changes['name']) || isset($changes['topic_label']))) {
-            return "A chain Hall's name comes from its chain; only its description can change here.";
-        }
-        if ($kind !== 'topic' && isset($changes['topic_label'])) {
-            return 'This Hall has no topic to rename.';
+        $editable = self::editable($kind);
+        foreach (array_keys($changes) as $field) {
+            if (!$editable[$field]) {
+                return [
+                    'message' => $kind === 'chain'
+                        ? "A chain Hall's name comes from its chain; only its description can change here."
+                        : "Only a topic Hall's name and topic label can change here.",
+                    'data'    => ['reason' => 'not_editable', 'field' => $field],
+                ];
+            }
         }
 
-        return (isset($changes['name']) ? HallTopicRules::nameError($changes['name']) : null)
-            ?? (isset($changes['description']) ? HallTopicRules::descriptionError($changes['description']) : null)
-            ?? (isset($changes['topic_label']) ? HallTopicRules::labelError($changes['topic_label']) : null);
+        $error = HallTopicRules::firstError($changes);
+
+        return $error === null ? null : self::invalidValue($error);
     }
 
     /**
-     * Which fields an admin may change on a Hall of this kind.
+     * A field that breaks one of the rules, as a refusal.
+     *
+     * @param array{field: string, rule: string, message: string} $error
+     * @return array{error: string, message: string, data: array<string, string>}
+     */
+    private static function invalidValue(array $error): array
+    {
+        return [
+            'error'   => 'bcc_invalid_request',
+            'message' => $error['message'],
+            'data'    => ['reason' => 'invalid_value', 'field' => $error['field'], 'rule' => $error['rule']],
+        ];
+    }
+
+    /**
+     * Which fields an admin may change on a Hall of this kind. A Hall's name
+     * is editable only when it is known to be a topic Hall: a chain Hall's
+     * name comes from its chain, and a Hall whose kind is unknown (or has
+     * neither kind) fails closed to its description only.
      *
      * @return array{name: bool, description: bool, topic_label: bool}
      */
     public static function editable(?string $kind): array
     {
         return [
-            'name'        => $kind !== 'chain',
+            'name'        => $kind === 'topic',
             'description' => true,
             'topic_label' => $kind === 'topic',
         ];
@@ -238,9 +299,7 @@ final class AdminHallsService
                 'topic'        => $facts === null ? null : ($facts[$id]['topic'] ?? null),
                 'chain'        => $chains[$id] ?? null,
                 'member_count' => (int) $row->member_count,
-                'editable'     => $facts === null
-                    ? ['name' => false, 'description' => true, 'topic_label' => false]
-                    : self::editable($kind),
+                'editable'     => self::editable($kind),
                 'links'        => ['self' => '/communities/' . $row->post_name],
             ];
         }
