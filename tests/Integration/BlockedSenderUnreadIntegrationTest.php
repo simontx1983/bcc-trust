@@ -20,13 +20,19 @@ use PHPUnit\Framework\TestCase;
  * only place the SQL actually runs.
  *
  * ⚠ THREE PREDICATES CANNOT BE PROVEN FROM LIVE DATA, which is why they
- * are seeded explicitly below. Measured read-only on 2026-11-10:
- * production and staging both hold ZERO rows in `wp_peepso_blocks` and
- * ZERO muted participant rows, and exactly ONE viewer with any unread
- * message. So the live parity check (old count == new count) is true but
- * samples one viewer and exercises neither the block clause, the muted
- * clause, nor the deleted-participant clause. Everything that matters
- * about this change has to be constructed.
+ * are seeded explicitly below. Blocks, muted participants and deleted
+ * participants are all states a deployment can simply not be in, and a
+ * parity check (old count == new count) over data that holds none of them
+ * passes without ever reaching the block clause, the muted clause or the
+ * deleted-participant clause. A green parity check is therefore evidence
+ * about the data, not about the predicate: everything that matters about
+ * this change has to be constructed.
+ *
+ * ⚠ Deliberately no counts. This repository is public, so a figure
+ * measured against an environment does not belong in it even as a
+ * comment; what justifies these fixtures is the shape of the query, which
+ * is verifiable from the code. Any measurement belongs in the private
+ * tracker.
  *
  * ── FIXTURE OWNERSHIP, and why it is this fiddly ────────────────────
  *

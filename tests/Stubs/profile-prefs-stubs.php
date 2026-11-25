@@ -189,6 +189,32 @@ namespace BCC\Trust\Core\Support {
         }
     }
 
+    // ⚠ F-270: the groups switch reads through ProfileAccess, whose gate
+    // resolves the §F-02 exemption FOR THE VIEWER BEING SERVED -- so both
+    // of these are now reachable from this namespace. Neither existed
+    // here in any namespace, so the call fatalled rather than answering.
+    //
+    // Modelled on profile-section-visibility-stubs.php, which carries the
+    // same pair for the same reason. Minimal on purpose: NO request user
+    // and NO admin, so no suite gains a privileged viewer it did not
+    // already have. A suite that wants one shadows these itself.
+    if (!function_exists(__NAMESPACE__ . '\get_current_user_id')) {
+        function get_current_user_id(): int
+        {
+            return 0;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\user_can')) {
+        /** @param mixed $user */
+        function user_can($user, string $capability, ...$args): bool
+        {
+            unset($user, $capability, $args);
+
+            return false;
+        }
+    }
+
     if (!function_exists(__NAMESPACE__ . '\get_option')) {
         /**
          * @param  mixed $default

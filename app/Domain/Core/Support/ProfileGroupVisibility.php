@@ -109,7 +109,11 @@ final class ProfileGroupVisibility
             return $contexts;
         }
 
-        $showGroups = ProfileAccess::showsGroupsOnProfile($ownerId);
+        // ⚠ The viewer goes with it, so an unreadable flag hides
+        // rather than publishing the groups of a member who opted out.
+        // viewerSeesEverything() has already answered the owner and the
+        // exempt, so this is the strict answer by the time it is asked.
+        $showGroups = ProfileAccess::showsGroupsOnProfile($ownerId, $viewerId);
         $anonymous  = $viewerId <= 0;
         // ONE read for the whole page, after the owner and admin
         // short-circuits above — neither of them is filtered, so neither
@@ -191,7 +195,14 @@ final class ProfileGroupVisibility
             return true;
         }
 
-        return ProfileAccess::viewerIsExemptFromVisibility();
+        // ⚠ Resolved for the VIEWER BEING SERVED. This read the
+        // REQUEST's user, which is the right answer only when the two
+        // are the same person. `getSummary($id, 0)` deliberately
+        // composes for an anonymous viewer while an admin may be the
+        // one asking, and the request user's exemption then skipped
+        // this whole filter for a viewer who has none. See
+        // {@see ProfileAccess::exemptFor()}, the one copy of the rule.
+        return ProfileAccess::exemptFor($viewerId);
     }
 
     /**

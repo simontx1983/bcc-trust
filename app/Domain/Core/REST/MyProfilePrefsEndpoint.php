@@ -666,7 +666,19 @@ final class MyProfilePrefsEndpoint
             ),
             // ⚠ default TRUE, unlike every other flag here — see the
             // header note and ProfileAccess::showsGroupsOnProfile().
-            'show_groups_on_profile'    => self::flag($userId, ProfileAccess::META_SHOW_GROUPS, true),
+            //
+            // Read through the SAME reader the profile gate uses, like
+            // `hide_from_search` and `hidden_hall_ids` above, so the
+            // switch cannot show a state that differs from the one being
+            // enforced. The gate itself cannot serve this field: it
+            // answers true for the owner by construction, and the owner
+            // is who is asking here — so this takes the UNGATED reader
+            // and applies the owner's own answer.
+            //
+            // ⚠ Unreadable reports OFF, matching what the gate is doing
+            // to their profile at that moment. Reporting ON would tell a
+            // member their groups are listed while they are withheld.
+            'show_groups_on_profile'    => ProfileAccess::showsGroupsOnProfileOrUnknown($userId) ?? false,
             // F-341 — all default ON. ⚠ The last two are INVERTED reads of
             // §K2 flags, not their own storage; see the header.
             'show_about_on_profile'         => self::flag($userId, 'bcc_show_about_on_profile', true),

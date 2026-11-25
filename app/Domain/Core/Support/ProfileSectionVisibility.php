@@ -145,7 +145,10 @@ final class ProfileSectionVisibility
             return;
         }
 
-        UserMetaRepository::valuesOrUnknown(array_keys($ids), array_values(self::SHOW_META));
+        UserMetaRepository::valuesOrUnknown(
+            array_keys($ids),
+            array_merge(array_values(self::SHOW_META), [ProfileAccess::META_SHOW_GROUPS])
+        );
     }
 
     /**
@@ -172,10 +175,7 @@ final class ProfileSectionVisibility
         // be composed for one member while another is signed in, and an
         // async or fan-out build has no current user at all. So the
         // exemption is resolved for the VIEWER being served.
-        $exempt = $viewerId === get_current_user_id()
-            ? ProfileAccess::viewerIsExemptFromVisibility()
-            : ProfileAccess::userIsExemptFromVisibility($viewerId);
-        if ($exempt) {
+        if (ProfileAccess::exemptFor($viewerId)) {
             return false;
         }
 
@@ -185,8 +185,13 @@ final class ProfileSectionVisibility
         }
 
         // Halls: one implementation, F-270's. See SHOW_META's note.
+        //
+        // ⚠ The viewer goes WITH it. That gate resolves the owner and
+        // the exemption itself, which the two short-circuits above have
+        // already settled for this call — harmless, and it is what lets
+        // the gate be correct for a caller that has not.
         if ($section === self::SECTION_HALLS) {
-            return !ProfileAccess::showsGroupsOnProfile($ownerId);
+            return !ProfileAccess::showsGroupsOnProfile($ownerId, $viewerId);
         }
 
         if (!isset(self::SHOW_META[$section])) {
@@ -234,76 +239,19 @@ final class ProfileSectionVisibility
     /**
      * Read one `bcc_show_*` flag. ABSENT MEANS ON.
      *
-     * ⚠ The permissive default is the whole point: these switches preserve
-     * today's behaviour until a member opts out, so a missing meta row must
-     * never read as "hidden" — that would blank the profile of every
-     * account that has never opened the setting.
-     *
-     * `'1'`/`1`/`'true'` are ON. ABSENT or '' is ON — that is the
-     * permissive default, and it is the case that matters, because it is
-     * every account that has never opened the setting.
-     *
-     * ⚠ AN UNRECOGNISED VALUE HIDES, because `filter_var` without
-     * NULL_ON_FAILURE answers false for it. That is deliberate rather than
-     * ideal: it is EXACTLY what F-270's
-     * {@see ProfileAccess::showsGroupsOnProfile()} already does, and the
-     * Halls section delegates there — so treating unrecognised values more
-     * permissively here would make the five show-switches disagree with
-     * each other on corrupt data. Unreachable in practice: the only writer
-     * stores "1"/"0". If this is ever revisited, change BOTH or neither.
-     *
-     * ⚠⚠ AND IT MUST BE ABLE TO SAY "I DO NOT KNOW", which a plain
-     * `get_user_meta()` cannot: that answers '' both for "no row" and
-     * for "the read did not happen". Those two need different
-     * answers here, because one of them means ON.
-     *
-     * ⇒ So the flag is read through bcc-core's
-     * `UserMetaRepository::valuesOrUnknown()`, which answers null when
-     * the read cannot be trusted. Same seam, same memo, and the same
-     * strictest-row rule `PrivacySettings::flagOrUnknown()` already
-     * uses for the §K2 flags — those were made fail-closed first, and
-     * this brings the show-flags alongside them.
+     * ⭐ DELEGATED, not implemented here. This reader and its
+     * strictest-row rule now live on {@see ProfileAccess::showFlagOrUnknown()},
+     * beside the meta keys, because F-270's groups switch needs the SAME
+     * reader and its own copy was the one still failing open. The
+     * docblock this replaces had to say "it is EXACTLY what F-270's
+     * showsGroupsOnProfile() already does … change BOTH or neither" — a
+     * comment standing in for a mechanism. There is now one reader, so
+     * the five switches cannot disagree.
      *
      * @return bool|null true shown, false hidden, null NOT READ
      */
     private static function showFlagOrUnknown(int $ownerId, string $metaKey): ?bool
     {
-        $values = UserMetaRepository::valuesOrUnknown([$ownerId], [$metaKey]);
-        if ($values === null) {
-            return null;
-        }
-
-        return self::strictestShow($values[$ownerId][$metaKey] ?? []);
-    }
-
-    /**
-     * Strictest row wins, in the direction that hides.
-     *
-     * WordPress allows several rows per (user, key);
-     * `update_user_meta()` rewrites them all, so they only diverge when
-     * something called `add_user_meta()` directly.
-     * `PrivacySettings::strictest()` resolves its HIDE flags the same
-     * way — any ON row hides — and this is that rule for a SHOW flag,
-     * which is why the comparison is inverted: any row that does not
-     * say ON hides the section.
-     *
-     * An empty row is NO PREFERENCE rather than an OFF vote, so it is
-     * skipped — exactly the ABSENT-MEANS-ON case, which is every
-     * account that has never opened the setting.
-     *
-     * @param list<string> $rows
-     */
-    private static function strictestShow(array $rows): bool
-    {
-        foreach ($rows as $raw) {
-            if (trim($raw) === '') {
-                continue;
-            }
-            if (!filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
-                return false;
-            }
-        }
-
-        return true;
+        return ProfileAccess::showFlagOrUnknown($ownerId, $metaKey);
     }
 }

@@ -91,6 +91,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Support;
 
+use BCC\Core\Repositories\UserMetaRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
@@ -506,13 +507,30 @@ final class ProfileAccess
     }
 
     /**
-     * "Show my groups on my profile" (F-270).
+     * "Show my groups on my profile" (F-270) — THE GATE.
      *
      * ⚠ ABSENT MEANS ON. The decision was to default to today's
      * behaviour, so a member who has never touched the setting keeps
      * their groups listed; only an explicit falsey value hides them.
      * That makes this the one profile-privacy read in this class whose
      * default is PERMISSIVE, which is why it says so loudly.
+     *
+     * ⚠⚠ "ABSENT" AND "I COULD NOT READ IT" ARE NOT THE SAME ANSWER,
+     * and treating them alike is what this gate fixes. A `get_user_meta()`
+     * answers `''` for both, so an unreadable row took the permissive
+     * default and PUBLISHED the groups of a member who had opted out —
+     * the setting failed in the direction that disclosed. It now reads
+     * through {@see showsGroupsOnProfileOrUnknown()}, which can say null,
+     * and an unreadable read HIDES for every viewer the setting applies
+     * to. Same seam and same rule as the four F-341 show-flags.
+     *
+     * The owner and an exempt viewer are answered before the read and so
+     * are never hidden from: the owner chose the setting and must see
+     * what it is doing, and an admin keeps the §F-02 exemption so a
+     * moderator's view cannot differ between surfaces. The exemption is
+     * resolved for the VIEWER BEING SERVED, not the request's user — a
+     * card list can be composed for one member while another is signed
+     * in, and a fan-out build has no current user at all.
      *
      * The companion rules - secret groups never shown to non-members,
      * holder/delegator groups shown to signed-in viewers only - do NOT
@@ -521,18 +539,141 @@ final class ProfileAccess
      * them; a surface reading this flag on its own would reimplement
      * half the policy.
      */
-    public static function showsGroupsOnProfile(int $ownerId): bool
+    public static function showsGroupsOnProfile(int $ownerId, int $viewerId): bool
+    {
+        if ($ownerId <= 0) {
+            return false;
+        }
+        if ($viewerId > 0 && $viewerId === $ownerId) {
+            return true;
+        }
+        if (self::exemptFor($viewerId)) {
+            return true;
+        }
+
+        // A read that could not be trusted HIDES. The owner and the
+        // exempt returned above, so this is only ever the answer given
+        // to a viewer the setting actually applies to.
+        return self::showsGroupsOnProfileOrUnknown($ownerId) ?? false;
+    }
+
+    /**
+     * The member's OWN stored "show my groups" setting — UNGATED.
+     *
+     * ⚠⚠ THIS IS NOT WHAT A PROFILE PAYLOAD MAY ASK. It answers "what
+     * did this member choose", with no view of who is asking, so routing
+     * a viewer-facing decision through it reopens exactly the hole
+     * {@see showsGroupsOnProfile()} closes. That gate is the only thing
+     * entitled to decide whether a given viewer may see the groups.
+     *
+     * It exists for the one caller that legitimately needs the raw
+     * choice: the member's own prefs form, which must show the switch as
+     * STORED. The gate cannot serve it — the gate answers true for the
+     * owner by construction, so a form reading the gate would show every
+     * member their switch as ON whatever they had chosen.
+     *
+     * ⚠ null means NOT READ, and a caller must decide for itself. The
+     * prefs form reports it as off, matching what the gate is doing to
+     * the member's profile at that moment; reporting on would tell them
+     * their groups are listed while they are being withheld.
+     *
+     * @return bool|null true shown, false hidden, null NOT READ
+     */
+    public static function showsGroupsOnProfileOrUnknown(int $ownerId): ?bool
     {
         if ($ownerId <= 0) {
             return false;
         }
 
-        $raw = get_user_meta($ownerId, self::META_SHOW_GROUPS, true);
-        if (!is_string($raw) || $raw === '') {
-            return true;
+        return self::showFlagOrUnknown($ownerId, self::META_SHOW_GROUPS);
+    }
+
+    /**
+     * Read one `bcc_show_*` profile switch. ABSENT MEANS ON.
+     *
+     * ⭐ ONE reader for all five switches — F-270's groups flag and
+     * F-341's four. It arrived with F-341 as a private method on
+     * {@see ProfileSectionVisibility} whose docblock had to warn "it is
+     * EXACTLY what F-270's showsGroupsOnProfile() already does … if this
+     * is ever revisited, change BOTH or neither". That warning was the
+     * duplication asking to be removed: F-270's copy was the one that
+     * still failed open, and a comment is not a mechanism. The reader now
+     * lives beside the meta keys it reads and the section class delegates
+     * here, so the five switches cannot disagree on corrupt or
+     * unreadable data because there is only one of them.
+     *
+     * `'1'`/`1`/`'true'` are ON. ABSENT or '' is ON — the permissive
+     * default, and the case that matters, because it is every account
+     * that has never opened the setting.
+     *
+     * ⚠ AN UNRECOGNISED VALUE HIDES, because `filter_var` without
+     * NULL_ON_FAILURE answers false for it. Deliberate rather than ideal,
+     * and unreachable in practice: the only writers store "1"/"0".
+     *
+     * ⚠⚠ AND IT MUST BE ABLE TO SAY "I DO NOT KNOW", which
+     * `get_user_meta()` cannot: that answers '' both for "no row" and for
+     * "the read did not happen", and here one of those means ON. So the
+     * flag is read through bcc-core's
+     * `UserMetaRepository::valuesOrUnknown()`, which answers null when
+     * the read cannot be trusted — same memo, and the same strictest-row
+     * rule `PrivacySettings::flagOrUnknown()` uses for the §K2 flags.
+     *
+     * @return bool|null true shown, false hidden, null NOT READ
+     */
+    public static function showFlagOrUnknown(int $ownerId, string $metaKey): ?bool
+    {
+        $values = UserMetaRepository::valuesOrUnknown([$ownerId], [$metaKey]);
+        if ($values === null) {
+            return null;
         }
 
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        return self::strictestShow($values[$ownerId][$metaKey] ?? []);
+    }
+
+    /**
+     * Strictest row wins, in the direction that hides.
+     *
+     * WordPress allows several rows per (user, key); `update_user_meta()`
+     * rewrites them all, so they only diverge when something called
+     * `add_user_meta()` directly. `PrivacySettings::strictest()` resolves
+     * its HIDE flags the same way — any ON row hides — and this is that
+     * rule for a SHOW flag, which is why the comparison is inverted: any
+     * row that does not say ON hides.
+     *
+     * An empty row is NO PREFERENCE rather than an OFF vote, so it is
+     * skipped — exactly the ABSENT-MEANS-ON case.
+     *
+     * @param list<string> $rows
+     */
+    private static function strictestShow(array $rows): bool
+    {
+        foreach ($rows as $raw) {
+            if (trim($raw) === '') {
+                continue;
+            }
+            if (!filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * The §F-02 exemption, resolved for the VIEWER BEING SERVED.
+     *
+     * ⚠ Not `viewerIsExemptFromVisibility()` unconditionally: that reads
+     * the REQUEST's user, which is only the right answer when the viewer
+     * being served IS the request's user. Asked about anybody else it
+     * grants the request user's exemption to a viewer who does not have
+     * it — and that direction DISCLOSES. One copy, shared by every gate
+     * in this class and by the two that delegate to it.
+     */
+    public static function exemptFor(int $viewerId): bool
+    {
+        return $viewerId === get_current_user_id()
+            ? self::viewerIsExemptFromVisibility()
+            : self::userIsExemptFromVisibility($viewerId);
     }
 
     /**

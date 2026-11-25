@@ -47,7 +47,7 @@ declare(strict_types=1);
 
 namespace {
     /**
-     * @return array{is_admin: bool, show_groups: array<int, string>, memberships: array<int, true>, membership_calls: list<array<string, mixed>>}
+     * @return array{is_admin: bool, admin_ids: list<int>, show_groups: array<int, string>, memberships: array<int, true>, membership_calls: list<array<string, mixed>>}
      */
     function bcc_pgv_fixture(): array
     {
@@ -55,6 +55,11 @@ namespace {
 
         return [
             'is_admin'         => (bool) ($f['is_admin'] ?? false),
+            // ⚠ `is_admin` models the REQUEST's user; this asks about a
+            // GIVEN one, which is a different question. The exemption is
+            // resolved for the VIEWER being served, so a world with an
+            // admin VIEWER has to say which id that is.
+            'admin_ids'        => is_array($f['admin_ids'] ?? null) ? $f['admin_ids'] : [],
             'show_groups'      => is_array($f['show_groups'] ?? null) ? $f['show_groups'] : [],
             'memberships'      => is_array($f['memberships'] ?? null) ? $f['memberships'] : [],
             'membership_calls' => is_array($f['membership_calls'] ?? null) ? $f['membership_calls'] : [],
@@ -138,8 +143,14 @@ namespace BCC\Trust\Core\Support {
     if (!\function_exists('BCC\Trust\Core\Support\user_can')) {
         function user_can($user, string $capability, ...$args): bool
         {
-            return \function_exists('user_can')
-                && \user_can($user, $capability, ...$args);
+            if (!isset($GLOBALS['__bcc_pgv'])) {
+                return \function_exists('user_can')
+                    && \user_can($user, $capability, ...$args);
+            }
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $capability === 'manage_options'
+                && in_array($id, \bcc_pgv_fixture()['admin_ids'], true);
         }
     }
     if (!\function_exists('BCC\Trust\Core\Support\get_user_meta')) {

@@ -112,15 +112,85 @@ final class ProfileGroupVisibilityTest extends TestCase
         );
     }
 
-    /** ⭐ CONTROL. The F-02 admin exemption reaches this surface too. */
+    /**
+     * ⭐ CONTROL. The F-02 admin exemption reaches this surface too.
+     *
+     * ⚠ THE ADMIN IS THE VIEWER, named by id. This used to set
+     * `is_admin` -- the REQUEST's user -- and assert that VIEWER, who was
+     * never said to be an admin, saw everything. It passed because the
+     * exemption was read off the request's user, which is the fail-open
+     * this test now cannot express. See
+     * {@see testANonAdminViewerDoesNotInheritTheRequestUsersExemption()}.
+     */
     public function testAnAdminSeesEverything(): void
     {
-        $GLOBALS['__bcc_pgv']['is_admin']    = true;
+        $GLOBALS['__bcc_pgv']['admin_ids']   = [self::VIEWER];
         $GLOBALS['__bcc_pgv']['show_groups'] = [self::OWNER => '0'];
 
         $out = ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER);
 
         self::assertCount(5, $out);
+    }
+
+    /**
+     * ⚠⚠ AN UNREADABLE TOGGLE HIDES. The flag was read with a bare
+     * `get_user_meta()`, which answers '' for "no row" AND for "the read
+     * did not happen" -- and for this one switch absent means ON. So an
+     * unreadable row took the permissive branch and published the groups
+     * of a member who had turned them off. It now reads through
+     * `ProfileAccess::showsGroupsOnProfile()`, which can tell the two
+     * apart, and an unreadable read lands on the toggle-OFF rule: halls
+     * survive, nothing else does.
+     */
+    public function testAnUnreadableToggleIsTreatedAsOff(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable[self::OWNER] = true;
+
+        $out = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertSame([self::G_HALL], $out);
+    }
+
+    /**
+     * ⭐ CONTROL for the case above. With the read WORKING and nothing
+     * stored, the kinds the other rules allow still survive -- so that
+     * assertion is about the failed read, not about `filter()` dropping
+     * groups whatever happens.
+     */
+    public function testAWorkingReadWithNothingStoredKeepsTheGroups(): void
+    {
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
+
+        $out = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertContains(self::G_PLAIN, $out, 'absent means ON, so a plain group survives');
+        self::assertContains(self::G_HALL, $out);
+    }
+
+    /**
+     * ⚠⚠ The exemption belongs to the VIEWER BEING SERVED, never to
+     * whoever happens to be signed in.
+     *
+     * An admin can trigger a render composed FOR someone else -- a card
+     * list built for one member while another is signed in, or an
+     * author block deliberately composed for viewer 0 -- and the
+     * request user's exemption must not travel with it. It did: the
+     * filter read `viewerIsExemptFromVisibility()`, which asks about the
+     * request's user whoever the viewer is, so an admin's request
+     * published a member's hidden groups to a viewer entitled to none of
+     * them.
+     */
+    public function testANonAdminViewerDoesNotInheritTheRequestUsersExemption(): void
+    {
+        // The REQUEST's user is an admin, the VIEWER is not.
+        $GLOBALS['__bcc_pgv']['is_admin']    = true;
+        $GLOBALS['__bcc_pgv']['admin_ids']   = [];
+        $GLOBALS['__bcc_pgv']['show_groups'] = [self::OWNER => '0'];
+
+        $out = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        // Toggle off: halls survive, nothing else does.
+        self::assertSame([self::G_HALL], $out);
     }
 
     // ── the toggle ──────────────────────────────────────────────────
@@ -381,7 +451,7 @@ final class ProfileGroupVisibilityTest extends TestCase
     /** ⭐ CONTROL. An admin keeps the §F-02 exemption here too. */
     public function testAnAdminStillSeesAHiddenHall(): void
     {
-        $GLOBALS['__bcc_pgv']['is_admin'] = true;
+        $GLOBALS['__bcc_pgv']['admin_ids'] = [self::VIEWER];
         self::hideForOwner([self::G_HALL]);
 
         $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
@@ -510,7 +580,7 @@ final class ProfileGroupVisibilityTest extends TestCase
     /** ⭐ CONTROL. The §F-02 admin exemption reaches the chip too. */
     public function testAnAdminStillSeesAHiddenChip(): void
     {
-        $GLOBALS['__bcc_pgv']['is_admin'] = true;
+        $GLOBALS['__bcc_pgv']['admin_ids'] = [self::VIEWER];
         self::hideForOwner([self::G_HALL]);
 
         self::assertFalse(
