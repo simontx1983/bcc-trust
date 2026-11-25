@@ -39,6 +39,11 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 return $GLOBALS['__f521']['chain_id'];
             }
+
+            public static function resolveIdAnyState(string $slug): ?int
+            {
+                return $GLOBALS['__f521']['chain_id_any'] ?? null;
+            }
         }
     }
     if (!class_exists(__NAMESPACE__ . '\\ClaimRepository', false)) {

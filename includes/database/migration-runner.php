@@ -468,6 +468,22 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_wallet_signup_unverified_emails_released',
                 'callback'    => 'bcc_trust_release_wallet_signup_unverified_emails',
             ],
+            // THORChain's and Polkadot's chain rows still on a retired seeded
+            // endpoint (one that no longer serves their validator list) move
+            // to the live default, so their validator index runs again. A
+            // customised row is never touched. Separate entries, so one
+            // chain's outage cannot hold the other back. See
+            // repoint-validator-feed-endpoints.php.
+            [
+                'id'          => 'repoint_thorchain_endpoint_v1',
+                'done_option' => 'bcc_trust_thorchain_endpoint_repointed_v1',
+                'callback'    => 'bcc_trust_repoint_thorchain_endpoint',
+            ],
+            [
+                'id'          => 'repoint_polkadot_endpoint_v1',
+                'done_option' => 'bcc_trust_polkadot_endpoint_repointed_v1',
+                'callback'    => 'bcc_trust_repoint_polkadot_endpoint',
+            ],
         ];
     }
 

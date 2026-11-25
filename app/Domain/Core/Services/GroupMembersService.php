@@ -30,6 +30,12 @@
  *   4. Hydrate user_ids via {@see UserViewService::getSummary} with
  *      the SAME prefetched-batch shape the /members directory uses
  *      — collapses N+1 to bounded SQL across the page.
+ *   5. Each item's `card`: the member Card the /members directory shows,
+ *      from the SAME builder (CardViewService::getMemberCardForList) and
+ *      the same MemberCardPrefetcher bundle, for this viewer. `null` for a
+ *      member whose card the directory would not show this viewer
+ *      (ProfileAccess::filterVisible: a private profile, a suspended
+ *      account, a block), or whose card could not be built.
  *
  * Per §1 the only DB seam is repositories. Per §8 the return value is
  * a plain array; the endpoint wraps it in ApiResponse::ok().
@@ -44,7 +50,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
@@ -131,12 +137,12 @@ final class GroupMembersService
         $hasMore = ($offset + count($rows)) < $total;
 
         // ── 3b. An open roster omits members this viewer may not see. ─
-        $rows = self::rowsTheViewerMaySee($ctx->privacy, $rows, $viewerId, $groupId);
+        [$rows, $visible] = self::visibleRows($ctx->privacy, $rows, $viewerId, $groupId);
 
-        // ── 4. Bulk-prime UserSummary prefetch maps. ─────────────────
-        // Mirrors `UsersEndpoint::members` exactly so the wire shape
-        // for `getSummary` stays identical across the directory and
-        // the per-group roster.
+        // ── 4. Bulk-prime the member-card prefetch. ──────────────────
+        // The SAME bundle `UsersEndpoint::members` primes: a superset of
+        // the MemberSummaryPrefetcher map getSummary reads, plus the
+        // card-level reads, so the tile and the card share one batch.
         $userIds = [];
         foreach ($rows as $row) {
             $uid = (int) $row->user_id;
@@ -145,11 +151,24 @@ final class GroupMembersService
             }
         }
 
-        $prefetched = $userIds === [] ? null : MemberSummaryPrefetcher::primeFor($userIds);
+        $prefetched = $userIds === [] ? null : MemberCardPrefetcher::primeFor($userIds, $viewerId);
+
+        // ── 4b. Whose card this viewer may see: the directory's rule
+        //     (ProfileAccess::filterVisible, without the search opt-out,
+        //     as for the rows), read once for the page. An open roster's
+        //     rows were already judged by it; owner and manager views, and
+        //     closed and secret rosters, show every tile, so their cards
+        //     are judged here.
+        if ($visible === null) {
+            $visible = $userIds === [] ? [] : array_fill_keys(ProfileAccess::filterVisible($userIds, false), true);
+        }
+        $cards   = Plugin::instance()->cardViewService();
+        $mentors = $userIds === [] ? [] : Plugin::instance()->mentorListingService()->listedAmong($userIds);
 
         // ── 5. Hydrate each row. ─────────────────────────────────────
-        $userView = Plugin::instance()->userViewService();
-        $items    = [];
+        $userView      = Plugin::instance()->userViewService();
+        $withJoinTimes = self::seesJoinTimes($viewerId);
+        $items         = [];
         foreach ($rows as $row) {
             $userId = (int) $row->user_id;
             if ($userId <= 0) {
@@ -165,12 +184,20 @@ final class GroupMembersService
                 continue;
             }
 
-            $role      = \BCC\Trust\Core\Support\GroupRole::normalize((string) $row->role);
-            $items[]   = array_merge($summary, [
-                'role'       => $role,
-                'role_label' => \BCC\Trust\Core\Support\GroupRole::label($role),
-                'joined_at'  => self::joinedAtIso($row),
-            ]);
+            $item         = array_merge($summary, self::rosterFields($row, $withJoinTimes));
+            $item['card'] = isset($visible[$userId])
+                ? self::cardOrNull(
+                    static fn (): ?array => $cards->getMemberCardForList($userId, $viewerId, $prefetched),
+                    $userId,
+                    $groupId
+                )
+                : null;
+            // The directory's §21.4 mentor badge, added the same way: only
+            // for actively listed mentors (UsersEndpoint::members).
+            if ($item['card'] !== null && isset($mentors[$userId])) {
+                $item['card']['is_mentor'] = true;
+            }
+            $items[] = $item;
         }
 
         return [
@@ -205,17 +232,23 @@ final class GroupMembersService
      * ⚠ filterVisible() judges the CURRENT user, so this is correct only
      * for the REST caller, whose viewer is the current user.
      *
+     * Returns the rows this viewer may see, and the visible set it read
+     * when it filtered: member id => true, or null when the rows were not
+     * filtered (closed and secret rosters, this group's own admins, an
+     * empty page). listMembers() reuses the set to gate the cards, so an
+     * open roster judges its members once.
+     *
      * @template TRow of object{user_id: numeric-string}
      * @param list<TRow> $rows
-     * @return list<TRow>
+     * @return array{0: list<TRow>, 1: array<int, true>|null}
      */
-    private static function rowsTheViewerMaySee(PeepSoPrivacy $privacy, array $rows, int $viewerId, int $groupId): array
+    private static function visibleRows(PeepSoPrivacy $privacy, array $rows, int $viewerId, int $groupId): array
     {
         if ($privacy !== PeepSoPrivacy::Open || $rows === []) {
-            return $rows;
+            return [$rows, null];
         }
         if (GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
-            return $rows;
+            return [$rows, null];
         }
 
         $ids = [];
@@ -226,12 +259,72 @@ final class GroupMembersService
             }
         }
 
-        $visible = array_flip(ProfileAccess::filterVisible($ids, false));
+        $visible = array_fill_keys(ProfileAccess::filterVisible($ids, false), true);
 
-        return array_values(array_filter(
-            $rows,
-            static fn (object $row): bool => isset($visible[(int) $row->user_id])
-        ));
+        return [
+            array_values(array_filter(
+                $rows,
+                static fn (object $row): bool => isset($visible[(int) $row->user_id])
+            )),
+            $visible,
+        ];
+    }
+
+    /**
+     * One member's card, or null when building it failed: that item keeps
+     * its tile fields and shows no card, and the rest of the roster is
+     * unaffected (fail closed per item). A read that could not be trusted
+     * throws a \RuntimeException (RepositoryReadFailure among them), which
+     * is logged here. A PHP \Error is a bug and is not caught.
+     *
+     * @param \Closure(): (array<string, mixed>|null) $build
+     * @return array<string, mixed>|null
+     */
+    private static function cardOrNull(\Closure $build, int $userId, int $groupId): ?array
+    {
+        try {
+            return $build();
+        } catch (\RuntimeException $e) {
+            \BCC\Core\Log\Logger::error('[GroupMembersService] member card could not be built; the roster item shows no card', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Whether this viewer receives when each member joined the group: site
+     * admins only (`manage_options`). Other users, this group's own owner
+     * and managers included, never receive a join time (R4). The roster's
+     * order (role, then join time) stays server-side.
+     */
+    private static function seesJoinTimes(int $viewerId): bool
+    {
+        return $viewerId > 0 && user_can($viewerId, 'manage_options');
+    }
+
+    /**
+     * The roster's own fields for one row: `role`, `role_label`, and
+     * `joined_at` only when {@see seesJoinTimes()}. The key is absent
+     * otherwise, not null, so nothing in the payload stands for it.
+     *
+     * @return array{role: string, role_label: string, joined_at?: string|null}
+     */
+    private static function rosterFields(object $row, bool $withJoinTimes): array
+    {
+        $role   = \BCC\Trust\Core\Support\GroupRole::normalize((string) ($row->role ?? ''));
+        $fields = [
+            'role'       => $role,
+            'role_label' => \BCC\Trust\Core\Support\GroupRole::label($role),
+        ];
+        if ($withJoinTimes) {
+            $fields['joined_at'] = self::joinedAtIso($row);
+        }
+
+        return $fields;
     }
 
     /**

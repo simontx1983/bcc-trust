@@ -40,8 +40,6 @@
 
 namespace BCC\Trust\Core\Support;
 
-use BCC\Trust\Core\ValueObjects\GroupType;
-
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -57,17 +55,21 @@ final class CardUrlMap
     ];
 
     /**
-     * Frontend route prefix for a group's canonical page, keyed by
-     * whether the group is a Hall. Halls live under /halls/{slug}
-     * (the union-hall directory); every other group kind (nft /
-     * validator / system / user) canonicalizes on /communities/{slug}.
+     * Frontend route prefix for every group's canonical page, Halls
+     * included (structure A, F-594): the frontend renders one page per
+     * group at /communities/{slug}, and a Hall's slug is its group slug.
+     * The old /halls/{slug} route only forwards (308) to it.
      *
-     * The thin `/groups/{slug}` FE route is retired: every non-hall
-     * group now resolves on the `/communities/` canonical route, and
-     * this composer is the single place that prefix is emitted.
+     * groupUrl() is the single place this prefix is emitted.
      */
-    public const HALL_URL_PREFIX      = '/halls/';
     public const COMMUNITY_URL_PREFIX = '/communities/';
+
+    /**
+     * Frontend route for the Halls list: Communities ▸ Halls (structure
+     * A). The fallback when a link to one Hall can't be built. The old
+     * /halls route only forwards (308) here.
+     */
+    public const HALLS_LIST_URL = '/communities?tab=halls';
 
     /**
      * Frontend route for the entity's canonical page (Next.js).
@@ -122,24 +124,26 @@ final class CardUrlMap
      * every emitter of a group link routes through here. The former
      * inline `'/halls/'`/`'/groups/'` builders in HallsService /
      * GroupsService / CardViewService / PushPayload have all been
-     * converged onto this composer, so the `/communities/` cutover is a
-     * single-site change.
+     * converged onto this composer, so a route cutover is a single-site
+     * change.
      *
-     * Routing rule (matches §4.7.x group `type`):
-     *   - hall  → /halls/{slug}
-     *   - else  → /communities/{slug}   (nft / validator / system / user)
+     * Routing rule: every kind → /communities/{slug} (hall / nft /
+     * validator / system / user). Halls moved there in structure A
+     * (F-594); they were /halls/{slug}.
      *
      * Identifier semantics:
      *   - $type → the GroupType enum VALUE (`$ctx->type->value`) — the
-     *     same string the feed `group.type` block emits.
+     *     same string the feed `group.type` block emits. No kind routes
+     *     differently today. It stays in the signature ON PURPOSE: every
+     *     caller passes (type, slug), and PHP accepts surplus arguments,
+     *     so a one-argument signature would silently read a caller's
+     *     type as the slug.
      *   - $slug → the group's `post_name` (WP-sanitized slug).
      */
     public static function groupUrl(string $type, string $slug): string
     {
-        $prefix = $type === GroupType::Hall->value
-            ? self::HALL_URL_PREFIX
-            : self::COMMUNITY_URL_PREFIX;
-        return $prefix . self::sanitizeSlug($slug);
+        unset($type);
+        return self::COMMUNITY_URL_PREFIX . self::sanitizeSlug($slug);
     }
 
     /**

@@ -307,7 +307,93 @@ final class ValidatorIndexShapeGuardsTest extends TestCase
         self::assertSame([['subsystem' => 'validator_index', 'event' => 'solana_shared_identity']], self::metrics());
         $warnings = array_values(array_filter(\BCC\Core\Log\Logger::$lines, static fn (array $l): bool => $l['level'] === 'warning'));
         self::assertCount(1, $warnings);
-        self::assertSame(['count' => 1], $warnings[0]['context']);
+        self::assertSame(['count' => 1, 'new' => 1], $warnings[0]['context']);
+    }
+
+    // ── Solana: a shared identity is counted when it BECOMES shared ─────
+
+    /** A fresh fetcher on its own RPC url (the vote set is cached per url) for the same chain. */
+    private static function solAt(string $rpc): SolanaFetcher
+    {
+        return new SolanaFetcher((object) [
+            'id' => 41, 'slug' => 'solana', 'name' => 'Solana', 'chain_type' => 'solana', 'rpc_url' => $rpc,
+        ]);
+    }
+
+    /** @return list<array<string, mixed>> NodeA sharing two vote accounts, NodeB alone */
+    private static function sharedSet(): array
+    {
+        return [self::voteWith('NodeAAAAAAAAAAAAAAAAAA', self::VOTE_A, 9), self::voteWith('NodeAAAAAAAAAAAAAAAAAA', self::VOTE_C, 2), self::voteWith('NodeBBBBBBBBBBBBBBBBBB', self::VOTE_B, 3)];
+    }
+
+    /** @return list<array<string, mixed>> */
+    private static function resolvedSet(): array
+    {
+        return [self::voteWith('NodeAAAAAAAAAAAAAAAAAA', self::VOTE_A, 9), self::voteWith('NodeBBBBBBBBBBBBBBBBBB', self::VOTE_B, 3)];
+    }
+
+    /** @return list<array{level: string, message: string, context: array<string, mixed>}> */
+    private static function warnings(): array
+    {
+        return array_values(array_filter(\BCC\Core\Log\Logger::$lines, static fn (array $l): bool => $l['level'] === 'warning'));
+    }
+
+    public function testAStillSharedIdentityIsNotCountedAgain(): void
+    {
+        self::queueVotes(self::sharedSet(), []);
+        self::queueVotes(self::sharedSet(), []);
+
+        self::solAt('https://rpc-1.example')->fetch_all_validators();
+        self::solAt('https://rpc-2.example')->fetch_all_validators();
+
+        self::assertCount(1, self::metrics(), 'counted once, when it became shared');
+        self::assertSame([['count' => 1, 'new' => 1], ['count' => 1, 'new' => 0]], array_column(self::warnings(), 'context'), 'logged on every run');
+    }
+
+    public function testAnIdentitySharedAgainAfterResolvingIsCountedAgain(): void
+    {
+        self::queueVotes(self::sharedSet(), []);
+        self::queueVotes(self::resolvedSet(), []);
+        self::queueVotes(self::sharedSet(), []);
+
+        self::solAt('https://rpc-1.example')->fetch_all_validators();
+        self::solAt('https://rpc-2.example')->fetch_all_validators();
+        self::assertSame([], \BccTestOptionStore::$options['bcc_solana_shared_identities_41'] ?? null, 'the set is replaced each run');
+        self::solAt('https://rpc-3.example')->fetch_all_validators();
+
+        self::assertCount(2, self::metrics());
+    }
+
+    public function testTheSetIsKeptPerChainAndNotAutoloaded(): void
+    {
+        self::queueVotes(self::sharedSet(), []);
+
+        self::solAt('https://rpc-1.example')->fetch_all_validators();
+
+        self::assertSame(['NodeAAAAAAAAAAAAAAAAAA'], \BccTestOptionStore::$options['bcc_solana_shared_identities_41'] ?? null);
+        self::assertFalse(\BccTestOptionStore::$autoload['bcc_solana_shared_identities_41'] ?? null);
+    }
+
+    public function testAnUnchangedSetIsNotRewritten(): void
+    {
+        self::queueVotes(self::sharedSet(), []);
+        self::queueVotes(self::sharedSet(), []);
+
+        self::solAt('https://rpc-1.example')->fetch_all_validators();
+        \BccTestOptionStore::$autoload = [];
+        self::solAt('https://rpc-2.example')->fetch_all_validators();
+
+        self::assertSame([], \BccTestOptionStore::$autoload, 'no write');
+    }
+
+    public function testAnUnreadableStoredSetCountsEveryShared(): void
+    {
+        \BccTestOptionStore::$options['bcc_solana_shared_identities_41'] = 'not a list';
+        self::queueVotes(self::sharedSet(), []);
+
+        self::solAt('https://rpc-1.example')->fetch_all_validators();
+
+        self::assertCount(1, self::metrics());
     }
 
     public function testSolanaTheSameVoteAccountListedTwiceIsNotShared(): void

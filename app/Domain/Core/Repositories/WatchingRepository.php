@@ -69,7 +69,7 @@ final class WatchingRepository
      *
      * @return list<WatchingItemRow>
      */
-    public function findItemsForUser(int $userId, int $offset, int $limit): array
+    public function findItemsForUser(int $userId, int $offset, int $limit, ?string $like = null): array
     {
         if ($userId <= 0) {
             return [];
@@ -82,6 +82,8 @@ final class WatchingRepository
         $watchMeta = TableRegistry::watchMeta();
         $users     = $wpdb->users;
         $usermeta  = $wpdb->usermeta;
+
+        [$matchSql, $matchArgs] = self::nameMatch($like);
 
         $sql = $wpdb->prepare(
             "SELECT
@@ -101,12 +103,11 @@ final class WatchingRepository
                 ON handle.user_id = uf.uf_passive_user_id
                AND handle.meta_key = 'bcc_handle'
             WHERE uf.uf_active_user_id = %d
-              AND " . self::ACTIVE_FOLLOW . "
+              AND " . self::ACTIVE_FOLLOW . $matchSql . "
             ORDER BY pm.watched_at DESC, uf.uf_id DESC
             LIMIT %d OFFSET %d",
             $userId,
-            $limit,
-            $offset
+            ...[...$matchArgs, $limit, $offset]
         );
         // ────────────────────────────────────────────────────────────
         //  Sort tiebreaker (LOCKED — never remove uf.uf_id DESC):
@@ -567,7 +568,7 @@ final class WatchingRepository
      * Single COUNT(*) on the active-follows table — no joins.
      * Drives `pagination.total` / `pagination.total_pages`.
      */
-    public function countItemsForUser(int $userId): int
+    public function countItemsForUser(int $userId, ?string $like = null): int
     {
         if ($userId <= 0) {
             return 0;
@@ -576,11 +577,50 @@ final class WatchingRepository
         global $wpdb;
         $follows = $wpdb->prefix . 'peepso_user_followers';
 
+        [$matchSql, $matchArgs] = self::nameMatch($like);
+
         return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$follows}
-              WHERE uf_active_user_id = %d
-                AND " . self::ACTIVE_FOLLOW,
-            $userId
+            "SELECT COUNT(*) FROM {$follows} uf
+              WHERE uf.uf_active_user_id = %d
+                AND " . self::ACTIVE_FOLLOW . $matchSql,
+            $userId,
+            ...$matchArgs
         ));
+    }
+
+    /**
+     * Structure A row 14: the watchlist search, on the followed member
+     * `uf.uf_passive_user_id`. `$like` is bcc-core's
+     * UserMetaRepository::nameQueryLike(); NULL is no filter.
+     *
+     * A followed member matches by what the list shows for them:
+     *   - their @handle, or their display name only where others see it
+     *     (bcc-core's shared filter, F-512: never a hidden real name);
+     *   - or the title or slug of one of their PUBLISHED, NON-SECRET pages,
+     *     the page a resolved item shows. A secret page's title is never
+     *     searched, so a search cannot reveal one.
+     *
+     * The caller checks that bcc-core has the filter before passing a
+     * `$like` (WatchingService::getWatching()).
+     *
+     * @return array{0: string, 1: list<string>}
+     */
+    private static function nameMatch(?string $like): array
+    {
+        if ($like === null) {
+            return ['', []];
+        }
+
+        global $wpdb;
+
+        return [
+            ' AND (' . \BCC\Core\Repositories\UserMetaRepository::publicNameMatchSql('uf.uf_passive_user_id')
+            . " OR EXISTS (SELECT 1 FROM {$wpdb->posts} AS bcc_wq_p"
+            . ' WHERE bcc_wq_p.post_author = uf.uf_passive_user_id'
+            . " AND bcc_wq_p.post_type = 'peepso-page' AND bcc_wq_p.post_status = 'publish'"
+            . ' AND ' . \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('bcc_wq_p.ID')
+            . ' AND (bcc_wq_p.post_title LIKE %s OR bcc_wq_p.post_name LIKE %s)))',
+            [$like, $like, $like, $like],
+        ];
     }
 }

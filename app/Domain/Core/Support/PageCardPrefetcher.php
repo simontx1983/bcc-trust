@@ -75,6 +75,8 @@ if (!defined('ABSPATH')) {
  *   operator_profiles: array<int, array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}>,
  *   page_entities: array<int, array{entity_type: string, entity_id: int}>,
  *   page_operators: array<int, array{state: string, user_id: int|null}>,
+ *   owner_methods: array<int, list<string>>,
+ *   viewer_team_roles: array<int, string>,
  *   page_activations: array<int, true>,
  *   message_eligibility: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
  *   delegator_groups: array<int, array{id: int, slug: string, url: string, min_stake: string, min_stake_display: string|null, validator: array{id: int, name: string, chain_slug: string, chain_name: string}}>
@@ -145,6 +147,8 @@ final class PageCardPrefetcher
             'operator_profiles'          => [],
             'page_entities'              => [],
             'page_operators'             => [],
+            'owner_methods'              => [],
+            'viewer_team_roles'          => [],
             'page_activations'           => [],
             'message_eligibility'        => [],
             'delegator_groups'           => [],
@@ -260,9 +264,13 @@ final class PageCardPrefetcher
         // downstream. Skipped entirely when the surface is disarmed.
         $pageOperators   = [];
         $pageActivations = [];
-        $profileOperators = $validatorPageIds !== []
-            ? ClaimRepository::resolveVerifiedOperatorForPages($validatorPageIds)
-            : [];
+        // The same single resolution, now also carrying how each page's
+        // owner proved it (the public owner_verification badge).
+        $resolved = $validatorPageIds !== []
+            ? ClaimRepository::resolveVerifiedOperatorsWithMethodsForPages($validatorPageIds)
+            : ['operators' => [], 'methods' => []];
+        $profileOperators = $resolved['operators'];
+        $ownerMethods     = $resolved['methods'];
         $operatorProfiles = $validatorPageIds !== []
             ? (new OperatorProfileRepository())->findPublicForResolvedPages($profileOperators)
             : [];
@@ -289,6 +297,7 @@ final class PageCardPrefetcher
 
         // ── 4. Viewer-keyed batches (skipped entirely for anon) ─────
         $viewerClaims       = [];
+        $viewerTeamRoles    = [];
         $viewerVotes        = [];
         $viewerAttestations = [];
         $endorseEligibility = [];
@@ -296,6 +305,9 @@ final class PageCardPrefetcher
             $plugin = Plugin::instance();
 
             $viewerClaims       = ClaimRepository::getUserClaimsForEntities($viewerId, 'page', $pageIds, PageClaimRolePolicy::OWNER_ROLES);
+            // The viewer's ACTIVE team roles on these pages
+            // (viewer_page_role): the team's own read, never an owner read.
+            $viewerTeamRoles    = ClaimRepository::activeTeamRolesOnPages($viewerId, $pageIds);
             $viewerVotes        = (new VoteRepository())->getVotedPageIdsForVoter($viewerId, $pageIds);
             // viewer_has_endorsed is derived from viewer_attestations below
             // (vouch slot non-null) — no separate endorsements batch since
@@ -359,6 +371,8 @@ final class PageCardPrefetcher
             'operator_profiles'          => $operatorProfiles,
             'page_entities'              => $pageEntities,
             'page_operators'             => $pageOperators,
+            'owner_methods'              => $ownerMethods,
+            'viewer_team_roles'          => $viewerTeamRoles,
             'page_activations'           => $pageActivations,
             'message_eligibility'        => $messageEligibility,
             'delegator_groups'           => $delegatorGroups,

@@ -71,7 +71,8 @@ if (!defined('ABSPATH')) {
  */
 final class RestRouteAllowlist
 {
-    public const CAPABILITY = 'manage_options';
+    /** The admin capability. BearerAuth owns the one literal every admin check reads. */
+    public const CAPABILITY = \BCC\Trust\Core\Support\BearerAuth::ADMIN_CAPABILITY;
 
     /** Before SuspendedWriteGate (20) and anything else that might answer. */
     public const PRIORITY = 1;

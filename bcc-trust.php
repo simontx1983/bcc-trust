@@ -226,6 +226,8 @@ require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles
 require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
 // F-294: release unverified wallet sign-up emails (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/release-wallet-signup-unverified-emails.php';
+// Repoint THORChain and Polkadot off retired seeded endpoints (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/repoint-validator-feed-endpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
@@ -704,6 +706,10 @@ add_action('bcc_trust_elite_eligibility_sweep', function () {
 add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
+// F-581: the PeepSo upkeep BCC depends on (trending hashtags, expired
+// mayfly rows, registration-avatar temp files). Only those three steps;
+// see Integration\PeepSoUpkeep.
+add_action(\BCC\Trust\Core\Integration\PeepSoUpkeep::CRON_HOOK, [\BCC\Trust\Core\Integration\PeepSoUpkeep::class, 'runScheduled']);
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
         \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
@@ -1140,9 +1146,16 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
+    }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
     }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
@@ -1294,6 +1307,25 @@ $bccClaimReverify = static function (): void {
 };
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
 add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
+
+// Validator relationships: align a page's PeepSo ownership to its claims
+// (one-off after a change, plus the bounded retry sweep). Cron only: no
+// current user.
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::HOOK, static function ($pageId): void {
+    \BCC\Trust\Onchain\Services\PageOwnershipAligner::align((int) $pageId);
+});
+add_action(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK, [\BCC\Trust\Onchain\Services\PageOwnershipAligner::class, 'sweep']);
+// The bells for a committed validator relationship change.
+add_action('bcc_validator_relationship_changed', static function (string $action, int $pageId, int $subjectUserId, ?int $actorId, int $linkId, array $replaced = []): void {
+    \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onValidatorRelationshipChanged($action, $pageId, $subjectUserId, $actorId, $linkId, $replaced);
+}, 10, 6);
+add_action(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK, static function (): void {
+    try {
+        \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::run();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] relationship log health check failed', ['error' => $e->getMessage()]);
+    }
+});
 
 // Validator staff step-ups: purge rows that expired more than a day ago.
 add_action('bcc_validator_step_up_purge', static function (): void {
@@ -1701,6 +1733,10 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // serves no feeds (they 301 to the app), names no WordPress version and
 // links no feeds from its head; see WordPressFrontEndGate.
 \BCC\Trust\Core\Security\WordPressFrontEndGate::register();
+
+// F-581: PeepSo's data-export queue stays closed; BCC handles data requests.
+// See PeepSoDataExportQueue.
+\BCC\Trust\Core\Security\PeepSoDataExportQueue::register();
 
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list
@@ -2127,28 +2163,19 @@ add_action('init', function () {
 | still gets PeepSo's emails, and a user who enables our digest may
 | get duplicates.
 |
-| Fix: unschedule PeepSo's mail queue cron. Idempotent — running it
-| every request is a no-op when the cron isn't scheduled. We do NOT
-| touch PeepSo's other crons (maintenance, GDPR, inactive-user
-| cleanup, super-queue) — those are non-email infrastructure we want
-| to keep. Only the email send loop is silenced.
+| Fix (PeepSoMailSilence): unschedule PeepSo's mail queue cron, AND veto
+| PeepSo's queue at the source (`peepso_mailqueue_allowed` → false), so
+| nothing is queued: the queue no longer grows with mail that is never
+| sent, and PeepSo's send-immediately path sends nothing either. Only
+| PeepSo's queue is touched; BCC's own mail goes through wp_mail() and
+| is unaffected. Other PeepSo crons are not touched here.
 |
 | If a future requirement reinstates PeepSo emails (e.g., a feature
-| we don't want to reimplement), remove this block AND wire our
+| we don't want to reimplement), remove this registration AND wire our
 | /settings/notifications page to also write `peepso_email_intensity`
 | / `peepso_notifications` so the two surfaces stay in sync.
 */
-add_action('init', function () {
-    if (defined('PeepSo::CRON_MAILQUEUE')) {
-        wp_clear_scheduled_hook(\PeepSo::CRON_MAILQUEUE);
-    } else {
-        // Hardcoded fallback — the constant value is stable and named
-        // the same across PeepSo versions we've seen, but if PeepSo
-        // hasn't loaded yet (race during early init) we still want
-        // the cron unscheduled.
-        wp_clear_scheduled_hook('peepso_mailqueue_send_event');
-    }
-}, 20);
+\BCC\Trust\Core\Integration\PeepSoMailSilence::register();
 
 
 /*
@@ -2331,6 +2358,10 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
+    \WP_CLI::add_command(
+        'bcc-trust claims-revoke-user',
+        \BCC\Trust\Onchain\CLI\ClaimRevokeUserCommand::class
+    );
     // ── `bcc-trust cosmwasm` IS GONE ────────────────────────────────────
     //
     // The one-shot supervised pass was the last way to START a full-chain
@@ -2469,9 +2500,16 @@ function bcc_trust_activate() {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
         wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
+    // Validator relationships: page ownership align retries.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK)) {
+        wp_schedule_event(time() + 5 * MINUTE_IN_SECONDS, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\PageOwnershipAligner::SWEEP_HOOK);
+    }
     // Validator staff step-ups: daily bounded purge of expired rows.
     if (!wp_next_scheduled('bcc_validator_step_up_purge')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_validator_step_up_purge');
+    }
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK)) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', \BCC\Trust\Onchain\Services\RelationshipLogHealthCheck::HOOK);
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

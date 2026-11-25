@@ -278,6 +278,32 @@ final class ValidatorRepository
      */
     public static function findFirstByPageId(int $pageId): ?object
     {
+        return self::firstByPageId($pageId, false);
+    }
+
+    /**
+     * FAIL-CLOSED {@see findFirstByPageId()}: a failed read throws instead
+     * of reading as "no validator". For relationship changes, which must not
+     * mistake "could not read" for "not a validator page".
+     *
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
+     * @throws RepositoryReadFailure
+     */
+    public static function findFirstByPageIdStrict(int $pageId): ?object
+    {
+        return self::firstByPageId($pageId, true);
+    }
+
+    /**
+     * The two-leg resolution behind both variants, read through runRead()
+     * (a failed read, including wpdb's pre-flush bail, is never read as a
+     * row): no row, or a throw when $failClosed.
+     *
+     * @return object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null
+     * @throws RepositoryReadFailure when $failClosed and a read fails
+     */
+    private static function firstByPageId(int $pageId, bool $failClosed): ?object
+    {
         if ($pageId <= 0) {
             return null;
         }
@@ -287,8 +313,8 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
-        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
+        /** @var list<object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT v.id AS validator_id, c.slug AS chain_slug,
                     c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$table} v
@@ -297,17 +323,17 @@ final class ValidatorRepository
               WHERE w.post_id = %d
               LIMIT 1",
             $pageId
-        ));
+        ), __FUNCTION__, $failClosed);
 
-        if ($row !== null) {
-            return $row;
+        if ($rows !== []) {
+            return $rows[0];
         }
 
         // Fallback: placeholder pages minted by ValidatorPageMinter have
         // no wallet_link yet — the page<->validator binding lives in
         // post_meta until a real claim creates a wallet_link.
-        /** @var object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
+        /** @var list<object{validator_id: numeric-string, chain_slug: string, chain_type: string, chain_name: string, operator_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT v.id AS validator_id, c.slug AS chain_slug,
                     c.chain_type, c.name AS chain_name, v.operator_address
                FROM {$wpdb->postmeta} pm
@@ -317,9 +343,9 @@ final class ValidatorRepository
                 AND pm.post_id  = %d
               LIMIT 1",
             $pageId
-        ));
+        ), __FUNCTION__, $failClosed);
 
-        return $row;
+        return $rows[0] ?? null;
     }
 
     /**
@@ -1597,7 +1623,8 @@ final class ValidatorRepository
      *     jailed_count: string|null,
      *     fetched_at: string,
      *     chain_slug: string,
-     *     chain_name: string
+     *     chain_name: string,
+     *     chain_id: numeric-string
      * }|null
      */
     public static function findSignalsByPageId(int $pageId): ?object
@@ -1614,7 +1641,7 @@ final class ValidatorRepository
         $selectCols =
             "v.status, v.uptime_30d, v.commission_rate, v.voting_power_rank,
              v.total_stake, v.self_stake, v.delegator_count, v.jailed_count,
-             v.fetched_at, c.slug AS chain_slug, c.name AS chain_name";
+             v.fetched_at, c.slug AS chain_slug, c.name AS chain_name, v.chain_id";
 
         /**
          * @var object{
@@ -1628,7 +1655,8 @@ final class ValidatorRepository
          *     jailed_count: string|null,
          *     fetched_at: string,
          *     chain_slug: string,
-         *     chain_name: string
+         *     chain_name: string,
+         *     chain_id: numeric-string
          * }|null $row
          */
         $row = $wpdb->get_row($wpdb->prepare(
@@ -1658,7 +1686,8 @@ final class ValidatorRepository
          *     jailed_count: string|null,
          *     fetched_at: string,
          *     chain_slug: string,
-         *     chain_name: string
+         *     chain_name: string,
+         *     chain_id: numeric-string
          * }|null $row
          */
         $row = $wpdb->get_row($wpdb->prepare(
@@ -1903,6 +1932,7 @@ final class ValidatorRepository
      *     delegator_count: string|null,
      *     native_token: string|null,
      *     chain_name: string|null,
+     *     chain_id: int,
      *     page_slug: string|null,
      *     page_title: string|null
      * }>
@@ -1937,6 +1967,7 @@ final class ValidatorRepository
          *     delegator_count: string|null,
          *     native_token: string|null,
          *     chain_name: string|null,
+         *     chain_id: numeric-string,
          *     page_slug: string|null,
          *     page_title: string|null
          * }>|null $rows
@@ -1944,7 +1975,7 @@ final class ValidatorRepository
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id AS validator_id, v.moniker, v.status, v.commission_rate,
                     v.total_stake, v.delegator_count,
-                    c.native_token, c.name AS chain_name,
+                    c.native_token, c.name AS chain_name, v.chain_id,
                     COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug,
                     COALESCE(p_wallet.post_title, p_meta.post_title) AS page_title
                FROM {$table} v
@@ -1977,6 +2008,7 @@ final class ValidatorRepository
                     'delegator_count' => $row->delegator_count,
                     'native_token'    => $row->native_token,
                     'chain_name'      => $row->chain_name,
+                    'chain_id'        => (int) $row->chain_id,
                     'page_slug'       => $row->page_slug,
                     'page_title'      => $row->page_title,
                 ];

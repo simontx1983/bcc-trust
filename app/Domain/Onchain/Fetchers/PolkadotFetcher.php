@@ -15,8 +15,10 @@ use BCC\Trust\Onchain\Support\StakeAmount;
 /**
  * Polkadot Validator Fetcher
  *
- * Uses the Subscan REST API (free tier) to fetch validator data.
- * Endpoint: https://polkadot.api.subscan.io
+ * Uses the Subscan REST API to fetch validator data, from Subscan's Asset Hub
+ * API ({@see self::DEFAULT_REST_URL}): Polkadot's staking moved from the
+ * relay chain to Asset Hub, and the relay-chain API now answers the
+ * validator list with `count: 0`.
  *
  * Subscan returns stake in Plancks (1 DOT = 1e10 Plancks).
  *
@@ -24,6 +26,61 @@ use BCC\Trust\Onchain\Support\StakeAmount;
  */
 class PolkadotFetcher implements FetcherInterface
 {
+    /**
+     * The Subscan API the validator index reads when the chain row names
+     * none: Asset Hub's, where Polkadot staking now lives. Verified
+     * 2026-11-24 with the production key: `/api/scan/staking/validators`
+     * answers `code: 0` with the validator set, and its stash addresses use
+     * the same SS58 form (prefix 0, `1…`) the stored rows already hold, so
+     * existing rows still match by address. Also the seed's value
+     * (schema-chains.php).
+     */
+    public const DEFAULT_REST_URL = 'https://assethub-polkadot.api.subscan.io';
+
+    /**
+     * Earlier SEEDED values that no longer serve staking: the relay-chain
+     * API. A chain row still holding EXACTLY one of these is repointed once
+     * (includes/database/repoint-validator-feed-endpoints.php); any other
+     * value is an operator's choice and is never touched.
+     *
+     * @var list<string>
+     */
+    public const RETIRED_REST_URLS = [
+        'https://polkadot.api.subscan.io',
+    ];
+
+    /**
+     * Rows per page. Subscan refuses a larger page for this key's plan with
+     * HTTP 403 (measured 2026-11-24: 10 and 25 answer, 50 and 99 are
+     * refused), and the old 100 failed every run on its first page.
+     */
+    public const PAGE_SIZE = 25;
+
+    /**
+     * 1000 validators. Subscan reports about 400 today, so a walk that
+     * reaches the cap with the list still going is not a set this fetcher
+     * understands, and it refuses to index it.
+     */
+    public const MAX_PAGES = 40;
+
+    /**
+     * The least time between two Subscan requests from this process. The
+     * key allows 2 requests a second (Subscan's `ratelimit-limit`), so 550 ms
+     * leaves a margin.
+     */
+    public const MIN_REQUEST_INTERVAL_MS = 550;
+
+    /**
+     * Seconds one full validator walk may take. Sixteen paced pages need
+     * roughly 10-25 s; the rest is room for slow answers and ApiRetry's
+     * backoff, without letting one chain hold the whole index run. When it
+     * runs out the walk throws {@see IndexTimeBudgetSpent}.
+     */
+    public const INDEX_TIME_BUDGET = 120;
+
+    /** No page is started with less than this many seconds of the budget left. */
+    public const MIN_PAGE_BUDGET = 10;
+
     /**
      * The raw Subscan keys mapValidator() reads, minus the address it is
      * keyed by. Used ONLY to report whether a dropped duplicate carried
@@ -46,11 +103,26 @@ class PolkadotFetcher implements FetcherInterface
     private string $base_url;
     private int    $timeout = 20;
 
+    /**
+     * The unix instant the running validator walk must stop by, or null
+     * outside one. apiPost() hands it to ApiRetry as `deadline_at`, so no
+     * attempt or retry starts after it.
+     */
+    private ?int $deadlineAt = null;
+
+    /**
+     * When this PROCESS last sent a Subscan request (microtime). Static on
+     * purpose: the hourly enrichment builds a new fetcher per validator, and
+     * the rate limit belongs to the key, not to an object.
+     */
+    private static float $lastRequestAt = 0.0;
+
     /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
-        $this->base_url = rtrim($chain->rest_url ?? 'https://polkadot.api.subscan.io', '/');
+        $restUrl        = trim((string) ($chain->rest_url ?? ''));
+        $this->base_url = rtrim($restUrl !== '' ? $restUrl : self::DEFAULT_REST_URL, '/');
     }
 
     /** @return ChainRow */
@@ -74,6 +146,14 @@ class PolkadotFetcher implements FetcherInterface
     /**
      * Fetch a single validator by stash address.
      *
+     * ⚠⚠ NO AMOUNTS AND NO RANK, BY DESIGN. On Asset Hub this call answers
+     * `bonded_total: "0"` for a validator the list reports with its real
+     * stake (measured 2026-11-24), and the hourly enrichment writes every
+     * non-null field returned here. Mapped like a list row, it would write a
+     * zero stake and rank 1 over every Polkadot validator, every hour. Stake,
+     * self-stake and rank come from the list walk only; this contributes the
+     * identity name, status, nominator count and commission.
+     *
      * @return array<string, mixed>
      */
     public function fetch_validator(string $address): array
@@ -82,11 +162,38 @@ class PolkadotFetcher implements FetcherInterface
             'stash' => $address,
         ]);
 
-        if (!$data || !isset($data['info'])) {
+        if (!$data || !isset($data['info']) || !is_array($data['info'])) {
             return [];
         }
 
-        return $this->mapValidator($data['info'], 0);
+        return $this->mapSingleValidator($data['info']);
+    }
+
+    /**
+     * The single-validator answer, cut to what it can be trusted for (see
+     * fetch_validator()).
+     *
+     * Status comes from the call's own `status`: `active` (what Asset Hub
+     * answers for an elected validator) or `waiting`/`inactive`. Any other
+     * value is left out rather than guessed; enrichment writes only the
+     * fields present, so an unknown status leaves the stored one alone.
+     *
+     * @param array<string, mixed> $info
+     * @return array<string, mixed>
+     */
+    private function mapSingleValidator(array $info): array
+    {
+        $mapped = $this->mapValidator($info, 0);
+        unset($mapped['total_stake'], $mapped['self_stake'], $mapped['voting_power_rank'], $mapped['status']);
+
+        $status = $info['status'] ?? null;
+        if ($status === 'active') {
+            $mapped['status'] = 'active';
+        } elseif ($status === 'waiting' || $status === 'inactive') {
+            $mapped['status'] = 'inactive';
+        }
+
+        return $mapped;
     }
 
     /** @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}> */
@@ -114,59 +221,103 @@ class PolkadotFetcher implements FetcherInterface
     /**
      * Fetch all active validators sorted by stake.
      *
+     * The list endpoint IS the validator set: its rows carry `status: ""`
+     * on Asset Hub, so membership, not that field, is what makes a row
+     * active here (the waiting list is a different endpoint).
+     *
+     * The walk reads PAGE_SIZE rows a request, paced to the key's rate
+     * limit, until the list ends. It never returns a list it knows is
+     * incomplete. Each of these throws instead, so the index run treats the
+     * chain as a partial fetch and writes nothing for it:
+     *
+     *  - a page that failed (F-68);
+     *  - MAX_PAGES full pages with the list still going;
+     *  - fewer distinct validators than Subscan's own `count`;
+     *  - the walk's time budget spent ({@see IndexTimeBudgetSpent}, which is
+     *    not a provider failure, so the run does not charge the breaker).
+     *
      * @return array<int, array<string, mixed>>
      */
     public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
         $validators = [];
         $page       = 0;
-        $perPage    = 100;
+        $reported   = null;
 
-        // Paginate through all validators (Subscan returns max 100 per page).
-        while (true) {
-            $data = $this->apiPost('/api/scan/staking/validators', [
-                'order'      => 'desc',
-                'order_field' => 'bonded_total',
-                'row'        => $perPage,
-                'page'       => $page,
-            ], $outcome);
+        $this->deadlineAt = $this->now() + self::INDEX_TIME_BUDGET;
 
-            // F-68: a page that FAILED (transport error, non-200, Subscan
-            // error code, missing key) is not the end of the list. apiPost()
-            // returns null for every one of those, and the loop used to read
-            // that as "no more validators" and index a truncated set as if
-            // it were complete. Throw instead, so the run fails: both callers
-            // catch it (ChainRefreshService marks the chain a partial fetch,
-            // skips its write and the dead-validator sweep; the admin refresh
-            // reports a failure).
-            if ($data === null) {
-                throw new \RuntimeException(sprintf(
-                    'Polkadot validator page %d failed (%d validators fetched before it); refusing to index a truncated list.',
-                    $page,
-                    count($validators)
-                ));
+        try {
+            while (true) {
+                if ($page >= self::MAX_PAGES) {
+                    throw new \RuntimeException(sprintf(
+                        'Polkadot validator list did not end within %d pages of %d (%d rows fetched); refusing to index a truncated list.',
+                        self::MAX_PAGES,
+                        self::PAGE_SIZE,
+                        count($validators)
+                    ));
+                }
+
+                if ($this->deadlineAt - $this->now() < self::MIN_PAGE_BUDGET) {
+                    throw new IndexTimeBudgetSpent(sprintf(
+                        'Polkadot validator walk reached its %ds budget before page %d (%d rows fetched).',
+                        self::INDEX_TIME_BUDGET,
+                        $page,
+                        count($validators)
+                    ));
+                }
+
+                $data = $this->apiPost('/api/scan/staking/validators', [
+                    'order'       => 'desc',
+                    'order_field' => 'bonded_total',
+                    'row'         => self::PAGE_SIZE,
+                    'page'        => $page,
+                ], $outcome);
+
+                // F-68: a page that FAILED (transport error, non-200, Subscan
+                // error code, missing key) is not the end of the list. apiPost()
+                // returns null for every one of those, and the loop used to read
+                // that as "no more validators" and index a truncated set as if
+                // it were complete. Throw instead, so the run fails: both callers
+                // catch it (ChainRefreshService marks the chain a partial fetch,
+                // skips its write and the dead-validator sweep; the admin refresh
+                // reports a failure).
+                if ($data === null) {
+                    throw new \RuntimeException(sprintf(
+                        'Polkadot validator page %d failed (%d validators fetched before it); refusing to index a truncated list.',
+                        $page,
+                        count($validators)
+                    ));
+                }
+
+                // Subscan's own size of the set, from the first page that says.
+                if ($reported === null && isset($data['count']) && is_numeric($data['count'])) {
+                    $reported = (int) $data['count'];
+                }
+
+                $list = $data['list'] ?? [];
+                if (empty($list)) {
+                    break;
+                }
+
+                foreach ($list as $v) {
+                    $validators[] = $v;
+                }
+
+                // A short page is the last one.
+                if (count($list) < self::PAGE_SIZE) {
+                    break;
+                }
+
+                $page++;
+
+                // So is the page that reaches Subscan's count: no request for
+                // the empty page past the end.
+                if ($reported !== null && $page * self::PAGE_SIZE >= $reported) {
+                    break;
+                }
             }
-
-            $list = $data['list'] ?? [];
-            if (empty($list)) {
-                break;
-            }
-
-            foreach ($list as $v) {
-                $validators[] = $v;
-            }
-
-            // Stop if we got fewer than requested (last page).
-            if (count($list) < $perPage) {
-                break;
-            }
-
-            $page++;
-
-            // Safety cap — don't fetch more than 10 pages (1000 validators).
-            if ($page >= 10) {
-                break;
-            }
+        } finally {
+            $this->deadlineAt = null;
         }
 
         if (empty($validators)) {
@@ -205,6 +356,18 @@ class PolkadotFetcher implements FetcherInterface
                 count($validators),
                 count($dedupe['rows']),
                 $dedupe['divergent']
+            ));
+        }
+
+        // ⚠ A WALK SHORT OF SUBSCAN'S OWN COUNT IS NOT THE SET. Pages are
+        // ordered by stake, so a validator whose stake changes while the walk
+        // runs can cross a page boundary: seen twice (absorbed above) or not
+        // at all. Not at all is a truncated list, refused like any other.
+        if ($reported !== null && count($dedupe['rows']) < $reported) {
+            throw new \RuntimeException(sprintf(
+                'Polkadot validator walk found %d distinct validators where Subscan reports %d; refusing to index a truncated list.',
+                count($dedupe['rows']),
+                $reported
             ));
         }
 
@@ -419,10 +582,51 @@ class PolkadotFetcher implements FetcherInterface
             }
         }
 
-        $displayA = $a['stash_account_display']['display'] ?? null;
-        $displayB = $b['stash_account_display']['display'] ?? null;
+        return self::identityName($a) !== self::identityName($b);
+    }
 
-        return $displayA !== $displayB;
+    /**
+     * The validator's on-chain identity name, or null when it has none.
+     *
+     * The relay-chain shape put it at `stash_account_display.display`. On
+     * Asset Hub, identity lives on the People chain and Subscan nests it
+     * under `people`: the account's own `display`, or, for a sub-identity,
+     * the parent's `display` plus `sub_symbol`, written PARENT/SUB as
+     * Polkadot's own tools show it. Only some validators set one.
+     *
+     * @param array<string, mixed> $v
+     */
+    private static function identityName(array $v): ?string
+    {
+        $account = $v['stash_account_display'] ?? null;
+        if (!is_array($account)) {
+            return null;
+        }
+
+        $display = $account['display'] ?? null;
+        if (is_string($display) && $display !== '') {
+            return $display;
+        }
+
+        $people = $account['people'] ?? null;
+        if (!is_array($people)) {
+            return null;
+        }
+
+        $own = $people['display'] ?? null;
+        if (is_string($own) && $own !== '') {
+            return $own;
+        }
+
+        $parent = $people['parent'] ?? null;
+        $name   = is_array($parent) ? ($parent['display'] ?? null) : null;
+        if (!is_string($name) || $name === '') {
+            return null;
+        }
+
+        $sub = $parent['sub_symbol'] ?? null;
+
+        return is_string($sub) && $sub !== '' ? $name . '/' . $sub : $name;
     }
 
     /**
@@ -536,9 +740,9 @@ class PolkadotFetcher implements FetcherInterface
         // de-duplication uses and the value stored cannot diverge.
         $address = self::stashAddress($v);
 
-        // Moniker: on-chain identity display name, fallback to truncated address.
-        $moniker = $v['stash_account_display']['display'] ?? null;
-        if (!$moniker || $moniker === $address) {
+        // Moniker: on-chain identity name, fallback to truncated address.
+        $moniker = self::identityName($v);
+        if ($moniker === null || $moniker === $address) {
             $moniker = $address;
             if (strlen($moniker) > 16) {
                 $moniker = substr($moniker, 0, 6) . '...' . substr($moniker, -4);
@@ -602,10 +806,18 @@ class PolkadotFetcher implements FetcherInterface
             return null;
         }
 
-        $url     = $this->base_url . $path;
-        $chainId = (int) $this->chain->id;
+        $options = [
+            'label'    => 'Subscan ' . $path,
+            'chain_id' => (int) $this->chain->id,
+            'outcome'  => $outcome,
+        ];
+        if ($this->deadlineAt !== null) {
+            $options['deadline_at'] = $this->deadlineAt;
+        }
 
-        $response = ApiRetry::post($url, [
+        $this->pace();
+
+        $response = $this->sendPost($this->base_url . $path, [
             'timeout' => $this->timeout,
             'headers' => [
                 'Content-Type' => 'application/json',
@@ -613,13 +825,19 @@ class PolkadotFetcher implements FetcherInterface
                 'X-API-Key'    => $apiKey,
             ],
             'body' => wp_json_encode($body),
-        ], [
-            'label'    => 'Subscan ' . $path,
-            'chain_id' => $chainId,
-            'outcome'  => $outcome,
-        ]);
+        ], $options);
 
         if (is_wp_error($response)) {
+            // The walk's budget ran out before this request could start.
+            // ApiRetry charged nothing for that, and neither may the run.
+            if ($response->get_error_code() === 'deadline_exceeded') {
+                throw new IndexTimeBudgetSpent(sprintf(
+                    'Polkadot validator walk reached its %ds budget before %s could start.',
+                    self::INDEX_TIME_BUDGET,
+                    $path
+                ));
+            }
+
             \BCC\Core\Log\Logger::error('[Polkadot Fetcher] error for ' . $path . ': ' . $response->get_error_message());
             return null;
         }
@@ -631,6 +849,57 @@ class PolkadotFetcher implements FetcherInterface
         }
 
         return self::parseSubscanBody(wp_remote_retrieve_body($response), $path);
+    }
+
+    /**
+     * The one wire call. Protected only as a test seam, so apiPost()'s own
+     * handling runs in tests without a network.
+     *
+     * @param array<string, mixed> $args
+     * @param array<string, mixed> $options
+     * @return array<string, mixed>|\WP_Error
+     */
+    protected function sendPost(string $url, array $args, array $options)
+    {
+        return ApiRetry::post($url, $args, $options);
+    }
+
+    /**
+     * Space Subscan requests at least MIN_REQUEST_INTERVAL_MS apart across
+     * every fetcher in this process. The walk sends about sixteen requests,
+     * which unpaced would draw 429s from a 2-per-second key. A wait is
+     * blocked time, not CPU, so it does not count against PHP's execution
+     * limit on Linux.
+     */
+    private function pace(): void
+    {
+        $now  = $this->clock();
+        $next = self::$lastRequestAt + self::MIN_REQUEST_INTERVAL_MS / 1000;
+
+        if ($next > $now) {
+            $this->sleepMicros((int) ceil(($next - $now) * 1_000_000));
+            $now = $next;
+        }
+
+        self::$lastRequestAt = $now;
+    }
+
+    /** Unix seconds. Protected as a test seam for the walk's time budget. */
+    protected function now(): int
+    {
+        return time();
+    }
+
+    /** Unix seconds with a fraction. Protected as a test seam for pace(). */
+    protected function clock(): float
+    {
+        return microtime(true);
+    }
+
+    /** Protected as a test seam: a test records the wait instead of sleeping. */
+    protected function sleepMicros(int $micros): void
+    {
+        usleep($micros);
     }
 
     /**

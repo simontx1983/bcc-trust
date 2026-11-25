@@ -44,6 +44,9 @@ namespace {
         /** @var list<int> chain ids whose circuit breaker is resting (F-157) */
         public static array $resting = [];
 
+        /** @var list<int> chain ids whose fetch notes a provider refusal on its receipt before it answers */
+        public static array $refusals = [];
+
         public static function reset(): void
         {
             self::$chains       = [];
@@ -51,6 +54,7 @@ namespace {
             self::$options      = [];
             self::$calls        = [];
             self::$resting      = [];
+            self::$refusals     = [];
         }
 
         public static function record(string $what, mixed $detail = null): void
@@ -188,6 +192,11 @@ namespace BCC\Trust\Onchain\Factories {
                     public function fetch_all_validators(?object $outcome = null): array
                     {
                         \IndexRunRecorder::record('fetch_all_validators', $this->chainId);
+                        if (in_array($this->chainId, \IndexRunRecorder::$refusals, true)
+                            && $outcome instanceof \BCC\Trust\Onchain\Support\ProviderOutcomeReceipt) {
+                            // What ApiRetry notes for a non-429 4xx.
+                            $outcome->recordProviderRefusal();
+                        }
                         $result = \IndexRunRecorder::$fetchResults[$this->chainId] ?? [];
                         if ($result instanceof \Throwable) {
                             // F-66: what a fetcher does on a malformed answer it
@@ -211,9 +220,10 @@ namespace BCC\Trust\Onchain\Support {
                 return in_array($chainId, \IndexRunRecorder::$resting, true);
             }
 
-            public static function recordFailure(int $chainId): void
+            public static function recordFailure(int $chainId, ?string $kind = null): void
             {
                 \IndexRunRecorder::record('breaker.recordFailure', $chainId);
+                \IndexRunRecorder::record('breaker.recordFailure.kind', [$chainId, $kind]);
             }
 
             public static function recordSuccess(int $chainId): void

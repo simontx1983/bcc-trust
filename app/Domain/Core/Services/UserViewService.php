@@ -168,7 +168,12 @@ final class UserViewService
             'avatar_url'             => self::resolveAvatar($userId),
             'cover_photo_url'        => self::resolveCoverPhotoUrl($userId),
             'cover_photo_position'   => self::resolveCoverPhotoPosition($userId),
-            'joined_at'              => self::toIso8601((string) $user->user_registered),
+            // Exact for the member, the month for everyone else (R12).
+            'joined_at'              => \BCC\Trust\Core\Support\PublicIdentity::joinedAt(
+                $userId,
+                self::toIso8601((string) $user->user_registered),
+                $viewerId
+            ),
             'is_self'             => $isSelf,
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
@@ -613,7 +618,12 @@ final class UserViewService
             'display_name'        => $effectiveName,
             'avatar_url'          => self::resolveAvatar($userId),
             'cover_photo_url'     => self::resolveCoverPhotoUrl($userId),
-            'joined_at'           => self::toIso8601((string) $user->user_registered),
+            // Exact for the member, the month for everyone else (R12).
+            'joined_at'           => \BCC\Trust\Core\Support\PublicIdentity::joinedAt(
+                $userId,
+                self::toIso8601((string) $user->user_registered),
+                $viewerId
+            ),
             'reputation_tier'       => $tier,
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
             // Rank redesign Phase 5 — nullable for New Members; the
@@ -787,11 +797,24 @@ final class UserViewService
      *
      * Returns true for {1, "1", true, "true", "yes", "on"} (case-insensitive).
      * Returns false for {0, "0", "", false, "false", "no", "off", null}.
+     * Every row is read, and any row that reads as true sets the flag.
      */
     private static function metaFlag(int $userId, string $key): bool
     {
-        $raw = get_user_meta($userId, $key, true);
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        // Every stored row, and ANY one that reads as on sets the flag
+        // (PrivacySettings::strictest()): WordPress allows duplicate rows,
+        // and a '0' row beside a '1' row must not hide the flag. The public
+        // index reads the flags the same way (PublicProfileIndex), so a
+        // flagged profile is never listed or indexable.
+        $rows = get_user_meta($userId, $key, false);
+        if (!is_array($rows)) {
+            return false;
+        }
+
+        return PrivacySettings::strictest(array_map(
+            static fn (mixed $raw): string => is_scalar($raw) ? (string) $raw : '',
+            array_values($rows)
+        ));
     }
 
     /**
@@ -1030,7 +1053,7 @@ final class UserViewService
             }
         }
 
-        $primaryGroupId = self::loadPrimaryGroupId($userId);
+        $primaryGroupId = self::publishedHallOrNull(self::loadPrimaryGroupId($userId));
         $groupInfo      = PeepSoGroupRepository::findManyByIds($myGroupIds);
 
         // Roles: the member's status per group, and (for anyone but the
@@ -1128,6 +1151,23 @@ final class UserViewService
             }
         }
         return null;
+    }
+
+    /**
+     * The home-Hall pointer, kept only when it names a published,
+     * non-secret Hall (HallRepository::publishedHallIds). A read that
+     * cannot be verified shows no home Hall rather than an unchecked group.
+     */
+    private static function publishedHallOrNull(?int $groupId): ?int
+    {
+        if ($groupId === null) {
+            return null;
+        }
+        try {
+            return \BCC\Trust\Onchain\Repositories\HallRepository::publishedHallIds([$groupId]) === [$groupId] ? $groupId : null;
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
     }
 
     private static function loadPrimaryGroupId(int $userId): ?int

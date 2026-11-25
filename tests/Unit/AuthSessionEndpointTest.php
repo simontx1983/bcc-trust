@@ -105,6 +105,7 @@ final class AuthSessionEndpointTest extends TestCase
                 'handle'           => 'handle' . self::USER,     // CURRENT meta, not the token claim
                 'in_good_standing' => true,                       // resolveInGoodStanding fails open
                 'suspended'        => false,                      // F-305
+                'can_moderate'     => false,                      // structure A (not an admin)
                 'expires_at'       => (int) $payload['payload']['exp'],
             ],
             $body['data']

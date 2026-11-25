@@ -62,6 +62,9 @@ final class CosmosEndpointVerifier
 
     private const NODE_INFO_PATH = '/cosmos/base/tendermint/v1beta1/node_info';
 
+    /** CometBFT RPC: the node's identity, `result.node_info.network`. */
+    private const RPC_STATUS_PATH = '/status';
+
     private const TIMEOUT = 10;
 
     /**
@@ -173,6 +176,85 @@ final class CosmosEndpointVerifier
         }
 
         $network = trim($network);
+
+        return $network === '' ? null : $network;
+    }
+
+    /**
+     * Is this memo-claim proof endpoint's RPC node on the network BCC pins for
+     * $slug, proven now? The same gate as {@see verify()}, for a CometBFT RPC
+     * node: `/status` `result.node_info.network` must equal
+     * {@see CosmosEndpointPolicy::pinnedNetwork()} exactly.
+     *
+     * Every arm refuses, redirects included. It goes through SafeHttpClient,
+     * not ApiRetry, so asking cannot charge the chain's breaker. Only a match
+     * is cached, keyed by the pinned fingerprint (url + pinned network): a
+     * changed pin or url is a new key, so a config change re-checks by
+     * construction ("at boot or on config change").
+     *
+     * @return array{ok: bool, reason: string, network: string|null, fingerprint: string|null}
+     */
+    public static function verifyProofRpc(string $slug, string $rpcUrl, bool $useCache = true): array
+    {
+        $expected = CosmosEndpointPolicy::pinnedNetwork($slug);
+        if ($expected === null) {
+            return self::fail(self::NOT_GOVERNED, null);
+        }
+
+        $normalized = CosmosEndpointPolicy::normalize($rpcUrl);
+        if ($normalized === null) {
+            return self::fail(self::MALFORMED_URL, null);
+        }
+
+        $fingerprint = CosmosEndpointPolicy::pinnedFingerprint($slug, $normalized);
+        $cacheKey    = 'bcc_cosmos_rpc_ok_' . $slug . '_' . $fingerprint;
+        if ($useCache && $fingerprint !== null) {
+            $cached = get_transient($cacheKey);
+            if (is_string($cached) && $cached === $expected) {
+                return ['ok' => true, 'reason' => self::OK, 'network' => $expected, 'fingerprint' => $fingerprint];
+            }
+        }
+
+        $response = \BCC\Core\Http\SafeHttpClient::get(
+            $normalized . self::RPC_STATUS_PATH,
+            ['timeout' => self::TIMEOUT, 'headers' => ['Accept' => 'application/json']]
+        );
+        if (is_wp_error($response) || (int) wp_remote_retrieve_response_code($response) !== 200) {
+            return self::fail(self::UNREACHABLE, $fingerprint);
+        }
+
+        $network = self::readRpcNetwork((string) wp_remote_retrieve_body($response));
+        if ($network === null) {
+            return self::fail(self::IDENTITY_UNREADABLE, $fingerprint);
+        }
+        if ($network !== $expected) {
+            return self::fail(self::NETWORK_MISMATCH, $fingerprint);
+        }
+
+        if ($fingerprint !== null) {
+            // The only write, after an exact match. A failure is never cached.
+            set_transient($cacheKey, $network, self::CACHE_TTL);
+        }
+
+        return ['ok' => true, 'reason' => self::OK, 'network' => $network, 'fingerprint' => $fingerprint];
+    }
+
+    /**
+     * PURE. `result.node_info.network` out of a CometBFT `/status` body
+     * (JSON-RPC envelope, or the bare result some proxies return), or null.
+     */
+    public static function readRpcNetwork(string $body): ?string
+    {
+        $decoded = $body === '' ? null : json_decode($body, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+        $result = isset($decoded['result']) && is_array($decoded['result']) ? $decoded['result'] : $decoded;
+        $info   = $result['node_info'] ?? null;
+        if (!is_array($info) || !is_string($info['network'] ?? null)) {
+            return null;
+        }
+        $network = trim($info['network']);
 
         return $network === '' ? null : $network;
     }

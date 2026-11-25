@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Integration;
 
 use BCC\Core\Repositories\UserMetaRepository;
+use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -27,7 +28,9 @@ use PHPUnit\Framework\TestCase;
  *    wpdb's pre-flush() bail with a stale row that says "not hidden" for
  *    this very member and key, which a last_error-only check would trust;
  *  - only trusted answers are memoised; forget() drops a member's memo;
- *  - an oversized batch is refused, never truncated.
+ *  - an oversized batch is refused, never truncated;
+ *  - F-519: `discovery_optout` (= /me/profile-prefs `hide_from_search`)
+ *    reads as the search SQL decides, for every row shape.
  *
  * Separate processes: the repository's memo is static.
  */
@@ -44,6 +47,7 @@ final class PrivacyFlagsReadIntegrationTest extends TestCase
     private const DUPLICATES  = 988103;
     private const CASE_VARIANT = 988104;
     private const OPTED_OUT   = 988105;
+    private const SEARCH      = 988106;
 
     private const FAULT = '/FROM\s+`?\w*usermeta`?\s/';
 
@@ -87,7 +91,7 @@ final class PrivacyFlagsReadIntegrationTest extends TestCase
         $wpdb->query($wpdb->prepare(
             "DELETE FROM `{$wpdb->usermeta}` WHERE user_id BETWEEN %d AND %d",
             self::HIDES,
-            self::OPTED_OUT
+            self::SEARCH
         ));
     }
 
@@ -203,5 +207,68 @@ final class PrivacyFlagsReadIntegrationTest extends TestCase
         }
         self::assertTrue($primed);
         self::assertSame(0, $fired, 'the member past the first chunk was primed too');
+    }
+
+    /**
+     * Literal keys: the provider runs before any test process loads a class.
+     *
+     * @return iterable<string, array{list<array{string, string}>, bool, bool}>
+     */
+    public static function searchOptOutShapes(): iterable
+    {
+        $hide   = 'peepso_is_hide_profile_from_user_listing';
+        $legacy = 'bcc_privacy_discovery_optout';
+
+        // rows (umeta_id order), fold done?, hidden from search?
+        yield 'no row'                     => [[], false, false];
+        yield "'0'"                        => [[[$hide, '0']], false, false];
+        yield "'1'"                        => [[[$hide, '1']], false, true];
+        yield "'0' then '1'"               => [[[$hide, '0'], [$hide, '1']], false, true];
+        yield "'1' then '0'"               => [[[$hide, '1'], [$hide, '0']], false, true];
+        yield "'TRUE'"                     => [[[$hide, 'TRUE']], false, true];
+        yield "'yes'"                      => [[[$hide, 'yes']], false, true];
+        yield 'legacy on, fold not done'   => [[[$hide, '0'], [$legacy, '1']], false, true];
+        yield 'legacy on, fold done'       => [[[$hide, '0'], [$legacy, '1']], true, false];
+        yield 'legacy only, fold not done' => [[[$legacy, 'on']], false, true];
+        yield 'legacy off, fold not done'  => [[[$legacy, '0']], false, false];
+        yield 'flag on, fold done'         => [[[$hide, '1'], [$legacy, '0']], true, true];
+        // Padded values: the SQL's `IN` trims nothing at the front and a
+        // newline is not a pad, so these are not on in SQL or in PHP on any
+        // collation. (A TRAILING space is collation-dependent; not pinned.)
+        yield "' 1'"                       => [[[$hide, ' 1']], false, false];
+        yield "'1\\n'"                     => [[[$hide, "1\n"]], false, false];
+        yield "' yes' legacy, fold not done" => [[[$hide, '0'], [$legacy, ' yes']], false, false];
+    }
+
+    /**
+     * F-519: the member's switch says what search does to them. The search
+     * SQL is the shared predicate UserSyncRepository::listingOptOutSql(),
+     * run here on the real engine; the switch is PrivacySettings::flag(),
+     * which /me/profile-prefs `hide_from_search` reads, and /me/privacy's
+     * readAll(). Each is checked against the expected answer too, so the
+     * two cannot agree by both being wrong.
+     *
+     * @param list<array{string, string}> $rows
+     */
+    #[DataProvider('searchOptOutShapes')]
+    public function testTheSwitchReadsAsTheSearchSqlDecides(array $rows, bool $folded, bool $hidden): void
+    {
+        global $wpdb;
+        foreach ($rows as [$key, $value]) {
+            self::meta(self::SEARCH, $key, $value);
+        }
+        if ($folded) {
+            // What the migration runner stores on completion: time().
+            $GLOBALS['__bcc_test_options'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
+        }
+        self::assertSame(!$folded, PrivacySettings::legacyOptOutStillRead());
+
+        $clause = UserSyncRepository::listingOptOutSql('m.ID', PrivacySettings::legacyOptOutStillRead());
+        $listed = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM (SELECT %d AS ID) m WHERE {$clause}", self::SEARCH));
+        self::assertSame('', $wpdb->last_error);
+        self::assertSame($hidden ? '0' : '1', (string) $listed, 'the search SQL');
+
+        self::assertSame($hidden, PrivacySettings::flag(self::SEARCH, 'discovery_optout'), 'the switch');
+        self::assertSame($hidden, PrivacySettings::readAll(self::SEARCH)['discovery_optout'], '/me/privacy');
     }
 }

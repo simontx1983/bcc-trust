@@ -117,6 +117,64 @@ final class PageClaimReleaseTest extends TestCase
         self::assertSame(['old_owner' => self::OLD, 'author_reset' => true, 'owner_row' => 'demoted', 'score_rows_moved' => 0, 'score_owner' => 0], $released[0][2]);
     }
 
+    // ── the swap: a wallet proof superseded the staff-approved owner ────
+
+    public function testASwapMovesThePageToTheNewOwner(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        self::assertTrue($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+
+        self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('member', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'the old owner is demoted, not removed');
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::NEW]);
+        self::assertSame([[self::OLD, self::PAGE]], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertContains([self::NEW, self::PAGE], $GLOBALS['__bcc_drain']['page_counts']);
+        self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE], 'the score rows follow the page');
+        $swapped = self::audits('page_owner_swapped');
+        self::assertCount(1, $swapped);
+        self::assertSame(['old_owner' => self::OLD, 'new_owner' => self::NEW, 'owner_row' => true, 'score_rows_moved' => 1], $swapped[0][2]);
+    }
+
+    public function testASwapNeverLiftsABanOnEitherUser(): void
+    {
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::NEW] = 'banned';
+
+        self::assertFalse($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'nothing demoted');
+        self::assertSame([['page_owner_swap_skipped', self::PAGE, ['old_owner' => self::OLD, 'new_owner' => self::NEW, 'reason' => 'banned']]], self::audits('page_owner_swap_skipped'));
+
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::NEW] = null;
+        unset($GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::NEW]);
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD] = ['member_owner', 'banned'];
+        self::assertFalse($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+        self::assertSame(['member_owner', 'banned'], $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'the old owner\'s ban is never lifted either');
+    }
+
+    public function testASwapOnlyMovesTheAuthorFromTheOldOwner(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE] = 777; // reassigned since
+
+        self::assertFalse($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+        self::assertSame(777, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'compare-and-set: never overwritten');
+        self::assertSame([], self::audits('page_owner_swapped'));
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_counts']);
+    }
+
+    public function testAFailedDemotionOrUnreadableStatusLeavesThePageAsIs(): void
+    {
+        $GLOBALS['__bcc_drain']['fail_modify'] = true;
+        self::assertFalse($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+
+        $GLOBALS['__bcc_drain']['fail_modify']       = false;
+        $GLOBALS['__bcc_drain']['status_read_fails'] = true;
+        self::assertFalse($this->integration()->swapClaimedPageOwner(self::PAGE, self::OLD, self::NEW));
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD]);
+    }
+
     // ── owner-0: the score rows leave the old owner ─────────────────────
 
     public function testTheReleaseMovesTheScoreRowsToNobody(): void

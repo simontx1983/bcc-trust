@@ -320,7 +320,7 @@ final class SuggestionService
         }
 
         // ── 6. View-model (reuse getSummary + shared prefetch bundle). ─
-        $prefetched = MemberSummaryPrefetcher::primeFor($chosenIds);
+        $prefetched = MemberSummaryPrefetcher::primeFor($chosenIds, $viewerId);
 
         // Batch-resolve the mutual_follows reason's sample avatars — small
         // (≤3 per row) set of user ids, gathered across all chosen rows so

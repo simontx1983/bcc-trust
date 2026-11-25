@@ -231,7 +231,7 @@ final class FeedColdStartService
         // queries. To stay strictly N+1-free for the 4 rows we DO render
         // we include the full bundle. The 4-row scale makes the cost
         // trivial vs. the simpler reasoning.
-        $prefetched = self::buildOperatorPrefetch($selected);
+        $prefetched = self::buildOperatorPrefetch($selected, $viewerId);
 
         $out = [];
         foreach ($selected as $userId) {
@@ -426,10 +426,14 @@ final class FeedColdStartService
      * them through Plugin.php — those are leaf utilities, and the cold-
      * start endpoint already pays the constructor cost once per request.
      *
+     * The reviews and disputes counts are the viewer's (F-571), from the
+     * same per-viewer helper the shared prefetch uses
+     * (MemberSummaryPrefetcher::contentCountsFor()).
+     *
      * @param list<int> $userIds
      * @return array<string, array<int, mixed>>
      */
-    private static function buildOperatorPrefetch(array $userIds): array
+    private static function buildOperatorPrefetch(array $userIds, int $viewerId): array
     {
         if ($userIds === []) {
             return [];
@@ -440,18 +444,18 @@ final class FeedColdStartService
             ? []
             : (new \BCC\Trust\Core\Repositories\PeepSoReactionRepository())
                 ->countReceivedByUsers($userIds, $solidId);
+        $contentCounts = \BCC\Trust\Core\Support\MemberSummaryPrefetcher::contentCountsFor($userIds, $viewerId);
 
         return [
             'follower_counts'              => \BCC\Core\Repositories\PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
+            'primary_halls'                => \BCC\Trust\Onchain\Repositories\HallRepository::primaryHallsForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => \BCC\Core\Repositories\PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             'endorsements_received_counts' => (new \BCC\Trust\Core\Repositories\AttestationRepository())
                 ->countActiveVouchesByTargets('user_profile', $userIds),
             'solids_received_counts'       => $solidsReceivedCounts,
-            'reviews_written_counts'       => (new \BCC\Trust\Core\Repositories\VoteRepository())
-                ->countByVoters($userIds),
-            'disputes_signed_counts'       => \BCC\Trust\Disputes\Repositories\DisputeRepository::countByReporters($userIds),
+            'reviews_written_counts'       => $contentCounts['reviews_written_counts'],
+            'disputes_signed_counts'       => $contentCounts['disputes_signed_counts'],
             'wallets_verified_counts'      => \BCC\Trust\Onchain\Repositories\WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new \BCC\Trust\Core\Repositories\XRepository())
                 ->getConnectionsForUsers($userIds),

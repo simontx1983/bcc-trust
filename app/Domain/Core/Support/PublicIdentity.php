@@ -102,6 +102,30 @@ final class PublicIdentity
     }
 
     /**
+     * When a member joined BCC (account creation, `joined_at`) as this
+     * viewer may see it. The member themselves gets the exact time. Every
+     * other viewer, anonymous included, gets the first of the month at
+     * 00:00Z, so no payload, and no page built from one, carries the day
+     * or the time (R12). Admin routes read the stored value directly and
+     * do not come through here.
+     *
+     * $iso is ISO 8601 UTC (`Y-m-d\TH:i:s\Z`) or '' (unknown). For another
+     * viewer, anything that is not such a date reads as '' (unknown), never
+     * passed through.
+     */
+    public static function joinedAt(int $userId, string $iso, int $viewerId = 0): string
+    {
+        if ($iso === '' || ($userId > 0 && $userId === $viewerId)) {
+            return $iso;
+        }
+        if (preg_match('/\A(\d{4}-\d{2})-\d{2}T/', $iso, $m) !== 1) {
+            return '';
+        }
+
+        return $m[1] . '-01T00:00:00Z';
+    }
+
+    /**
      * Convenience: both values for a user in one call (one meta read).
      *
      * Takes any object with ID / display_name / user_login: a WP_User, or

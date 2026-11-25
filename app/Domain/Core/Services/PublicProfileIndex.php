@@ -16,7 +16,7 @@
  *      call here and handed down, so the list and `indexable` always agree;
  *   2. none of the three moderation flags is set (hidden, shadow-limited,
  *      under review), read the way UserViewService::resolveFlags() reads
- *      them (FILTER_VALIDATE_BOOLEAN on the first value);
+ *      them: set when ANY stored row reads as on (PrivacySettings::strictest());
  *   3. a current handle exists and has the current handle shape: runs of
  *      [a-z0-9] joined by single hyphens, and not the `member-{id}` fallback.
  *      Legacy handles (an email address, say) are never advertised.
@@ -171,8 +171,8 @@ final class PublicProfileIndex
      * One keyset page of listable groups: bcc-core's explicitly OPEN groups,
      * kept only when GroupContextResolver can place them AND reads them open.
      *
-     * The URL uses the resolver's own type (Hall → /halls/, otherwise
-     * /communities/), so a group the app cannot route — disagreeing kind
+     * The URL is built from the resolver's own type (every kind lives on
+     * /communities/{slug}), so a group the app cannot route — disagreeing kind
      * rows, an unreadable kind — has no context and is not listed: every
      * advertised group URL is one the app serves.
      *
@@ -215,7 +215,7 @@ final class PublicProfileIndex
             return [];
         }
 
-        $meta = UserMetaRepository::firstValuesOrUnknown($ids, self::MEMBER_META_KEYS);
+        $meta = UserMetaRepository::valuesOrUnknown($ids, self::MEMBER_META_KEYS);
         if ($meta === null) {
             return null;
         }
@@ -224,13 +224,16 @@ final class PublicProfileIndex
         foreach ($ids as $id) {
             $values = $meta[$id] ?? [];
 
+            // ANY row that reads as on sets a flag: a member with a '0' and
+            // a '1' row is flagged, as on the profile (resolveFlags()).
             foreach (self::MODERATION_FLAG_KEYS as $flagKey) {
-                if (isset($values[$flagKey]) && filter_var($values[$flagKey], FILTER_VALIDATE_BOOLEAN)) {
+                if (PrivacySettings::strictest($values[$flagKey] ?? [])) {
                     continue 2;
                 }
             }
 
-            $handle = $values[HandleService::META_HANDLE] ?? '';
+            // The handle is the first row, as get_user_meta(…, true) reads it.
+            $handle = $values[HandleService::META_HANDLE][0] ?? '';
             if (!self::isListableHandle($handle)) {
                 continue;
             }

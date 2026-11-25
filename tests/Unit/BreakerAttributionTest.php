@@ -407,11 +407,14 @@ final class BreakerAttributionTest extends TestCase
     /**
      * ⚠ THE COVERAGE CLAIM, MADE EXPLICIT.
      *
-     * TEN executable call sites charge this breaker. TWO are inside ApiRetry
-     * and MUST pass a kind; eight are domain judgements with no wire outcome
-     * and MUST NOT invent one. This test fails when a new charge site appears
-     * anywhere, so "which callers are attributed?" can never again be
-     * answered by reading and hoping.
+     * TWO charge sites are inside ApiRetry and MUST pass a kind. The rest
+     * are domain judgements with no wire outcome of their own and MUST NOT
+     * invent one. The two validator-index sites in ChainRefreshService may
+     * forward ONLY what the receipt measured (`domainChargeKind()`: a
+     * provider refusal the transport noted but did not charge, or null),
+     * never a token of their own. This test fails when a new charge site
+     * appears anywhere, so "which callers are attributed?" can never again
+     * be answered by reading and hoping.
      *
      * ── WHY TWO, WHERE PR 7.8 COUNTED FOUR ──────────────────────────────
      * ApiRetry used to charge from three places in `request()` — 429, 5xx and
@@ -433,6 +436,8 @@ final class BreakerAttributionTest extends TestCase
 
         $attributed   = [];
         $unattributed = [];
+        /** @var array<string, string> $argsAt site → its argument list, whitespace removed */
+        $argsAt = [];
 
         $it = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)
@@ -487,7 +492,8 @@ final class BreakerAttributionTest extends TestCase
                 self::assertSame(0, $depth, "unbalanced argument list at {$site}");
 
                 if ($commas > 0) {
-                    $attributed[] = $site;   // chain id PLUS a bounded kind
+                    $attributed[]  = $site;   // chain id PLUS a bounded kind
+                    $argsAt[$site] = (string) preg_replace('/\s+/', '', substr($code, $offset, $p - $offset - 1));
                 } else {
                     $unattributed[] = $site; // chain id alone — a domain judgement
                 }
@@ -496,20 +502,27 @@ final class BreakerAttributionTest extends TestCase
 
         self::assertNotSame([], $attributed, 'anti-vacuity: some site must be attributed');
         self::assertCount(
-            2,
+            4,
             $attributed,
-            "exactly the two ApiRetry sites carry attribution; got:\n  " . implode("\n  ", $attributed)
+            "the two ApiRetry sites and the two validator-index sites carry attribution; got:\n  " . implode("\n  ", $attributed)
         );
-        foreach ($attributed as $site) {
-            self::assertStringContainsString('Support/ApiRetry.php', $site);
+        $transport = array_values(array_filter($attributed, static fn (string $s): bool => str_contains($s, 'Support/ApiRetry.php')));
+        self::assertCount(2, $transport, 'exactly two ApiRetry sites');
+        foreach (array_diff($attributed, $transport) as $site) {
+            self::assertStringContainsString('Services/ChainRefreshService.php', $site);
+            // ⚠ A DOMAIN SITE NEVER NAMES A KIND ITSELF. It forwards what the
+            // receipt measured, and nothing else can reach the breaker here.
+            self::assertSame('$chainId,$indexOutcome->domainChargeKind()', $argsAt[$site], "{$site} may only forward the receipt's kind");
         }
-        // ⚠ WAS 8, IS 5 (S8). The three `CosmwasmDiscoveryWorker` charge sites
-        // went with the worker. The survivors are ChainRefreshService (3) and
-        // NftEthIndexerWorker (2), both retained. This stays an exact count
-        // rather than a floor: a NEW unattributed domain-level charge is a
-        // decision someone has to make deliberately.
+        // ⚠ WAS 8, THEN 5 (S8), NOW 3. The three `CosmwasmDiscoveryWorker`
+        // charge sites went with the worker, and the two validator-index sites
+        // now forward the receipt's kind (above). The survivors are
+        // ChainRefreshService's collection refresh (1) and NftEthIndexerWorker
+        // (2). This stays an exact count rather than a floor: a NEW
+        // unattributed domain-level charge is a decision someone has to make
+        // deliberately.
         self::assertCount(
-            5,
+            3,
             $unattributed,
             "the five domain-level sites must stay unattributed; got:\n  " . implode("\n  ", $unattributed)
         );
@@ -604,26 +617,29 @@ final class BreakerAttributionTest extends TestCase
      * type cannot fail, so it is gone rather than kept green.
      *
      * What survives is the half that was never about enumeration: the breaker
-     * vocabulary is exactly three tokens wide and carries no duplicates,
-     * because it is sized to the charging rule and nothing else.
+     * vocabulary carries no duplicates and is sized to what can be charged:
+     * the three transport outcomes, plus `refused`, the one DOMAIN charge
+     * with a measured wire outcome behind it (a provider refusal the
+     * transport noted on the receipt but did not charge). The mapper below
+     * still returns null for every 4xx, so the transport rule is unchanged.
      */
     public function testTheBreakerVocabularyIsExactlyAsWideAsTheChargeRule(): void
     {
         $kinds = ProviderFailureKind::all();
 
         self::assertNotSame([], $kinds, 'anti-vacuity: the vocabulary must be readable');
-        self::assertCount(3, $kinds);
+        self::assertCount(4, $kinds);
         self::assertSame(count($kinds), count(array_unique($kinds)));
 
-        // The three tokens are NAMED, not merely counted: a silent rename
-        // would otherwise pass a pure count check. Sorted, because `all()`
-        // returns them in declaration order and that order is not contract.
+        // The tokens are NAMED, not merely counted: a silent rename would
+        // otherwise pass a pure count check. Sorted, because `all()` returns
+        // them in declaration order and that order is not contract.
         $sorted = array_map('strval', $kinds);
         sort($sorted);
         self::assertSame(
-            ['http_5xx', 'rate_limited', 'transport'],
+            ['http_5xx', 'rate_limited', 'refused', 'transport'],
             $sorted,
-            'the three breaker tokens are part of the contract, not an implementation detail'
+            'the breaker tokens are part of the contract, not an implementation detail'
         );
     }
 

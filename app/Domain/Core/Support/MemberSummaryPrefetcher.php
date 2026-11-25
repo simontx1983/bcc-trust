@@ -22,6 +22,9 @@
  * byte-identical so `UserViewService::getSummary($_, $_, $map)`
  * doesn't need any change.
  *
+ * F-571: primeFor() takes the viewer too. Two of the maps (reviews written,
+ * disputes signed) are that viewer's: see contentCountsFor().
+ *
  * @package BCC\Trust\Core\Support
  * @since 2026-05-14
  */
@@ -41,6 +44,7 @@ use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -63,11 +67,17 @@ final class MemberSummaryPrefetcher
      * short-circuit before calling this if they have no users to
      * hydrate, but the helper itself stays safe to call regardless.
      *
+     * ⚠ PER VIEWER (F-571): `reviews_written_counts` and
+     * `disputes_signed_counts` leave out the SECRET pages `$viewerId` may
+     * not see (contentCountsFor()). Pass the SAME viewer the cards are then
+     * built for with getSummary(), and never reuse the map for another one.
+     *
      * @param list<int> $userIds Bounded by caller; the IN-clause is
      *                           expected to be paginated upstream.
+     * @param int       $viewerId who the cards are built for; 0 = anonymous
      * @return array<string, mixed>
      */
-    public static function primeFor(array $userIds): array
+    public static function primeFor(array $userIds, int $viewerId): array
     {
         // Warm WP's request-global user + user-meta caches in two batch
         // queries before any per-row hydration runs. CardViewService /
@@ -94,6 +104,7 @@ final class MemberSummaryPrefetcher
         $solidsReceivedCounts = $solidId === null
             ? []
             : (new PeepSoReactionRepository())->countReceivedByUsers($userIds, $solidId);
+        $contentCounts = self::contentCountsFor($userIds, $viewerId);
 
         return [
             'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
@@ -101,7 +112,7 @@ final class MemberSummaryPrefetcher
             // watches. Batched for the identical reason the passive side
             // is: N × getCounts() would issue 2N sequential COUNTs.
             'following_counts'             => PeepSoFollowerRepository::getFollowingCountForUsers($userIds),
-            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
+            'primary_halls'                => \BCC\Trust\Onchain\Repositories\HallRepository::primaryHallsForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             // Attestation-backed since the endorsements-table retirement:
@@ -109,8 +120,8 @@ final class MemberSummaryPrefetcher
             // (target_kind='user_profile', keyed by raw user id).
             'endorsements_received_counts' => (new AttestationRepository())->countActiveVouchesByTargets('user_profile', $userIds),
             'solids_received_counts'       => $solidsReceivedCounts,
-            'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
-            'disputes_signed_counts'       => DisputeRepository::countByReporters($userIds),
+            'reviews_written_counts'       => $contentCounts['reviews_written_counts'],
+            'disputes_signed_counts'       => $contentCounts['disputes_signed_counts'],
             'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
             'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
@@ -122,5 +133,119 @@ final class MemberSummaryPrefetcher
             // per-row memberState read.
             'member_states'                => Plugin::instance()->rankStateService()->memberStatesFor($userIds),
         ];
+    }
+
+    /**
+     * F-571: each member's `reviews_written` and `disputes_signed` as
+     * $viewerId may see them, for a list of member cards. They leave out the
+     * SECRET pages that viewer may not see, as the member's own Reviews and
+     * Disputes lists do (UserReviewsService / UserDisputesService, F-528), so
+     * a card's chip agrees with the list it opens.
+     *
+     * Per LIST, not per member: one secret-page read per table for the whole
+     * list (VoteRepository::findSecretPageIdsReviewedByAny(),
+     * DisputeRepository::findSecretPageIdsDisputedByAny()), one
+     * PageAccess::hiddenAmong() for the viewer, then the batched counts leave
+     * the hidden pages out in SQL.
+     *
+     * Exempt, with no read: the viewer's OWN card (they see every page of
+     * their own), and a viewer who is a site admin. ⚠ The exemption is
+     * $viewerId's own: the request user's when the viewer IS that user, and
+     * otherwise asked of the viewer (ProfileAccess::userIsExemptFromVisibility(),
+     * as AnnouncementPageAccess does). A list built for someone else never
+     * borrows the requester's rights.
+     *
+     * ⚠ FAILS CLOSED, never 503: when a secret-page read fails, or the list's
+     * members together pass PageAccess::HIDDEN_LIST_CAP (logged, and counted
+     * on `page_privacy` / `member_list_over_cap`), that count is 0 on every
+     * card but the viewer's own. A whole list must not answer 503 over a
+     * chip, and an unfiltered count would show what the viewer may not see.
+     * Rationale: F-571 (private tracker).
+     *
+     * @param list<int> $userIds
+     * @param int       $viewerId who the cards are built for; 0 = anonymous
+     * @return array{reviews_written_counts: array<int, int>, disputes_signed_counts: array<int, int>}
+     */
+    public static function contentCountsFor(array $userIds, int $viewerId): array
+    {
+        $ids = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = $intId;
+            }
+        }
+        $ids = array_values($ids);
+
+        $voteRepo = new VoteRepository();
+        $exempt   = $viewerId > 0 && ($viewerId === (int) get_current_user_id()
+            ? ProfileAccess::viewerIsExemptFromVisibility()
+            : ProfileAccess::userIsExemptFromVisibility($viewerId));
+        $others   = array_values(array_filter($ids, static fn (int $id): bool => $id !== $viewerId));
+
+        if ($exempt || $others === []) {
+            return [
+                'reviews_written_counts' => self::countOf('reviews_written_counts', $voteRepo, $ids, []),
+                'disputes_signed_counts' => self::countOf('disputes_signed_counts', $voteRepo, $ids, []),
+            ];
+        }
+
+        return [
+            'reviews_written_counts' => self::countSeenBy('reviews_written_counts', $voteRepo, $ids, $others, $viewerId),
+            'disputes_signed_counts' => self::countSeenBy('disputes_signed_counts', $voteRepo, $ids, $others, $viewerId),
+        ];
+    }
+
+    /**
+     * One count of contentCountsFor(): the list's hidden pages found once,
+     * then the batched count without them. The viewer's own card is counted
+     * in full, and only the viewer's own card survives a failed read.
+     *
+     * @param 'reviews_written_counts'|'disputes_signed_counts' $map
+     * @param list<int> $ids    every member of the list
+     * @param list<int> $others the members other than the viewer
+     * @return array<int, int>
+     */
+    private static function countSeenBy(string $map, VoteRepository $voteRepo, array $ids, array $others, int $viewerId): array
+    {
+        try {
+            $secret = $map === 'reviews_written_counts'
+                ? $voteRepo->findSecretPageIdsReviewedByAny($others)
+                : DisputeRepository::findSecretPageIdsDisputedByAny($others);
+            $hidden = PageAccess::hiddenAmong($secret, $viewerId, false);
+        } catch (RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::error('[MemberSummaryPrefetcher] secret-page read failed: member cards show this count as 0', [
+                'count'     => $map,
+                'viewer_id' => $viewerId,
+                'error'     => $e->getMessage(),
+            ]);
+            $hidden = null;
+        }
+
+        if ($hidden === []) {
+            return self::countOf($map, $voteRepo, $ids, []);
+        }
+
+        $out = $hidden === null ? [] : self::countOf($map, $voteRepo, $others, $hidden);
+        if (count($others) < count($ids)) {
+            $out += self::countOf($map, $voteRepo, [$viewerId], []);
+        }
+
+        return $out;
+    }
+
+    /**
+     * The batched count behind one map, leaving out $exclude.
+     *
+     * @param 'reviews_written_counts'|'disputes_signed_counts' $map
+     * @param list<int> $members
+     * @param list<int> $exclude
+     * @return array<int, int>
+     */
+    private static function countOf(string $map, VoteRepository $voteRepo, array $members, array $exclude): array
+    {
+        return $map === 'reviews_written_counts'
+            ? $voteRepo->countByVoters($members, $exclude)
+            : DisputeRepository::countByReporters($members, $exclude);
     }
 }

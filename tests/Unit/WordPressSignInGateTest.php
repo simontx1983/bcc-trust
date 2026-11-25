@@ -7,6 +7,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 use BCC\Trust\Core\Security\WordPressSignInGate;
 use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Tests\Support\BootFileScope;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -91,8 +92,13 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
         self::assertSame([[WordPressSignInGate::class, 'keepPathWordsOffGroups'], 10, 6], $hooks['wp_unique_post_slug']);
         self::assertSame([[WordPressSignInGate::class, 'noXmlRpc'], PHP_INT_MAX, 1], $hooks['xmlrpc_enabled']);
+        self::assertSame([[WordPressSignInGate::class, 'noXmlRpcMethods'], PHP_INT_MAX, 1], $hooks['xmlrpc_methods']);
+        self::assertSame([[WordPressSignInGate::class, 'noPingbackHeader'], PHP_INT_MAX, 1], $hooks['wp_headers']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['comments_open']);
+        self::assertSame([[WordPressSignInGate::class, 'closedToCoreComments'], PHP_INT_MAX, 1], $hooks['pings_open']);
         self::assertSame([[WordPressSignInGate::class, 'noNativeSignUp'], PHP_INT_MAX, 1], $hooks['pre_option_users_can_register']);
         self::assertSame([[WordPressSignInGate::class, 'peepsoSignUpDisabled'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_site_registration_disabled']);
+        self::assertSame([[WordPressSignInGate::class, 'peepsoDataExportOff'], PHP_INT_MAX, 1], $hooks['peepso_filter_get_option_gdpr_enable']);
     }
 
     /**
@@ -126,6 +132,47 @@ final class WordPressSignInGateTest extends TestCase
         self::assertFalse(self::filtered('xmlrpc_enabled', true, [[static fn($on): bool => true, 99]]));
     }
 
+    /** No XML-RPC method answers, even after a later filter adds one back. */
+    public function testNoXmlRpcMethodAnswersWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        $core = ['core.methodOne' => 'this:methodOne', 'core.methodTwo' => 'this:methodTwo'];
+        self::assertSame([], self::filtered('xmlrpc_methods', $core, [[static fn($m): array => $m + ['demo.sayHello' => 'this:sayHello'], 99]]));
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function commentAndPingHooks(): iterable
+    {
+        yield 'comments' => ['comments_open'];
+        yield 'pings'    => ['pings_open'];
+    }
+
+    /**
+     * Core comments and pings are closed on every post: whatever core read
+     * from the post (open), and even after a later plugin opened them again,
+     * the answer core's comment handlers and trackbacks get is false.
+     */
+    #[DataProvider('commentAndPingHooks')]
+    public function testCoreCommentsAndPingsAreClosedWhateverCameBefore(string $hook): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertFalse(self::filtered($hook, true, [[static fn($open): bool => true, 99]]));
+        self::assertFalse(self::filtered($hook, '1', [[static fn($open): string => 'open', 10]]));
+        self::assertFalse(self::filtered($hook, false, []), 'a closed post stays closed');
+    }
+
+    /** X-Pingback is dropped; every other header passes through unchanged. */
+    public function testThePingbackHeaderIsDroppedAndNothingElse(): void
+    {
+        $headers = ['Content-Type' => 'text/html; charset=UTF-8', 'X-Pingback' => 'https://cms.example.test/xmlrpc.php', 'Link' => '<x>; rel=y'];
+
+        self::assertSame(['Content-Type' => 'text/html; charset=UTF-8', 'Link' => '<x>; rel=y'], WordPressSignInGate::noPingbackHeader($headers));
+        self::assertSame(['Content-Type' => 'text/html'], WordPressSignInGate::noPingbackHeader(['Content-Type' => 'text/html']));
+        self::assertSame('not headers', WordPressSignInGate::noPingbackHeader('not headers'), 'anything else passes through');
+    }
+
     /** WordPress's own sign-up reads '0', even after a filter turned it on. */
     public function testNativeSignUpIsOffWhateverCameBefore(): void
     {
@@ -140,6 +187,37 @@ final class WordPressSignInGateTest extends TestCase
         WordPressSignInGate::register();
 
         self::assertSame(1, self::filtered('peepso_filter_get_option_site_registration_disabled', 0, [[static fn($v): int => 0, 99]]));
+    }
+
+    /**
+     * PeepSo's built-in data export reads off (F-581), even when the stored
+     * setting is on and filters at every lower priority turn it back on.
+     */
+    public function testPeepSoDataExportIsOffWhateverCameBefore(): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertSame(0, self::filtered('peepso_filter_get_option_gdpr_enable', 1, []), 'the stored setting alone');
+        self::assertSame(0, self::filtered('peepso_filter_get_option_gdpr_enable', '1', [
+            [static fn($v): int => 1, 10],
+            [static fn($v): string => '1', 99],
+            [static fn($v): bool => true, PHP_INT_MAX - 1],
+        ]), 'filters that turn it back on, at every lower priority');
+    }
+
+    /**
+     * The gate registers at boot: bcc-trust.php calls register() at file
+     * scope, outside every function, closure and class, so its filters are
+     * in place when the plugin file loads, before `plugins_loaded` and
+     * `init` (F-581: PeepSo reads its data-export setting during `init`).
+     */
+    public function testTheGateRegistersAtBootBeforeInit(): void
+    {
+        self::assertSame(
+            [true],
+            BootFileScope::calls('bcc-trust.php', '\\BCC\\Trust\\Core\\Security\\WordPressSignInGate', 'register'),
+            'exactly one register() call, at file scope'
+        );
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
@@ -673,6 +751,37 @@ final class WordPressSignInGateTest extends TestCase
         $GLOBALS['__bcc_sig']['current'] = $user;
 
         self::assertSame('status', self::runInit('/x/peepsoajax/module.method'));
+        self::assertBare403();
+    }
+
+    /** @return array<string, array{string}> */
+    public static function peepsoMemberDataExportActions(): array
+    {
+        return [
+            'request the export'   => ['profile.request_account_data'],
+            'download the export'  => ['profile.download_account_data'],
+            'delete the archive'   => ['profile.delete_account_data_archive'],
+        ];
+    }
+
+    /**
+     * These actions stay closed to members by this refusal; it must stay at
+     * `init` PHP_INT_MIN, before PeepSo's router (F-581, private tracker).
+     */
+    #[DataProvider('peepsoMemberDataExportActions')]
+    public function testTheRouterRefusalKeepsPeepSoMemberDataExportActionsClosed(string $method): void
+    {
+        WordPressSignInGate::register();
+        $init = array_values(array_filter(
+            $GLOBALS['__bcc_sig']['hooks'],
+            static fn(array $h): bool => $h[0] === 'init' && $h[1] === [WordPressSignInGate::class, 'refuseWordPressAjax']
+        ));
+        self::assertCount(1, $init, 'registered once at init');
+        self::assertSame(PHP_INT_MIN, $init[0][2], 'at PHP_INT_MIN, before PeepSo routes the call');
+
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
+
+        self::assertSame('status', self::runInit('/peepsoajax/' . $method));
         self::assertBare403();
     }
 

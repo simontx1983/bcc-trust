@@ -14,8 +14,10 @@
  *   - bcc-search returns `tier: 'elite'` (reputation tier).
  *     §A2 forbids the frontend from mapping a tier onto a display
  *     label. The mapping must happen server-side.
- *   - bcc-search returns `category_slug: 'builder'` (legacy page_type).
- *     The §C1 contract speaks `card_kind: 'project'`. Same rule.
+ *   - The §C1 contract speaks `card_kind: 'project'`, while a page
+ *     stores its legacy type (`_bcc_page_type: 'builder'`). Same rule:
+ *     card_kind is read from that stored type (bcc-search's
+ *     `category_slug` is a PeepSo category, not a page type).
  *   - bcc-search returns the WordPress permalink in `page_url`. The
  *     headless frontend uses Next.js routes (`/v/:slug`, `/p/:slug`,
  *     `/c/:slug`). We resolve those server-side too.
@@ -144,23 +146,21 @@ final class CardsSearchEndpoint
             return self::okItems($members ?? [], $members === null);
         }
 
-        // Translate canonical kind → bcc-search's category_slug
-        // (legacy page_type). Empty kind = all categories. Only the
-        // three page kinds can reach this map — member/community
-        // returned above — so a hit is guaranteed when $kindParam is
-        // non-empty.
-        $categorySlug = $kindParam !== ''
-            ? PageTypeMap::KIND_TO_PAGE_TYPE[$kindParam]
-            : '';
-
         // Internal call — same WordPress request, no HTTP round-trip.
         // bcc-search's controller does FULLTEXT lookup + trust
         // enrichment + 60s cache + rate limit. We just consume the
         // result.
+        //
+        // A page kind goes through as bcc-search's `kind` (F-592), which
+        // filters on the page's stored type in the same vocabulary. Only
+        // the three page kinds reach here (member/community returned
+        // above). NOT `type`: that is a PeepSo CATEGORY slug, no category
+        // is named after a page type, and an unknown category answers
+        // with nothing, so every page-scoped search came back empty.
         $internal = new WP_REST_Request('GET', '/bcc/v1/search');
         $internal->set_param('q', $query);
-        if ($categorySlug !== '') {
-            $internal->set_param('type', $categorySlug);
+        if ($kindParam !== '') {
+            $internal->set_param('kind', $kindParam);
         }
         $upstream = rest_do_request($internal);
 
@@ -562,9 +562,9 @@ final class CardsSearchEndpoint
 
     /**
      * Build a single SearchSuggestion from a bcc-search row, or null
-     * when the row is missing required fields or its category is
-     * outside our allowed kinds (e.g. 'dao' which is not a card kind
-     * in V1 per §C1).
+     * when the row is missing required fields, the page is gone, or its
+     * stored type is outside our allowed kinds (e.g. 'dao' which is not
+     * a card kind in V1 per §C1).
      *
      * @param array<string, mixed> $row
      * @param array<int, true> $claimVerifiedMap page_id => true for pages
@@ -589,32 +589,28 @@ final class CardsSearchEndpoint
             return null;
         }
 
-        // Resolve handle from post_name (bcc-search doesn't include
-        // it). Falls back to the page_id if the post is gone — the
-        // CardsEndpoint route accepts numeric IDs as a slug per its
-        // ID_PATTERN regex.
+        // A page gone since bcc-search read it has no stored type to
+        // route by.
         $post = get_post($pageId);
-        $handle = $post !== null && $post->post_name !== ''
-            ? $post->post_name
-            : (string) $pageId;
-
-        // bcc-search's `category_slug` is the canonical source, but it
-        // ships null when the search index hasn't been backfilled with
-        // category data. Fall back to the `_bcc_page_type` post meta —
-        // which IS the canonical card_kind store per PageTypeMap — so a
-        // partial search index doesn't make every result invisible.
-        $categorySlug = isset($row['category_slug']) && is_string($row['category_slug'])
-            ? $row['category_slug']
-            : '';
-        $kind = $categorySlug !== ''
-            ? PageTypeMap::kindForPageType($categorySlug)
-            : null;
-        if ($kind === null && $post !== null) {
-            $pageType = (string) get_post_meta($pageId, '_bcc_page_type', true);
-            if ($pageType !== '') {
-                $kind = PageTypeMap::kindForPageType($pageType);
-            }
+        if ($post === null) {
+            return null;
         }
+
+        // Resolve handle from post_name (bcc-search doesn't include
+        // it). Falls back to the page_id — the CardsEndpoint route
+        // accepts numeric IDs as a slug per its ID_PATTERN regex.
+        $handle = $post->post_name !== '' ? $post->post_name : (string) $pageId;
+
+        // card_kind comes ONLY from the page's stored `_bcc_page_type`
+        // (F-592): the store PageTypeMap names canonical, which the card
+        // route validates against and bcc-search's `kind` filters on. A
+        // page with no stored type is a project, as everywhere else. NOT
+        // bcc-search's `category_slug`: that is a PeepSo category, and
+        // reading it first could link a page under a kind its own card
+        // route rejects.
+        $kind = PageTypeMap::kindForStoredPageType(
+            (string) get_post_meta($pageId, '_bcc_page_type', true)
+        );
         if ($kind === null || !isset(self::KIND_TO_ROUTE_PREFIX[$kind])) {
             return null;
         }

@@ -61,6 +61,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Services\MessagesService;
+use BCC\Trust\Core\ValueObjects\CapabilityDecision;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 
 if (!defined('ABSPATH')) {
@@ -102,7 +103,7 @@ final class MemberCardPrefetcher
             (new ReputationRepository())->primeByUserIds($reputationIds);
         }
 
-        $map = MemberSummaryPrefetcher::primeFor($idList);
+        $map = MemberSummaryPrefetcher::primeFor($idList, $viewerId);
 
         $attestationRepo = new AttestationRepository();
 
@@ -163,6 +164,37 @@ final class MemberCardPrefetcher
             ? MessagesService::canMessageMany($viewerId, $idList)
             : [];
 
+        // The viewer's own write_review decision (each card's can_review),
+        // which depends on the viewer alone: read once for the page rather
+        // than once per card. Tagged with the viewer it was read for;
+        // viewerWriteReview() hands it out for that viewer only.
+        // ⚠ VIEWER-SCOPED, like message_eligibility.
+        $map['viewer_write_review'] = $viewerId > 0 && $idList !== []
+            ? [
+                'viewer_id' => $viewerId,
+                'decision'  => \BCC\Trust\Core\Plugin::instance()->capabilityResolver()->can($viewerId, 'write_review'),
+            ]
+            : null;
+
         return $map;
+    }
+
+    /**
+     * The page's write_review decision for $viewerId from a bundle primeFor()
+     * built, or null when the bundle has none, or was built for another
+     * viewer (the card then reads it itself, so a mismatched bundle can
+     * never lend one viewer's decision to another).
+     *
+     * @param array<string, mixed>|null $prefetched
+     */
+    public static function viewerWriteReview(?array $prefetched, int $viewerId): ?CapabilityDecision
+    {
+        $entry = $prefetched['viewer_write_review'] ?? null;
+        if (!is_array($entry) || ($entry['viewer_id'] ?? null) !== $viewerId) {
+            return null;
+        }
+        $decision = $entry['decision'] ?? null;
+
+        return $decision instanceof CapabilityDecision ? $decision : null;
     }
 }

@@ -183,6 +183,23 @@ final class NotificationType
     public const ANNOUNCEMENT_RESTORED              = 'bcc_announcement_restored';
 
     /**
+     * Validator relationships: a staff member linked, revoked or cancelled a
+     * validator page owner. Sent to EVERY administrator, bell only.
+     * external_id = the page; the link opens the admin page view.
+     */
+    public const VALIDATOR_OWNER_LINKED             = 'bcc_validator_owner_linked';
+    public const VALIDATOR_OWNER_REVOKED            = 'bcc_validator_owner_revoked';
+    public const VALIDATOR_OWNER_LINK_CANCELLED     = 'bcc_validator_owner_link_cancelled';
+
+    /**
+     * Validator relationships: the member became, or stopped being, a
+     * validator page's verified owner. Self-notification, bell only; names
+     * no staff member. external_id = the page.
+     */
+    public const VALIDATOR_OWNERSHIP_GRANTED        = 'bcc_validator_ownership_granted';
+    public const VALIDATOR_OWNERSHIP_REMOVED        = 'bcc_validator_ownership_removed';
+
+    /**
      * F-345 — the reviewed party replied to the member's review. Recipient =
      * the reviewer, actor = the replier. Bell only (no push, kept out of the
      * digest). external_id is the reviewed page, so the row links to its
@@ -206,6 +223,11 @@ final class NotificationType
         self::GROUP_INVITED,
         self::ANNOUNCEMENT_HIDDEN,
         self::ANNOUNCEMENT_RESTORED,
+        self::VALIDATOR_OWNER_LINKED,
+        self::VALIDATOR_OWNER_REVOKED,
+        self::VALIDATOR_OWNER_LINK_CANCELLED,
+        self::VALIDATOR_OWNERSHIP_GRANTED,
+        self::VALIDATOR_OWNERSHIP_REMOVED,
         self::REVIEW_REPLY,
     ];
 
@@ -251,6 +273,11 @@ final class NotificationType
         self::GROUP_INVITED,
         self::ANNOUNCEMENT_HIDDEN,
         self::ANNOUNCEMENT_RESTORED,
+        self::VALIDATOR_OWNER_LINKED,
+        self::VALIDATOR_OWNER_REVOKED,
+        self::VALIDATOR_OWNER_LINK_CANCELLED,
+        self::VALIDATOR_OWNERSHIP_GRANTED,
+        self::VALIDATOR_OWNERSHIP_REMOVED,
         self::REVIEW_REPLY,
     ];
 

@@ -5,7 +5,7 @@
  *
  *   GET /bcc/v1/sitemap/members?after=&limit=   member profiles   (/u/{handle})
  *   GET /bcc/v1/sitemap/pages?after=&limit=     entity pages      (/v/, /p/, /c/{slug})
- *   GET /bcc/v1/sitemap/groups?after=&limit=    open groups       (/halls/, /communities/{slug})
+ *   GET /bcc/v1/sitemap/groups?after=&limit=    open groups       (/communities/{slug})
  *
  * Each answers `{ items: [{ path }], next_after }`, keyset-paged by id.
  * `next_after` is the last id SCANNED, so a page can hold fewer items than

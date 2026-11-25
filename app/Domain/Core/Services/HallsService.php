@@ -28,10 +28,13 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoGroupWriter;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\HallRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
@@ -88,7 +91,7 @@ final class HallsService
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
      */
-    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain): array
+    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain, string $query = ''): array
     {
         $page     = max(1, $page);
         $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
@@ -105,8 +108,10 @@ final class HallsService
             }
         }
 
-        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize);
-        $total = PeepSoGroupRepository::countHalls($chainId);
+        // The optional name filter goes to both reads, so the page and its
+        // total always agree.
+        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize, $query);
+        $total = PeepSoGroupRepository::countHalls($chainId, $query);
 
         $groupIds       = array_map(static fn($r) => (int) $r->id, $rows);
         $myMemberships  = $this->loadViewerMemberships($viewerId, $groupIds);
@@ -131,7 +136,7 @@ final class HallsService
                     $myMemberships[$groupId] ?? null,
                     $primaryGroupId
                 ),
-                'links'             => ['self' => '/halls/' . $row->post_name],
+                'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
             ];
         }
 
@@ -279,7 +284,7 @@ final class HallsService
                 $myMemberships[$groupId] ?? null,
                 $primaryGroupId
             ),
-            'links'             => ['self' => '/halls/' . $row->post_name],
+            'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
         ];
     }
 
@@ -480,6 +485,18 @@ final class HallsService
         $myMemberships = $this->loadViewerMemberships($viewerId, [$groupId]);
         $row = $myMemberships[$groupId] ?? null;
         if ($row === null) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Join the Hall before setting it as your home Hall.'];
+        }
+
+        // A home Hall accepts only published Halls. Anything else gets the
+        // same answer as a non-member, so the reply says nothing more about
+        // the group; a check that cannot be read is retryable, never a yes.
+        try {
+            $isHall = HallRepository::publishedHallIds([$groupId]) === [$groupId];
+        } catch (RepositoryReadFailure) {
+            return ['error' => 'bcc_unavailable', 'message' => "We couldn't check this Hall just now. Please try again in a moment."];
+        }
+        if (!$isHall) {
             return ['error' => 'bcc_forbidden', 'message' => 'Join the Hall before setting it as your home Hall.'];
         }
 

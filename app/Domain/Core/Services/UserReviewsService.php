@@ -159,7 +159,7 @@ final class UserReviewsService
         $replyAuthorIds = ReviewReplyService::replyAuthorIds($replies);
         $prefetched     = $replyAuthorIds === []
             ? null
-            : \BCC\Trust\Core\Support\MemberSummaryPrefetcher::primeFor($replyAuthorIds);
+            : \BCC\Trust\Core\Support\MemberSummaryPrefetcher::primeFor($replyAuthorIds, $viewerId);
 
         $items = [];
         $now   = time();

@@ -154,9 +154,20 @@ class PageDiscoveryService {
         string $status = '',
         ?float $min_self_stake = null
     ): array {
+        // F-584: the `status` filter matches only validators on a chain that
+        // is still answering (any other reads `unknown`). Active chains only:
+        // a deactivated chain is not indexed, so its statuses are frozen.
+        $statusChainIds = $status !== ''
+            ? \BCC\Trust\Onchain\Support\ValidatorStatusProjection::currentAmong(array_map(
+                static fn (object $chain): int => (int) $chain->id,
+                \BCC\Trust\Onchain\Repositories\ChainRepository::getActive()
+            ))
+            : [];
+
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake,
+            $statusChainIds
         );
 
         $rows = $result['rows'];
@@ -207,21 +218,9 @@ class PageDiscoveryService {
         $post_id  = (int) $row->ID;
         $owner_id = (int) $row->owner_id;
 
-        // Avatar and cover (still need PeepSo API).
-        $avatar = '';
-        $cover  = '';
-
-        if (class_exists('PeepSoPagePhoto')) {
-            $photo = \PeepSoPagePhoto::get_instance();
-            if ($photo) {
-                $avatar = $photo->get_page_avatar_url($post_id) ?: '';
-                $cover  = $photo->get_page_cover_url($post_id) ?: '';
-            }
-        }
-
-        if (!$avatar) {
-            $avatar = get_the_post_thumbnail_url($post_id, 'thumbnail') ?: '';
-        }
+        // Avatar and cover. Both resolvers are below.
+        $avatar = $this->resolvePageAvatarUrl($post_id);
+        $cover  = $this->resolvePageCoverUrl($post_id);
 
         $claimer = $claimsMap[$post_id] ?? null;
 
@@ -374,20 +373,8 @@ class PageDiscoveryService {
         }
 
         // Avatar and cover.
-        $avatar = '';
-        $cover  = '';
-
-        if (class_exists('PeepSoPagePhoto')) {
-            $photo = \PeepSoPagePhoto::get_instance();
-            if ($photo) {
-                $avatar = $photo->get_page_avatar_url($post_id) ?: '';
-                $cover  = $photo->get_page_cover_url($post_id) ?: '';
-            }
-        }
-
-        if (!$avatar) {
-            $avatar = get_the_post_thumbnail_url($post_id, 'thumbnail') ?: '';
-        }
+        $avatar = $this->resolvePageAvatarUrl($post_id);
+        $cover  = $this->resolvePageCoverUrl($post_id);
 
         // Page type from meta.
         $page_type = get_post_meta($post_id, '_bcc_page_type', true);
@@ -434,6 +421,101 @@ class PageDiscoveryService {
         ];
     }
 
+    /**
+     * A page's avatar URL, or '' when it has none.
+     *
+     * ⚠⚠ REPLACES A BRANCH THAT NEVER RAN. Both call sites previously
+     * read the avatar and cover through `PeepSoPagePhoto`, guarded by
+     * `class_exists('PeepSoPagePhoto')` — and NO SUCH CLASS EXISTS.
+     * `peepso-pages` is installed and defines `PeepSoPage`; a grep of
+     * the whole plugin tree finds that name only in those two calls, and
+     * `get_page_avatar_url()` / `get_page_cover_url()` exist on nothing.
+     * So the guard was always false, both values stayed '', and page
+     * discovery served no avatar and no cover.
+     *
+     * ⚠ It was latent-fatal as well as dead: anything defining a
+     * `PeepSoPagePhoto` WITHOUT those two methods would have turned both
+     * lines into `Call to undefined method`. PHPStan could see neither
+     * problem, because an unknown class has no methods to check.
+     *
+     * ── WHY THE PATH IS BUILT HERE, NOT READ FROM PeepSoPage ─────────
+     *
+     * ⚠⚠ `PeepSoPage::get_avatar_url()` IS NOT CALLED, and must not be:
+     * it performs TWO WRITES on what is a read path, once per page in a
+     * bounded discovery loop.
+     *
+     * 1. `get_image_dir()` ends in `_make_user_dir()`, which `@mkdir()`s
+     *    the directory when it is absent (page.php:872-880). Asking for
+     *    the path CREATES it.
+     * 2. it calls `set_avatar_custom_flag()` (page.php:532-544), and for
+     *    the miss case that flag can never settle: it stores `FALSE`,
+     *    which `update_post_meta` persists as `''`, and the guard
+     *    `FALSE === $flag && 0 == $current_val` is then `0 == ''` — FALSE
+     *    under PHP 8 (verified on 8.2.30). So the short-circuit never
+     *    engages and the meta is REWRITTEN ON EVERY READ, forever.
+     *
+     * It is also wrong for this caller even when it writes nothing: with
+     * the hash present but the FILE missing — a database copied without
+     * the uploads directory, which happens on staging — it answers
+     * `get_default_avatar_url()`, so a page that should fall back to its
+     * WP featured image would show PeepSo's generic default instead.
+     *
+     * ⇒ So the path is assembled here from PeepSo's own two STATIC,
+     * read-only accessors, exactly as `get_avatar_url()` assembles it
+     * (page.php:504-517) — `{dir}pages/{id}/{hash}-avatar-full.jpg` — and
+     * the file is checked before any URL is returned. No page object is
+     * constructed, nothing is created, nothing is written.
+     *
+     * `peepso_page_avatar_hash` is written by the UPLOAD path (pageajax)
+     * and never by a getter, so a non-empty hash means a real uploaded
+     * avatar. Everything else falls through to the featured image, which
+     * is exactly today's behaviour for those pages.
+     *
+     * ⚠ `is_file()`, deliberately stricter than PeepSo's `file_exists()`:
+     * a DIRECTORY with that name is not a servable image, and falling
+     * back beats serving a URL that 404s.
+     *
+     * ⚠ Known gap, stated rather than hidden: an avatar predating hashing
+     * has no hash and is still missed. Strictly better than today, where
+     * every page is missed, and it fails to the same fallback.
+     */
+    private function resolvePageAvatarUrl(int $postId): string
+    {
+        $hash = get_post_meta($postId, 'peepso_page_avatar_hash', true);
+
+        if (is_string($hash) && $hash !== '' && class_exists('PeepSo')) {
+            $name = $hash . '-avatar-full.jpg';
+            $file = \PeepSo::get_peepso_dir()
+                . 'pages' . DIRECTORY_SEPARATOR . $postId . DIRECTORY_SEPARATOR . $name;
+
+            if (is_file($file)) {
+                return \PeepSo::get_peepso_uri() . 'pages/' . $postId . '/' . $name;
+            }
+        }
+
+        // Unchanged fallback: the page's WP featured image.
+        return get_the_post_thumbnail_url($postId, 'thumbnail') ?: '';
+    }
+
+    /**
+     * A page's cover URL, or '' when it has none.
+     *
+     * ⚠⚠ THE META, NOT `PeepSoPage::get_cover_url()`. That accessor
+     * starts from `get_cover_default()` and overwrites it only when the
+     * meta is non-empty, so it never reports "no cover": every page
+     * would get PeepSo's default image and no caller could tell a real
+     * cover from a placeholder. `page_cover_photo` is the only signal
+     * that separates them, and it is what the accessor itself reads.
+     *
+     * Fail-safe: anything that is not a non-empty string reads as "no
+     * cover", never as an error.
+     */
+    private function resolvePageCoverUrl(int $postId): string
+    {
+        $cover = get_post_meta($postId, 'page_cover_photo', true);
+
+        return is_string($cover) ? $cover : '';
+    }
     /**
      * Build a deterministic cache key from query parameters.
      *

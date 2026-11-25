@@ -86,6 +86,11 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951829 => ['f518-hide-off-legacy-on', $member, null, [[$hide, '0'], ['bcc_privacy_discovery_optout', '1']], false, "hide '0' but legacy '1', fold not done"],
             951830 => ['f518-hide-on', $member, null, [[$hide, 'on']], false, 'hide stored as "on"'],
             951831 => ['f518-hide-true', $member, null, [[$hide, 'true']], false, 'hide stored as "true"'],
+            // A moderation flag is set when ANY of its rows reads as on, as on
+            // the profile (UserViewService::resolveFlags()), whichever came first.
+            951832 => ['f518-flag-off-then-on', $member, null, [['bcc_hidden', '0'], ['bcc_hidden', '1']], false, 'moderation: an on row after an off row'],
+            951833 => ['f518-flag-on-then-off', $member, null, [['bcc_shadow_limited', 'yes'], ['bcc_shadow_limited', 'no']], false, 'moderation: an on row before an off row'],
+            951834 => ['f518-flag-two-off', $member, null, [['bcc_under_review', '0'], ['bcc_under_review', 'false']], true, 'moderation: only off rows'],
         ];
     }
 
@@ -112,7 +117,7 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
             951859 => [$page, 'publish', 'f518-two-types', [], [['_bcc_page_type', 'validator'], ['_bcc_page_type', 'nft']], '/v/f518-two-types', 'two type rows: the first counts, as get_post_meta reads it'],
             // Groups.
             951871 => [$group, 'publish', 'f518-open', ['0'], [], '/communities/f518-open', 'open community'],
-            951872 => [$group, 'publish', 'f518-hall', ['0'], [['_bcc_group_kind', 'hall']], '/halls/f518-hall', 'open Hall'],
+            951872 => [$group, 'publish', 'f518-hall', ['0'], [['_bcc_group_kind', 'hall']], '/communities/f518-hall', 'open Hall'],
             951873 => [$group, 'publish', 'f518-closed', ['1'], [], null, 'closed group'],
             951874 => [$group, 'publish', 'f518-secret', ['2'], [], null, 'secret group'],
             951875 => [$group, 'publish', 'f518-split-kind', ['0'], [['_bcc_group_kind', ''], ['_bcc_group_kind', 'hall']], null, 'disagreeing kind rows: the app cannot place it'],

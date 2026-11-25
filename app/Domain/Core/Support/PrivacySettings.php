@@ -42,6 +42,7 @@
 namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Repositories\UserMetaRepository;
+use BCC\Trust\Core\Repositories\DbWriteCheck;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -185,7 +186,8 @@ final class PrivacySettings
      */
     public static function readAll(int $userId): array
     {
-        $flags = self::flagsOrClosed($userId);
+        // `discovery_optout` answers as search applies it (searchOptOut()).
+        $flags = self::flagsOrClosed($userId, true);
 
         $out = [];
         foreach (self::ALL_KEYS as $key) {
@@ -231,6 +233,10 @@ final class PrivacySettings
             if (!in_array($key, self::ALL_KEYS, true)) {
                 continue;
             }
+            if ($key === 'discovery_optout') {
+                self::writeSearchOptOut($userId, $value);
+                continue;
+            }
             // Store as "1" / "0" strings (matches WP's boolean meta convention
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
@@ -246,6 +252,37 @@ final class PrivacySettings
         if ($written !== []) {
             do_action('bcc_privacy_settings_changed', $userId, $written);
         }
+    }
+
+    /**
+     * Write the hide-from-search flag: `discovery_optout` here, `hide_from_search`
+     * on /me/profile-prefs. Both endpoints write it through this one method.
+     *
+     * Switching it OFF also writes the legacy opt-out '0'. While the legacy
+     * key is still read ({@see legacyOptOutStillRead()}) a legacy on row
+     * would keep the member out of search, and fold_discovery_optout_v1
+     * copies a legacy on row into the flag. With both at '0' the member is
+     * listed whatever the fold's state. Switching it ON leaves the legacy
+     * key alone: the flag alone hides.
+     *
+     * Each write is checked on its own ({@see DbWriteCheck}), because wpdb
+     * clears last_error on every statement: one check around both would read
+     * a failed first write as saved once the second succeeded. It stops at
+     * the first failure and answers whether every write landed. If one
+     * fails the member stays hidden (one on row is enough).
+     */
+    public static function writeSearchOptOut(int $userId, bool $hidden): bool
+    {
+        $flagWritten = DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::HIDE_FROM_LISTING_META, $hidden ? '1' : '0')
+        );
+        if (!$flagWritten || $hidden) {
+            return $flagWritten;
+        }
+
+        return DbWriteCheck::run(
+            static fn () => update_user_meta($userId, self::LEGACY_DISCOVERY_OPTOUT_META, '0')
+        );
     }
 
     /** Flag reads this request that could not be trusted and read as hidden. */
@@ -291,6 +328,8 @@ final class PrivacySettings
      * ON), the direction that hides rather than leaks. WordPress's
      * update_user_meta() rewrites every row, so they only diverge when
      * something called add_user_meta() directly.
+     *
+     * `discovery_optout` answers as search applies it: {@see searchOptOut()}.
      */
     public static function flagOrUnknown(int $userId, string $key): ?bool
     {
@@ -302,44 +341,101 @@ final class PrivacySettings
         if (!in_array($metaKey, $keys, true)) {
             $keys = [$metaKey];
         }
+        $isSearchOptOut = $key === 'discovery_optout';
+        if ($isSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
 
         $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             return null;
         }
 
-        return self::strictest($values[$userId][$metaKey] ?? []);
+        $byKey = $values[$userId] ?? [];
+
+        return $isSearchOptOut ? self::searchOptOut($byKey) : self::strictest($byKey[$metaKey] ?? []);
     }
 
     /**
      * Every public flag for one member, read once. An unreadable set reads
      * as ALL HIDDEN, as {@see flag()} does.
      *
+     * `$withSearchOptOut` also reads the legacy opt-out, so that
+     * `discovery_optout` answers as search applies it
+     * ({@see searchOptOut()}). Without it, as for {@see readProfile()},
+     * which never returns that key, the read stays the ALL_KEYS one that
+     * {@see prime()} batches.
+     *
      * @return array<string, bool> public key => hidden
      */
-    private static function flagsOrClosed(int $userId): array
+    private static function flagsOrClosed(int $userId, bool $withSearchOptOut = false): array
     {
         if ($userId <= 0) {
             return array_fill_keys(self::ALL_KEYS, false);
         }
 
-        $values = UserMetaRepository::valuesOrUnknown([$userId], self::metaKeys());
+        $keys = self::metaKeys();
+        if ($withSearchOptOut) {
+            $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        }
+        $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
         if ($values === null) {
             self::$unreadReads++;
 
             return array_fill_keys(self::ALL_KEYS, true);
         }
 
+        $byKey = $values[$userId] ?? [];
         $flags = [];
         foreach (self::ALL_KEYS as $key) {
-            $flags[$key] = self::strictest($values[$userId][self::metaKey($key)] ?? []);
+            $flags[$key] = self::strictest($byKey[self::metaKey($key)] ?? []);
+        }
+        if ($withSearchOptOut) {
+            $flags['discovery_optout'] = self::searchOptOut($byKey);
         }
 
         return $flags;
     }
 
-    /** @param list<string> $rawValues */
-    private static function strictest(array $rawValues): bool
+    /**
+     * `discovery_optout` (= /me/profile-prefs `hide_from_search`) as search
+     * applies it: the per-member form of
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}.
+     * Hidden when any row of the one flag reads as on, or, until the F-257
+     * fold has completed ({@see legacyOptOutStillRead()}), any row of the
+     * legacy opt-out does. So the setting a member is shown is what search
+     * does to them (F-519).
+     *
+     * Rows match exactly as the SQL matches them,
+     * {@see \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn()}:
+     * the same set, nothing trimmed. The fold-done option is read only when
+     * the one flag is off and a legacy row is on.
+     *
+     * @param array<string, list<string>> $byKey
+     */
+    private static function searchOptOut(array $byKey): bool
+    {
+        if (\BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::HIDE_FROM_LISTING_META] ?? [])) {
+            return true;
+        }
+
+        return \BCC\Trust\Core\Repositories\UserSyncRepository::anyRowOn($byKey[self::LEGACY_DISCOVERY_OPTOUT_META] ?? [])
+            && self::legacyOptOutStillRead();
+    }
+
+    /**
+     * True when ANY stored row reads as on (FILTER_VALIDATE_BOOLEAN), so a
+     * member with both an off and an on row is treated as on: the side that
+     * hides more. For PHP-only flag reads. A read that must agree with an
+     * SQL filter uses UserSyncRepository::anyRowOn() instead (the SQL's
+     * exact truthy set, nothing trimmed).
+     *
+     * Public for the moderation flags (UserViewService::resolveFlags() and
+     * the public index's meta pass, F-518), which read every row the same way.
+     *
+     * @param list<string> $rawValues
+     */
+    public static function strictest(array $rawValues): bool
     {
         foreach ($rawValues as $raw) {
             if (filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
@@ -378,8 +474,8 @@ final class PrivacySettings
      *
      * Called once at plugin boot. PeepSo's UserSearch class fires
      * `peepso_user_search_args` to let consumers narrow the WP_User_Query
-     * args; we splice in a `meta_query` clause that excludes any user
-     * whose hide_from_search (= discovery_optout, F-257) is on.
+     * args; we flag the query there, and `pre_user_query` excludes in SQL
+     * any user whose hide_from_search (= discovery_optout, F-257) is on.
      *
      * Stays inside bcc-trust per §A4 — privacy decisions live in one
      * place, even when they affect a sibling plugin's surface.
@@ -391,19 +487,32 @@ final class PrivacySettings
      */
     public const ARG_IGNORE_SEARCH_OPTOUT = '_bcc_ignore_search_optout';
 
+    /**
+     * F-519: the query var {@see filterPeepSoSearchArgs()} sets on a search
+     * or directory query that must leave out members who opted out of
+     * search; {@see filterPeepSoUserQuery()} then excludes them in SQL.
+     * PeepSoUserSearch hands its filtered args to `new WP_User_Query($args)`,
+     * which keeps an unknown var in `query_vars`, as it does PeepSo's own
+     * `_peepso_user_id`.
+     */
+    public const QV_EXCLUDE_SEARCH_OPTOUT = '_bcc_exclude_search_optout';
+
     public static function registerSearchFilter(): void
     {
         add_filter('peepso_user_search_args', [self::class, 'filterPeepSoSearchArgs'], 20, 1);
 
-        // ⚠ TWO MECHANISMS, DELIBERATELY, because the settings live in
-        // different tables and only one is reachable by `meta_query`.
+        // ⚠ TWO HOOKS, ONE PLACE FOR THE SQL:
         //
-        //   hide_from_search  → `wp_usermeta`, so the args filter above
-        //                       can carry it as a `meta_query` clause.
-        //   profile level     → `peepso_users.usr_profile_acc`, which is
-        //                       NOT usermeta, so no `meta_query` can
-        //                       express it. It needs SQL — hence
-        //                       `pre_user_query`.
+        //   the args filter     → decides WHETHER the search opt-out
+        //                         applies (not for admins, not for rosters
+        //                         that pass ARG_IGNORE_SEARCH_OPTOUT) and
+        //                         flags the query.
+        //   `pre_user_query`    → applies it, and the profile level, in SQL.
+        //                         Both are SQL: the profile level is
+        //                         `peepso_users.usr_profile_acc`, not
+        //                         usermeta, and the opt-out (F-519)
+        //                         excludes on ANY stored row that reads
+        //                         as on; the strictest row wins.
         //
         // Priority 20 so it runs AFTER PeepSo's own `pre_user_query`
         // (registered at the default 10 inside `PeepSoUserSearch`). The
@@ -483,6 +592,11 @@ final class PrivacySettings
         if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
             return;
         }
+        // F-519: the search opt-out, whatever happens to level 30 below
+        // (it does not depend on peepso-friends). Admins and rosters never
+        // carry the flag: filterPeepSoSearchArgs() decides that.
+        self::excludeSearchOptOuts($query);
+
         // peepso-friends present ⇒ its own clause owns level 30.
         if (class_exists('\\PeepSoFriendsPlugin')) {
             return;
@@ -519,13 +633,41 @@ final class PrivacySettings
     }
 
     /**
-     * Splice a NOT-EXISTS-OR-FALSY meta_query clause into PeepSo's
-     * WP_User_Query args so opted-out users are excluded.
+     * F-519: leave out every member who opted out of search, in SQL.
      *
-     * NOT EXISTS is required because users who have NEVER touched the
-     * setting have no meta row at all — a plain `value != '1'` clause
-     * would skip them entirely. Combined with relation=AND so an
-     * existing meta_query (e.g. PeepSo's VIP filter) is preserved.
+     * One shared predicate, {@see \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSql()}
+     * (the sitemap uses it too). It excludes a member when ANY stored row
+     * of `hide_from_search` reads as on; the strictest row wins, failing
+     * closed.
+     *
+     * ⚠ The legacy opt-out counts only while fold_discovery_optout_v1 has
+     * not completed ({@see legacyOptOutStillRead()}). The fold copied every
+     * ON legacy opt-out into the one flag but LEFT THE LEGACY ROWS IN
+     * PLACE, so reading them after it would hide again a member who has
+     * since turned search visibility back on.
+     *
+     * Only on a query {@see filterPeepSoSearchArgs()} flagged, and once:
+     * `pre_user_query` can fire again on the same object.
+     */
+    private static function excludeSearchOptOuts(\WP_User_Query $query): void
+    {
+        if (empty($query->query_vars[self::QV_EXCLUDE_SEARCH_OPTOUT])) {
+            return;
+        }
+        $clause = \BCC\Trust\Core\Repositories\UserSyncRepository::listingOptOutSqlForUserQuery(
+            self::legacyOptOutStillRead()
+        );
+        if (str_contains($query->query_where, $clause)) {
+            return;
+        }
+        $query->query_where .= ' AND ' . $clause;
+    }
+
+    /**
+     * Mark a PeepSo search or directory query so that members who opted out
+     * of search are left out; {@see filterPeepSoUserQuery()} applies it in
+     * SQL (F-519). The caller's args, `meta_query` included, are otherwise
+     * handed back untouched.
      *
      * ⚠ A caller that is NOT a search or the directory passes
      * {@see self::ARG_IGNORE_SEARCH_OPTOUT}: hide_from_search scopes to
@@ -547,98 +689,33 @@ final class PrivacySettings
         //
         // ⚠ PeepSo HAS a clause for this, but it is gated on its own
         // admin option: `1 === intval(get_option('allow_hide_user_from_user_listing', 0))`.
-        // That option is OFF on production, so the setting has never
-        // actually worked — while BCC's contract has promised since v1.64
+        // That option is OFF on production, so the setting never worked
+        // through PeepSo, while BCC's contract has promised since v1.64
         // that it "excludes the user from directory + member search".
+        // The promise is OURS (the toggle is BCC's `PATCH /me/profile-prefs`),
+        // so this does not depend on a third-party admin checkbox. If the
+        // PeepSo option is ever enabled, both apply and agree.
         //
-        // The promise is OURS: the toggle is exposed through BCC's own
-        // `PATCH /me/profile-prefs`. Leaving it contingent on a
-        // third-party admin checkbox means an admin can silently
-        // un-break or re-break our documented behaviour with no signal.
-        // So this clause is unconditional and ADDITIVE — if the PeepSo
-        // option is ever enabled, both clauses apply and agree.
+        // ⚠ F-519: the exclusion is SQL in filterPeepSoUserQuery(), not a
+        // `meta_query` here: it excludes on ANY stored row that reads as
+        // on, so the strictest row wins. The legacy opt-out is read too
+        // until the F-257 fold has completed, as before.
         //
-        // NOT-EXISTS-OR-FALSY: users who never touched the setting have
-        // no meta row at all, and a bare `value != '1'` would exclude them.
+        // ⚠ ADMINS ARE EXEMPT, per the user's "admins exempt" rule:
+        // otherwise a moderator cannot find a hidden or opted-out member
+        // in member search, the one job that rule exists for. Mirrors
+        // `PeepSo::is_admin()`, the predicate `is_accessible_static` and
+        // the level-30 clause use, so they cannot drift. (§F-190 widened
+        // it to the legacy opt-out too.)
         //
-        // F-257: this is the ONE hidden-from-search flag; /me/privacy's
-        // `discovery_optout` reads and writes this same key.
-        $hideClause = [
-            'relation' => 'OR',
-            [
-                'key'     => self::HIDE_FROM_LISTING_META,
-                'compare' => 'NOT EXISTS',
-            ],
-            [
-                'key'     => self::HIDE_FROM_LISTING_META,
-                'value'   => '1',
-                'compare' => '!=',
-            ],
-        ];
-
-        // ⚠ ADMINS ARE EXEMPT FROM BOTH BCC CLAUSES, per the user's
-        // "admins exempt" rule — otherwise a moderator cannot find a
-        // hidden or opted-out member in member search, which is the one
-        // job that rule exists for. Mirrors `PeepSo::is_admin()`, the
-        // same predicate `is_accessible_static` and the level-30 clause
-        // use, so the three cannot drift.
-        //
-        // §F-190 widened this. #475 scoped it to the hide clause and
-        // said why: `bcc_privacy_discovery_optout` is a DIFFERENT setting
-        // that had always applied to admins too, and loosening it was a
-        // product decision nobody had made. The decision has since been
-        // made, so the exemption is now blanket.
-        //
-        // ⚠ An EARLY RETURN, not an empty clause list: with no bcc
-        // clauses to add there is nothing to merge, and any `meta_query`
-        // the caller already set (PeepSo's own VIP filter, for one) must
-        // be handed back exactly as it arrived rather than rewrapped in
-        // an `AND` around nothing.
-        $isAdmin = class_exists('\\PeepSo') && \PeepSo::is_admin();
-        if ($isAdmin) {
+        // ⚠ An admin gets the caller's args back EXACTLY: no flag and no
+        // rewrapping of a `meta_query` the caller set (PeepSo's own VIP
+        // filter, for one).
+        if (class_exists('\\PeepSo') && \PeepSo::is_admin()) {
             return $args;
         }
 
-        $bccClauses = ['relation' => 'AND', $hideClause];
-
-        // F-257 rollout: until fold_discovery_optout_v1 has copied every
-        // legacy opt-out into the one flag, keep honouring the legacy key
-        // too, so nobody hidden before the deploy is listed meanwhile. A
-        // migration that never completes keeps this on: fail closed.
-        //
-        // ⚠ NOTHING WRITES the legacy key any more — this is a READ that
-        // exists only until the fold completes, not a second live setting.
-        // Worth saying, because the clause below looks like one: a reader
-        // who takes it for a setting still in use will add it to cache-bust
-        // lists and invalidation triggers, where it would be dead weight
-        // implying a dependency that no longer exists. When
-        // FOLD_DONE_OPTION is set this whole branch stops running, and the
-        // rows can then be dropped.
-        if (self::legacyOptOutStillRead()) {
-            $bccClauses[] = [
-                'relation' => 'OR',
-                [
-                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
-                    'compare' => 'NOT EXISTS',
-                ],
-                [
-                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
-                    'value'   => '1',
-                    'compare' => '!=',
-                ],
-            ];
-        }
-
-        if (isset($args['meta_query']) && is_array($args['meta_query'])) {
-            $existing = $args['meta_query'];
-            $args['meta_query'] = [
-                'relation' => 'AND',
-                $existing,
-                $bccClauses,
-            ];
-        } else {
-            $args['meta_query'] = $bccClauses;
-        }
+        $args[self::QV_EXCLUDE_SEARCH_OPTOUT] = true;
 
         return $args;
     }

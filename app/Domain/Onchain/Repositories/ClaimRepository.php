@@ -621,6 +621,71 @@ class ClaimRepository {
     }
 
     /**
+     * The user's ACTIVE team role (administrator / representative) on each
+     * of $pageIds, for the card's viewer_page_role: the team's own read, so a
+     * team row is never read through the owner readers. An invite or any
+     * other status holds no role. Bounded by the page list; read fail-soft
+     * (a card flag, never an authorization: a failed read answers no role).
+     *
+     * @param list<int> $pageIds
+     * @return array<int, string> page id => role
+     */
+    public static function activeTeamRolesOnPages(int $userId, array $pageIds): array {
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $pageIds), static fn (int $id): bool => $id > 0))), 0, 100);
+        if ($userId <= 0 || $ids === []) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+        [$roleSql, $roleArgs] = self::roleCondition('claim_role', \BCC\Trust\Onchain\Services\PageClaimRolePolicy::TEAM_ROLES);
+        $ph = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<object{entity_id: numeric-string, claim_role: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT entity_id, claim_role FROM {$table}
+              WHERE user_id = %d AND entity_type = 'page' AND entity_id IN ({$ph})
+                AND status = 'active' AND {$roleSql}
+              LIMIT 100",
+            $userId,
+            ...[...$ids, ...$roleArgs]
+        ), __FUNCTION__, false);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(int) $row->entity_id] = (string) $row->claim_role;
+        }
+
+        return $out;
+    }
+
+    /**
+     * The card-flag resolution of resolveVerifiedOperatorForPages() plus, for
+     * each RESOLVED page, the verification methods of that owner's claims on
+     * it (both binding legs). The same query; read fail-soft like the card
+     * resolver, so a failed read answers no owner and no badge.
+     *
+     * @param array<int|string> $pageIds
+     * @return array{operators: array<int, array{state: string, user_id: int|null}>, methods: array<int, list<string>>}
+     */
+    public static function resolveVerifiedOperatorsWithMethodsForPages(array $pageIds): array {
+        $claims    = [];
+        $operators = self::resolveOperators($pageIds, false, $claims);
+        $methods   = [];
+        foreach ($operators as $pageId => $resolution) {
+            if ($resolution['state'] !== self::OPERATOR_RESOLVED) {
+                continue;
+            }
+            foreach ($claims[$pageId] ?? [] as $claim) {
+                if ($claim['user_id'] === $resolution['user_id']) {
+                    $methods[$pageId][] = $claim['verification_method'];
+                }
+            }
+        }
+
+        return ['operators' => $operators, 'methods' => $methods];
+    }
+
+    /**
      * FAIL-CLOSED point variant: the same two-leg resolution, but a read
      * that fails THROWS instead of reading as UNCLAIMED. For authority
      * decisions that must not mistake "could not read" for "no owner" (the
@@ -638,16 +703,39 @@ class ClaimRepository {
     }
 
     /**
+     * The verified OPERATOR claims that make a user the owner of a page
+     * (both binding legs, exactly as the resolvers see them), with each
+     * claim's id and verification method. Read fail-closed. More than one
+     * distinct user here is the AMBIGUOUS state.
+     *
+     * @return list<array{claim_id: int, user_id: int, verification_method: string}>
+     * @throws RepositoryReadFailure
+     */
+    public static function ownerClaimsForPageStrict(int $pageId): array {
+        if ($pageId <= 0) {
+            return [];
+        }
+        $claims = [];
+        self::resolveOperators([$pageId], true, $claims);
+
+        return $claims[$pageId] ?? [];
+    }
+
+    /**
      * The resolution behind both variants. Reads go through runRead(), so a
      * failed read (including wpdb's pre-flush bail, which would otherwise
      * hand back a previous query's rows) is never read as rows: it answers
-     * no rows, or throws when $failClosed.
+     * no rows, or throws when $failClosed. $claims, when passed, receives
+     * the claim rows per page.
      *
      * @param array<int|string> $pageIds
+     * @param array<int, list<array{claim_id: int, user_id: int, verification_method: string}>>|null $claims
+     * @param-out array<int, list<array{claim_id: int, user_id: int, verification_method: string}>> $claims
      * @return array<int, array{state: string, user_id: int|null}>
      * @throws RepositoryReadFailure when $failClosed and a read fails
      */
-    private static function resolveOperators(array $pageIds, bool $failClosed): array {
+    private static function resolveOperators(array $pageIds, bool $failClosed, ?array &$claims = null): array {
+        $claims = [];
         if ($pageIds === []) {
             return [];
         }
@@ -669,9 +757,9 @@ class ClaimRepository {
         $wallets    = \BCC\Core\DB\DB::table('wallet_links');
         $ph         = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<object{page_id: string, user_id: string}> $rows */
+        /** @var list<object{page_id: string, user_id: string, claim_id: string, verification_method: string}> $rows */
         $rows = self::runRead($wpdb->prepare(
-            "SELECT w.post_id AS page_id, cl.user_id
+            "SELECT w.post_id AS page_id, cl.user_id, cl.id AS claim_id, cl.verification_method
              FROM {$table} cl
              JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
              JOIN {$wallets} w ON w.id = v.wallet_link_id
@@ -685,6 +773,7 @@ class ClaimRepository {
         $byPage = [];
         foreach ($rows as $row) {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+            $claims[(int) $row->page_id][] = ['claim_id' => (int) $row->claim_id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
         }
 
         // ── ⚠⚠ SECOND LEG: the post_meta page<->validator binding ──────────
@@ -739,9 +828,9 @@ class ClaimRepository {
             // AMBIGUOUS into RESOLVED, handing one of two rival claimants
             // sole authority. Bounded by the 100-id IN-list above instead.
             // CAST per the collation note on findMissingPlaceholderPage.
-            /** @var list<object{page_id: string, user_id: string}> $metaRows */
+            /** @var list<object{page_id: string, user_id: string, claim_id: string, verification_method: string}> $metaRows */
             $metaRows = self::runRead($wpdb->prepare(
-                "SELECT pm.post_id AS page_id, cl.user_id
+                "SELECT pm.post_id AS page_id, cl.user_id, cl.id AS claim_id, cl.verification_method
                  FROM {$wpdb->postmeta} pm
                  JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
                  JOIN {$table} cl ON cl.entity_id = v.id AND cl.entity_type = 'validator'
@@ -754,6 +843,7 @@ class ClaimRepository {
 
             foreach ($metaRows as $row) {
                 $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+                $claims[(int) $row->page_id][] = ['claim_id' => (int) $row->claim_id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
             }
         }
 
@@ -952,6 +1042,38 @@ class ClaimRepository {
      */
     public static function verifiedEntityClaimIdsForUser(int $userId, ?string $walletAddress = null, ?int $chainId = null): array
     {
+        $ids = self::verifiedEntityClaimIds($userId, $walletAddress, $chainId, self::REVOKE_ALL_MAX + 1);
+        if (count($ids) > self::REVOKE_ALL_MAX) {
+            throw new RepositoryReadFailure(
+                static::class,
+                __FUNCTION__,
+                'more than ' . self::REVOKE_ALL_MAX . ' verified claims: revoke them in batches first with '
+                . '`wp bcc-trust claims-revoke-user ' . $userId . ' --reason=<wallet_unlinked|account_deleted>`, then retry'
+            );
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Up to $limit of the same ids, lowest first, WITHOUT refusing a larger
+     * set: for working through a user with more than REVOKE_ALL_MAX claims
+     * in batches (the claims-revoke-user command). Read fail-closed.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedEntityClaimIdsBatch(int $userId, int $limit, ?string $walletAddress = null, ?int $chainId = null): array
+    {
+        return self::verifiedEntityClaimIds($userId, $walletAddress, $chainId, max(1, min(self::REVOKE_ALL_MAX, $limit)));
+    }
+
+    /**
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    private static function verifiedEntityClaimIds(int $userId, ?string $walletAddress, ?int $chainId, int $limit): array
+    {
         if ($userId <= 0) {
             return [];
         }
@@ -975,16 +1097,13 @@ class ClaimRepository {
                 $args[] = $chainId;
             }
         }
-        $args[] = self::REVOKE_ALL_MAX + 1;
+        $args[] = $limit;
 
         /** @var list<object{id: numeric-string}> $rows */
         $rows = self::runRead($wpdb->prepare(
             "SELECT id FROM {$table} WHERE {$where} ORDER BY id ASC LIMIT %d",
             ...$args
         ), __FUNCTION__, true);
-        if (count($rows) > self::REVOKE_ALL_MAX) {
-            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'more verified claims than REVOKE_ALL_MAX');
-        }
 
         $ids = [];
         foreach ($rows as $row) {
@@ -1503,6 +1622,40 @@ class ClaimRepository {
     }
 
     /**
+     * Every VERIFIED owner-role row (operator / creator) on one entity, any
+     * user: a validator or collection claim, or a page row. Read fail-closed,
+     * for exclusivity checks made under the entity's claim lock.
+     *
+     * @return list<array{claim_id: int, user_id: int, verification_method: string}>
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedOwnerRowsForEntityStrict(string $entityType, int $entityId): array
+    {
+        if ($entityId <= 0 || !in_array($entityType, ['validator', 'collection', 'page'], true)) {
+            return [];
+        }
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string, user_id: numeric-string, verification_method: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id, user_id, verification_method FROM {$table}
+              WHERE entity_type = %s AND entity_id = %d AND status = 'verified'
+                AND claim_role IN ('operator', 'creator')
+              ORDER BY id ASC LIMIT 50",
+            $entityType,
+            $entityId
+        ), __FUNCTION__, true);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = ['claim_id' => (int) $row->id, 'user_id' => (int) $row->user_id, 'verification_method' => (string) $row->verification_method];
+        }
+
+        return $out;
+    }
+
+    /**
      * The pages bound to an entity, read fail-closed (both binding legs).
      *
      * @return list<int>
@@ -1526,6 +1679,83 @@ class ClaimRepository {
         }
 
         return self::otherVerifiedClaimBoundToPage($userId, 0, $pageId);
+    }
+
+    /**
+     * The TEAM role (administrator / representative) the user holds on a
+     * page through an invited or active row, read FOR UPDATE inside the
+     * caller's transaction; null when their row (if any) is not a team row.
+     *
+     * @throws RepositoryReadFailure
+     * @throws \LogicException when called outside a TransactionManager run
+     */
+    public static function teamRoleOnPageForUpdate(int $userId, int $pageId): ?string
+    {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::teamRoleOnPageForUpdate() must run inside a TransactionManager transaction');
+        }
+        if ($userId <= 0 || $pageId <= 0) {
+            return null;
+        }
+        $row = self::lockedUserRow($userId, 'page', $pageId);
+        if ($row !== null && \BCC\Trust\Onchain\Services\PageClaimRolePolicy::isTeamRole((string) $row->claim_role)
+            && in_array($row->status, [ClaimStatus::INVITED, ClaimStatus::ACTIVE], true)
+        ) {
+            return (string) $row->claim_role;
+        }
+
+        return null;
+    }
+
+    /**
+     * Does the account exist (wp_users)? Read FAIL-CLOSED: a failed read
+     * THROWS, so "could not read" is never mistaken for "the account is
+     * gone" (a departed owner) or "the account exists" (a link target).
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function accountExistsStrict(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        global $wpdb;
+
+        /** @var list<object{ID: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT ID FROM {$wpdb->users} WHERE ID = %d LIMIT 1",
+            $userId
+        ), __FUNCTION__, true);
+
+        return $rows !== [];
+    }
+
+    /**
+     * Did the user once own the page through a claim that is now REVOKED
+     * (an owner-role page row in status revoked)? Separates an owner who
+     * lost their claim from an author set some other way. Read fail-closed.
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function userHadRevokedOwnerRowOnPage(int $userId, int $pageId): bool
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT id FROM {$table}
+              WHERE user_id = %d AND entity_type = 'page' AND entity_id = %d
+                AND status = 'revoked' AND claim_role IN ('operator', 'creator')
+              LIMIT 1",
+            $userId,
+            $pageId
+        ), __FUNCTION__, true);
+
+        return $rows !== [];
     }
 
     /**

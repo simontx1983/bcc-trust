@@ -27,6 +27,20 @@ final class UserMetaWpdb
     public string $usermeta = 'wp_usermeta';
     public string $last_error = '';
 
+    /**
+     * ⚠ DECLARED, not created on assignment. Real wpdb has both, and the
+     * verified-lookup check in MemberSearchCandidates reads them (F-472).
+     * Assigning an undeclared property would be a PHP 8.2 deprecation and
+     * a PHP 9 error.
+     *
+     * Maintained only where a statement actually runs, as wpdb does:
+     * `++num_queries` lives inside the private `_do_query()` and
+     * `last_query` is assigned below it, both BELOW the pre-flush bails.
+     */
+    public int $num_queries = 0;
+
+    public string $last_query = '';
+
     /** @var mixed wpdb::$last_result */
     public $last_result = [];
 
