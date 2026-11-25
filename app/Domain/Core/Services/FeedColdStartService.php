@@ -146,9 +146,12 @@ final class FeedColdStartService
      * Halls block — 3 entries.
      *
      * Chain-alignment: when the viewer has `bcc_home_chain` usermeta set
-     * (written by OnboardingEndpoint on the §B4 wizard), prefer the Hall
-     * for that chain. Anon viewers and authed-without-chain see the
-     * default order (post_title ASC, matching /halls).
+     * (written by OnboardingEndpoint on the §B4 wizard), the Halls for that
+     * chain come first, and topic Halls (post_title ASC) fill what is left,
+     * so a viewer with a home chain is never shown chain Halls only. Anon
+     * viewers and authed-without-chain see the default order (post_title
+     * ASC across every Hall, matching /halls). A topic Hall has no chain,
+     * so its `chain_slug` is null.
      *
      * Returns < 3 entries gracefully (the FE collapses missing entries).
      *
@@ -162,7 +165,7 @@ final class FeedColdStartService
         $chainSlug = $this->resolveHomeChain($viewerId);
         $chainId   = $chainSlug !== null ? ChainRepository::resolveIdAnyState($chainSlug) : null;
 
-        $rows = PeepSoGroupRepository::listHalls($chainId, 0, self::HALLS_LIMIT);
+        $rows = self::hallRows($chainId, self::HALLS_LIMIT);
 
         $groupIds   = array_map(static fn($r) => (int) $r->id, $rows);
         $chainByGroup = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
@@ -180,6 +183,30 @@ final class FeedColdStartService
             ];
         }
         return $out;
+    }
+
+    /**
+     * The cold-start Hall rows: with a home chain, that chain's Halls, then
+     * topic Halls (post_title ASC) for what is left; without one, the first
+     * Halls by title. A topic Hall has no chain, so it never repeats a chain
+     * Hall above it.
+     *
+     * @return list<object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}>
+     */
+    public static function hallRows(?int $chainId, int $limit): array
+    {
+        $rows = PeepSoGroupRepository::listHalls($chainId, 0, $limit);
+        if ($chainId === null || count($rows) >= $limit) {
+            return $rows;
+        }
+
+        return [...$rows, ...PeepSoGroupRepository::listHalls(
+            null,
+            0,
+            $limit - count($rows),
+            '',
+            PeepSoGroupRepository::HALL_KIND_TOPIC
+        )];
     }
 
     /**

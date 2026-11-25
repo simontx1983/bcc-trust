@@ -192,4 +192,57 @@ final class GroupsHallsSearchParamsTest extends TestCase
 
         self::assertSame(['hall', 'nft', 'system', 'user', 'validator'], $values);
     }
+
+    // ── /halls kind (topic Halls) ───────────────────────────────────────
+
+    /** @return array<string, array{string}> */
+    public static function unknownHallKinds(): array
+    {
+        return [
+            'a group type'  => ['hall'],
+            'a plural'      => ['topics'],
+            'a topic slug'  => ['defi'],
+            'the old label' => ['general'],
+        ];
+    }
+
+    /** GET /halls `kind` is chain or topic; anything else is a 400 naming them, before any read. */
+    #[DataProvider('unknownHallKinds')]
+    public function testAnUnknownHallKindIsA400NamingTheHallKinds(string $kind): void
+    {
+        $res = self::call('/halls', ['kind' => $kind]);
+
+        self::assertSame([400, 'bcc_invalid_request'], [$res['status'], $res['code']]);
+        self::assertSame('kind must be one of: chain, topic.', $res['message']);
+    }
+
+    public function testBrowsingHallsByKindNeverTouchesTheThrottle(): void
+    {
+        $GLOBALS['__bcc_cst']['throttle_allow'] = false;
+
+        self::assertSame(400, self::call('/halls', ['kind' => 'bogus'])['status']);
+        self::assertSame([], $GLOBALS['__bcc_cst']['throttle_calls']);
+    }
+
+    /** The accepted values are bcc-core's Hall kinds, and no kind is no filter. */
+    public function testTheHallKindsAreChainAndTopic(): void
+    {
+        self::assertSame(['chain', 'topic'], HallsEndpoint::HALL_KINDS);
+        self::assertNull(HallsEndpoint::hallKind(''));
+        self::assertSame('chain', HallsEndpoint::hallKind('chain'));
+        self::assertSame('topic', HallsEndpoint::hallKind('topic'));
+        self::assertFalse(HallsEndpoint::hallKind('hall'));
+    }
+
+    public function testTheHallKindArgIsSanitizedAsAKey(): void
+    {
+        HallsEndpoint::register();
+
+        $routes = array_values(array_filter(
+            $GLOBALS['__bcc_cst']['routes'],
+            static fn (array $r): bool => $r[0] === 'bcc/v1' && $r[1] === '/halls'
+        ));
+        self::assertCount(1, $routes);
+        self::assertSame('sanitize_key', $routes[0][2]['args']['kind']['sanitize_callback'] ?? null, 'as /groups does its kind');
+    }
 }

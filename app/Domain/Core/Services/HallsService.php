@@ -82,6 +82,8 @@ final class HallsService
      *     slug: string,
      *     name: string,
      *     chain: string|null,
+     *     hall_kind: 'chain'|'topic'|null,
+     *     topic: array{slug: string, label: string}|null,
      *     member_count: int,
      *     validator_count: int,
      *     collection_count: int,
@@ -90,8 +92,10 @@ final class HallsService
      *   }>,
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
+     *
+     * @param PeepSoGroupRepository::HALL_KIND_*|null $hallKind
      */
-    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain, string $query = ''): array
+    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain, string $query = '', ?string $hallKind = null): array
     {
         $page     = max(1, $page);
         $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
@@ -108,16 +112,17 @@ final class HallsService
             }
         }
 
-        // The optional name filter goes to both reads, so the page and its
-        // total always agree.
-        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize, $query);
-        $total = PeepSoGroupRepository::countHalls($chainId, $query);
+        // The optional name and Hall-kind filters go to both reads, so the
+        // page and its total always agree.
+        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize, $query, $hallKind);
+        $total = PeepSoGroupRepository::countHalls($chainId, $query, $hallKind);
 
         $groupIds       = array_map(static fn($r) => (int) $r->id, $rows);
         $myMemberships  = $this->loadViewerMemberships($viewerId, $groupIds);
         $primaryGroupId = $this->loadPrimaryGroupId($viewerId);
         $chainSlugs     = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
         $contentCounts  = $this->loadChainContentCounts($chainSlugs);
+        $kindFacts      = self::loadKindFacts($groupIds);
 
         $items = [];
         foreach ($rows as $row) {
@@ -127,6 +132,8 @@ final class HallsService
                 'slug'              => $row->post_name,
                 'name'              => $row->post_title,
                 'chain'             => $chainSlugs[$groupId] ?? null,
+                'hall_kind'         => $kindFacts[$groupId]['hall_kind'] ?? null,
+                'topic'             => $kindFacts[$groupId]['topic'] ?? null,
                 'member_count'      => (int) $row->member_count,
                 'validator_count'   => (int) ($contentCounts[$groupId]['validators'] ?? 0),
                 'collection_count'  => (int) ($contentCounts[$groupId]['collections'] ?? 0),
@@ -206,6 +213,8 @@ final class HallsService
      *     slug: string,
      *     name: string,
      *     chain: string|null,
+     *     hall_kind: 'chain'|'topic'|null,
+     *     topic: array{slug: string, label: string}|null,
      *     member_count: int,
      *     validator_count: int,
      *     collection_count: int,
@@ -241,6 +250,8 @@ final class HallsService
      *   slug: string,
      *   name: string,
      *   chain: string|null,
+     *   hall_kind: 'chain'|'topic'|null,
+     *   topic: array{slug: string, label: string}|null,
      *   member_count: int,
      *   validator_count: int,
      *   collection_count: int,
@@ -266,12 +277,15 @@ final class HallsService
         $contentCounts  = $this->loadChainContentCounts($chainSlugs);
         $preview        = $this->loadChainPreview($chainSlug);
         $chainProfile   = $this->loadChainProfile($chainSlug);
+        $kindFacts      = self::loadKindFacts([$groupId]);
 
         return [
             'id'                => $groupId,
             'slug'              => $row->post_name,
             'name'              => $row->post_title,
             'chain'             => $chainSlug,
+            'hall_kind'         => $kindFacts[$groupId]['hall_kind'] ?? null,
+            'topic'             => $kindFacts[$groupId]['topic'] ?? null,
             'member_count'      => (int) $row->member_count,
             'validator_count'   => (int) ($contentCounts[$groupId]['validators'] ?? 0),
             'collection_count'  => (int) ($contentCounts[$groupId]['collections'] ?? 0),
@@ -286,6 +300,20 @@ final class HallsService
             ),
             'links'             => ['self' => CardUrlMap::groupUrl(GroupType::Hall->value, (string) $row->post_name)],
         ];
+    }
+
+    /**
+     * Each Hall's `hall_kind` and `topic` (HallRepository::kindFactsForHalls).
+     * They describe the Hall, nothing more, so a read that cannot be
+     * trusted leaves both null for this response (the same as a Hall with
+     * neither) rather than failing the page or guessing; nothing is cached.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, array{hall_kind: 'chain'|'topic'|null, topic: array{slug: string, label: string}|null}>
+     */
+    private static function loadKindFacts(array $groupIds): array
+    {
+        return HallRepository::kindFactsForHalls($groupIds) ?? [];
     }
 
     /**
