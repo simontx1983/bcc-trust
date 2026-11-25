@@ -184,6 +184,28 @@ final class ChainRepository
         return $row;
     }
 
+    /**
+     * One chain by slug, active or not, read past every cache and
+     * FAIL-CLOSED: a failed read throws instead of answering "no such chain".
+     * For one-shot data repairs that must never mistake an outage for a
+     * missing row.
+     *
+     * @return ChainRow|null
+     * @throws RepositoryReadFailure
+     */
+    public static function findBySlugAnyStateStrict(string $slug): ?object
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var ChainRow|null */
+        return self::runReadRow(
+            $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE slug = %s LIMIT 1", $slug),
+            __FUNCTION__,
+            true
+        );
+    }
+
     /** @return ChainRow|null */
     public static function getById(int $chainId): ?object
     {

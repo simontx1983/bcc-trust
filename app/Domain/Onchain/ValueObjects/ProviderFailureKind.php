@@ -29,9 +29,20 @@
  *   | HTTP 3xx                   | 0       | — not recorded |
  *   | HTTP 2xx                   | 0       | records SUCCESS|
  *
- * A fourth token would therefore describe an outcome that cannot charge, and
- * a missing one would leave a charge unexplainable. The set is closed because
+ * A missing one would leave a charge unexplainable. The set is closed because
  * the charging rule is closed.
+ *
+ * ── AND ONE DOMAIN TOKEN: `refused` ─────────────────────────────────────
+ * A non-429 4xx still charges nothing at the transport. But when a provider
+ * REFUSES a request an operation needed (Subscan answering a page larger than
+ * the key's plan allows with HTTP 403), the operation fails and its DOMAIN
+ * verdict is the one charge, which used to read back as "Not recorded" even
+ * though the refusal was a measured wire outcome. `ApiRetry` now notes the
+ * refusal on the caller's receipt WITHOUT charging, and a domain site that
+ * charges afterwards names it
+ * ({@see \BCC\Trust\Onchain\Support\ProviderOutcomeReceipt::domainChargeKind()}).
+ * The transport charging rule is unchanged: {@see fromOutcome()} still
+ * returns null for every 4xx other than 429.
  *
  * ── WHAT THIS IS NOT ────────────────────────────────────────────────────
  * ⚠ NOT a classification verdict. A contract answering "I do not support that
@@ -75,6 +86,13 @@ final class ProviderFailureKind
     public const TRANSPORT = 'transport';
 
     /**
+     * The provider refused the request with a 4xx other than 429. NEVER
+     * charged by the transport: recorded only by a domain charge after the
+     * refusal failed its operation. See the class docblock.
+     */
+    public const REFUSED = 'refused';
+
+    /**
      * Every token this attribution may ever hold.
      *
      * @return list<string>
@@ -85,6 +103,7 @@ final class ProviderFailureKind
             self::RATE_LIMITED,
             self::HTTP_5XX,
             self::TRANSPORT,
+            self::REFUSED,
         ];
     }
 
@@ -142,6 +161,8 @@ final class ProviderFailureKind
                 return 'The chain node reported a server error.';
             case self::TRANSPORT:
                 return 'The connection to the chain node did not complete.';
+            case self::REFUSED:
+                return 'The chain node rejected the request.';
             default:
                 return 'The connection to the chain node failed.';
         }
@@ -176,6 +197,10 @@ final class ProviderFailureKind
                 return 'Provider server error';
             case self::TRANSPORT:
                 return 'Network connection failure';
+            case self::REFUSED:
+                // Not "refused": the admin tab never renders a raw token,
+                // and a label containing it would.
+                return 'Provider rejected the request';
             default:
                 return self::NOT_RECORDED_LABEL;
         }

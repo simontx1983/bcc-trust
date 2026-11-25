@@ -226,6 +226,8 @@ require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles
 require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
 // F-294: release unverified wallet sign-up emails (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/release-wallet-signup-unverified-emails.php';
+// Repoint THORChain and Polkadot off retired seeded endpoints (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/repoint-validator-feed-endpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
