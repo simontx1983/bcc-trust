@@ -70,6 +70,11 @@ namespace {
              * genuinely uncaught, so it is the real test of the release path.
              */
             public static ?string $throwOnAction = null;
+            /** Admin Halls: PeepSoGroup::update() calls, [groupId, data] */
+            public static array $updates = [];
+            public static bool $updateThrows = false;
+            /** every delete_post_meta() call, [postId, key] */
+            public static array $deletedMeta = [];
 
             public static function reset(): void
             {
@@ -84,6 +89,9 @@ namespace {
                 self::$deletedPosts     = [];
                 self::$actions          = [];
                 self::$throwOnAction    = null;
+                self::$updates          = [];
+                self::$updateThrows     = false;
+                self::$deletedMeta      = [];
             }
 
             /** @return list<string> action names, in order */
@@ -115,6 +123,11 @@ namespace {
                         return;
                     }
                     $this->id = \HallTestState::$nextGroupId++;
+                    // Topic Halls: the address the create kept (a test can make it differ).
+                    if (isset($data['slug'])) {
+                        \BCC\Trust\Onchain\Repositories\HallRepository::$slugs[$this->id] =
+                            \BCC\Trust\Onchain\Repositories\HallRepository::$slugOverride ?? (string) $data['slug'];
+                    }
 
                     // PeepSo's create() joins and OWNS the current user,
                     // whatever owner_id says. Reproducing that is the whole
@@ -125,6 +138,15 @@ namespace {
                 }
 
                 $this->id = (int) $id;
+            }
+
+            /** Admin Halls: a name/description edit. */
+            public function update(array $data): void
+            {
+                if (\HallTestState::$updateThrows) {
+                    throw new \RuntimeException('PeepSo update exploded');
+                }
+                \HallTestState::$updates[] = [$this->id, $data];
             }
 
             public function get(string $key): int
@@ -312,6 +334,14 @@ namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoGroupRepository::class, false)) {
         final class PeepSoGroupRepository
         {
+            /** Admin Halls: groupId => object{id, post_name, post_title, post_content, member_count} */
+            public static array $groups = [];
+
+            public static function findManyByIds(array $groupIds): array
+            {
+                return array_intersect_key(self::$groups, array_flip($groupIds));
+            }
+
             public static function getMembershipStatus(int $userId, int $groupId): ?string
             {
                 return \FakePeepSoLedger::status($userId, $groupId);
@@ -382,6 +412,14 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$chains[$id] = (object) ['id' => $id, 'slug' => $slug, 'name' => $name];
             }
 
+            /** Admin Halls: groupId => chain slug */
+            public static array $slugsByGroup = [];
+
+            public static function resolveSlugsForGroups(array $groupIds): array
+            {
+                return array_intersect_key(self::$slugsByGroup, array_flip($groupIds));
+            }
+
             public static function getById(int $id): ?object
             {
                 return self::$chains[$id] ?? null;
@@ -390,6 +428,7 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function reset(): void
             {
                 self::$chains = [];
+                self::$slugsByGroup = [];
             }
         }
     }
@@ -401,9 +440,26 @@ namespace BCC\Trust\Onchain\Repositories {
             public const META_CHAIN_TAG         = '_bcc_chain_tag';
             public const META_OWNER_INCOMPLETE  = '_bcc_hall_owner_incomplete';
             public const KIND_HALL              = 'hall';
+            public const META_TOPIC             = '_bcc_hall_topic';
+            public const META_TOPIC_LABEL       = '_bcc_hall_topic_label';
 
             /** chainId => groupId */
             public static array $halls = [];
+
+            /** Topic Halls: topicSlug => groupId */
+            public static array $topicHalls = [];
+
+            /** Topic Halls: groupId => the address the group has */
+            public static array $slugs = [];
+
+            /** Topic Halls: addresses other groups already use */
+            public static array $slugsInUse = [];
+
+            /** Topic Halls: the address a create keeps instead of the one asked for */
+            public static ?string $slugOverride = null;
+
+            /** Topic Halls: make the verified topic reads throw, as an untrusted read does */
+            public static bool $topicReadsThrow = false;
 
             /** groupId => true */
             public static array $incomplete = [];
@@ -456,8 +512,82 @@ namespace BCC\Trust\Onchain\Repositories {
                 return isset(self::$incomplete[$groupId]);
             }
 
+            public static function findHallForTopic(string $topicSlug): ?int
+            {
+                if (self::$topicReadsThrow) {
+                    throw new RepositoryReadFailure('HallRepository', 'findHallForTopic', 'read could not be verified');
+                }
+                self::$existenceReads[] = $topicSlug;
+
+                return self::$topicHalls[$topicSlug] ?? null;
+            }
+
+            public static function groupSlugInUse(string $slug): bool
+            {
+                if (self::$topicReadsThrow) {
+                    throw new RepositoryReadFailure('HallRepository', 'groupSlugInUse', 'read could not be verified');
+                }
+
+                return in_array($slug, self::$slugsInUse, true);
+            }
+
+            public static function groupSlug(int $groupId): ?string
+            {
+                return self::$slugs[$groupId] ?? null;
+            }
+
+            /** Admin Halls: groupId => true for a Hall; null models an untrusted read */
+            public static ?array $isHall = [];
+
+            /** Admin Halls: groupId => {hall_kind, topic}; null models an untrusted read */
+            public static ?array $kindFacts = [];
+
+            /** Admin Halls: [groupId, label] writes */
+            public static array $labelWrites = [];
+
+            public static function isHallOrUnknown(int $groupId): ?bool
+            {
+                return self::$isHall === null ? null : isset(self::$isHall[$groupId]);
+            }
+
+            public static function kindFactsForHalls(array $groupIds): ?array
+            {
+                if (self::$kindFacts === null) {
+                    return null;
+                }
+                $out = [];
+                foreach ($groupIds as $id) {
+                    $out[$id] = self::$kindFacts[$id] ?? ['hall_kind' => null, 'topic' => null];
+                }
+                return $out;
+            }
+
+            public static function writeTopicLabel(int $groupId, string $topicLabel): void
+            {
+                self::$labelWrites[] = [$groupId, $topicLabel];
+            }
+
+            public static function writeTopicHallMeta(int $groupId, string $topicSlug, string $topicLabel): void
+            {
+                self::$metaWrites[] = [$groupId, $topicSlug, $topicLabel];
+                if (self::$writeMetaThrows) {
+                    throw new \RuntimeException('writeTopicHallMeta failed closed');
+                }
+                if (self::$writeMetaWorks) {
+                    self::$topicHalls[$topicSlug] = $groupId;
+                }
+            }
+
             public static function reset(): void
             {
+                self::$topicHalls      = [];
+                self::$isHall          = [];
+                self::$kindFacts       = [];
+                self::$labelWrites     = [];
+                self::$slugs           = [];
+                self::$slugsInUse      = [];
+                self::$slugOverride    = null;
+                self::$topicReadsThrow = false;
                 self::$halls          = [];
                 self::$incomplete     = [];
                 self::$writeMetaWorks  = true;
@@ -591,6 +721,7 @@ namespace BCC\Trust\Onchain\Services {
     if (!function_exists('BCC\\Trust\\Onchain\\Services\\delete_post_meta')) {
         function delete_post_meta(int $postId, string $key, $value = ''): bool
         {
+            \HallTestState::$deletedMeta[] = [$postId, $key];
             return true;
         }
     }
@@ -624,6 +755,16 @@ namespace BCC\Trust\Onchain\Services {
             if (\HallTestState::$throwOnAction === $name) {
                 throw new \RuntimeException('a subscriber on ' . $name . ' threw');
             }
+        }
+    }
+}
+
+// Admin Halls (AdminHallsService, in BCC\Trust\Core\Services): the one WP
+// call its edit makes. Namespace-scoped, as the provisioning fakes above are.
+namespace BCC\Trust\Core\Services {
+    if (!function_exists('BCC\Trust\Core\Services\clean_post_cache')) {
+        function clean_post_cache($post): void
+        {
         }
     }
 }

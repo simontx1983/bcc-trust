@@ -356,4 +356,113 @@ final class HallRepository {
 
         return $out;
     }
+
+    /**
+     * Reverse lookup: the Hall that owns a topic (`_bcc_hall_topic`), in any
+     * post status, so an archived topic Hall keeps its topic. The topic
+     * provisioner's idempotency check, run inside its per-topic lock, as
+     * findHallForChain() is for a chain. Bounded LIMIT 1.
+     *
+     * Verified: a read that cannot be trusted throws, so the provisioner never
+     * reads "no Hall" from a failed query and creates a second one.
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function findHallForTopic(string $topicSlug): ?int {
+        if ($topicSlug === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $id = self::runReadVar((string) $wpdb->prepare(
+            "SELECT pm_topic.post_id
+               FROM {$wpdb->postmeta} pm_topic
+         INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_topic.post_id
+              WHERE pm_topic.meta_key   = %s
+                AND pm_topic.meta_value = %s
+                AND pm_kind.meta_key    = %s
+                AND pm_kind.meta_value  = %s
+              ORDER BY pm_topic.post_id ASC
+              LIMIT 1",
+            self::META_TOPIC,
+            $topicSlug,
+            self::META_KIND,
+            self::KIND_HALL
+        ), __FUNCTION__, true);
+
+        return $id !== null ? (int) $id : null;
+    }
+
+    /**
+     * Whether any `peepso-group`, in any post status, already has this
+     * address (`post_name`). Bounded LIMIT 1.
+     *
+     * @throws RepositoryReadFailure when the read cannot be verified
+     */
+    public static function groupSlugInUse(string $slug): bool {
+        global $wpdb;
+
+        return self::runReadVar((string) $wpdb->prepare(
+            "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_name = %s LIMIT 1",
+            'peepso-group',
+            $slug
+        ), __FUNCTION__, true) !== null;
+    }
+
+    /**
+     * A group's address (`post_name`), read back from the database; null when
+     * there is no such group.
+     *
+     * @throws RepositoryReadFailure when the read cannot be verified
+     */
+    public static function groupSlug(int $groupId): ?string {
+        if ($groupId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+
+        return self::runReadVar((string) $wpdb->prepare(
+            "SELECT post_name FROM {$wpdb->posts} WHERE ID = %d AND post_type = %s LIMIT 1",
+            $groupId,
+            'peepso-group'
+        ), __FUNCTION__, true);
+    }
+
+    /**
+     * Mark a group as a topic Hall: the Hall kind, the topic's slug and its
+     * label. The caller passes values it has already validated and trimmed
+     * (HallProvisioningService::provisionTopic()).
+     */
+    public static function writeTopicHallMeta(int $groupId, string $topicSlug, string $topicLabel): void {
+        update_post_meta($groupId, self::META_KIND, self::KIND_HALL);
+        update_post_meta($groupId, self::META_TOPIC, $topicSlug);
+        update_post_meta($groupId, self::META_TOPIC_LABEL, $topicLabel);
+    }
+
+    /** Rename a topic Hall's topic (its label; the slug never changes). */
+    public static function writeTopicLabel(int $groupId, string $topicLabel): void {
+        update_post_meta($groupId, self::META_TOPIC_LABEL, $topicLabel);
+    }
+
+    /**
+     * Whether a group is a Hall, in any post status (the admin edit reaches
+     * archived Halls too): a `_bcc_group_kind` value of 'hall' and no value
+     * of any other kind, the publishedHallIds() rule without the status and
+     * privacy legs. Null when the read cannot be trusted.
+     */
+    public static function isHallOrUnknown(int $groupId): ?bool {
+        if ($groupId <= 0) {
+            return false;
+        }
+
+        $meta = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown([$groupId], [self::META_KIND]);
+        if ($meta === null) {
+            return null;
+        }
+
+        $kinds = $meta[$groupId][self::META_KIND] ?? [];
+
+        return $kinds !== [] && array_diff($kinds, [self::KIND_HALL]) === [];
+    }
 }
