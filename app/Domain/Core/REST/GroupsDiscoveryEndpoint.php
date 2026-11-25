@@ -413,7 +413,7 @@ final class GroupsDiscoveryEndpoint
 
     /**
      * @param object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $display
-     * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
+     * @param array{posts_last_7d: int|null, active_members_7d?: int|null, last_activity_at: string|null, heat: string|null, heat_label: string|null} $activity
      * @param array<string, mixed>|null $stats
      * @param array<string, mixed>|null $validatorStats
      * @param array<string, mixed> $card

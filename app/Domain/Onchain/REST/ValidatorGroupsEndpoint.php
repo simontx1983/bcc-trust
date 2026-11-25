@@ -425,7 +425,7 @@ final class ValidatorGroupsEndpoint
      *     chain_name?: string|null,
      *     page_slug: string|null
      * }|null $statsRow
-     * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
+     * @param array{posts_last_7d: int|null, active_members_7d?: int|null, last_activity_at: string|null, heat: string|null, heat_label: string|null} $activity
      * @return array<string, mixed>
      */
     private function composeItem(

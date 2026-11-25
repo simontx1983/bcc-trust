@@ -116,7 +116,7 @@ final class GroupsService
      *   image_url: string|null,
      *   member_count: int,
      *   verification: array{kind: string, label: string}|null,
-     *   activity: array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string},
+     *   activity: array{posts_last_7d: int|null, active_members_7d?: int|null, last_activity_at: string|null, heat: string|null, heat_label: string|null},
      *   collection_stats: array<string, mixed>|null,
      *   validator_stats: array<string, mixed>|null,
      *   viewer_membership: array{is_member: bool, joined_at: string|null}|null,
