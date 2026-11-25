@@ -149,7 +149,17 @@ final class ClaimRevokeAllIdsIntegrationTest extends TestCase
             $this->claim(self::USER, 'validator', 920000 + $i, 'cosmos1aaa', 7, 'verified');
         }
 
-        $this->expectException(RepositoryReadFailure::class);
-        ClaimRepository::verifiedEntityClaimIdsForUser(self::USER);
+        try {
+            ClaimRepository::verifiedEntityClaimIdsForUser(self::USER);
+            self::fail('more than the bound must be refused');
+        } catch (RepositoryReadFailure $e) {
+            self::assertStringContainsString('wp bcc-trust claims-revoke-user ' . self::USER, $e->getMessage(), 'the refusal tells ops what to run');
+        }
+
+        $batch = ClaimRepository::verifiedEntityClaimIdsBatch(self::USER, ClaimRepository::REVOKE_ALL_MAX);
+        self::assertCount(ClaimRepository::REVOKE_ALL_MAX, $batch, 'the batch read answers a full batch instead');
+        $sorted = $batch;
+        sort($sorted);
+        self::assertSame($sorted, $batch, 'lowest ids first');
     }
 }

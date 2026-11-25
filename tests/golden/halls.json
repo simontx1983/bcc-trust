@@ -5,7 +5,7 @@
       "collection_count": 0,
       "id": 5025,
       "links": {
-        "self": "/halls/akash-hall"
+        "self": "/communities/akash-hall"
       },
       "member_count": 1,
       "name": "Akash Hall",
@@ -18,7 +18,7 @@
       "collection_count": 0,
       "id": 5034,
       "links": {
-        "self": "/halls/arbitrum-one-hall"
+        "self": "/communities/arbitrum-one-hall"
       },
       "member_count": 1,
       "name": "Arbitrum One Hall",
@@ -31,7 +31,7 @@
       "collection_count": 0,
       "id": 5035,
       "links": {
-        "self": "/halls/avalanche-c-chain-hall"
+        "self": "/communities/avalanche-c-chain-hall"
       },
       "member_count": 1,
       "name": "Avalanche C-Chain Hall",
@@ -44,7 +44,7 @@
       "collection_count": 0,
       "id": 5036,
       "links": {
-        "self": "/halls/base-hall"
+        "self": "/communities/base-hall"
       },
       "member_count": 1,
       "name": "Base Hall",
@@ -57,7 +57,7 @@
       "collection_count": 0,
       "id": 5045,
       "links": {
-        "self": "/halls/bitcoin-hall"
+        "self": "/communities/bitcoin-hall"
       },
       "member_count": 1,
       "name": "Bitcoin Hall",
@@ -70,7 +70,7 @@
       "collection_count": 0,
       "id": 5037,
       "links": {
-        "self": "/halls/bnb-smart-chain-hall"
+        "self": "/communities/bnb-smart-chain-hall"
       },
       "member_count": 1,
       "name": "BNB Smart Chain Hall",
@@ -83,7 +83,7 @@
       "collection_count": 96,
       "id": 5026,
       "links": {
-        "self": "/halls/cosmos-hub-hall"
+        "self": "/communities/cosmos-hub-hall"
       },
       "member_count": 2,
       "name": "Cosmos Hub Hall",
@@ -96,7 +96,7 @@
       "collection_count": 0,
       "id": 5027,
       "links": {
-        "self": "/halls/cronos-pos-hall"
+        "self": "/communities/cronos-pos-hall"
       },
       "member_count": 1,
       "name": "Cronos POS Hall",
@@ -109,7 +109,7 @@
       "collection_count": 1,
       "id": 5028,
       "links": {
-        "self": "/halls/dungeon-chain-hall"
+        "self": "/communities/dungeon-chain-hall"
       },
       "member_count": 1,
       "name": "Dungeon Chain Hall",
@@ -122,7 +122,7 @@
       "collection_count": 1,
       "id": 5038,
       "links": {
-        "self": "/halls/ethereum-hall"
+        "self": "/communities/ethereum-hall"
       },
       "member_count": 1,
       "name": "Ethereum Hall",
@@ -135,7 +135,7 @@
       "collection_count": 114,
       "id": 5029,
       "links": {
-        "self": "/halls/injective-hall"
+        "self": "/communities/injective-hall"
       },
       "member_count": 1,
       "name": "Injective Hall",
@@ -148,7 +148,7 @@
       "collection_count": 0,
       "id": 5030,
       "links": {
-        "self": "/halls/jackal-hall"
+        "self": "/communities/jackal-hall"
       },
       "member_count": 1,
       "name": "Jackal Hall",
@@ -161,7 +161,7 @@
       "collection_count": 0,
       "id": 5031,
       "links": {
-        "self": "/halls/juno-hall"
+        "self": "/communities/juno-hall"
       },
       "member_count": 1,
       "name": "Juno Hall",
@@ -174,7 +174,7 @@
       "collection_count": 0,
       "id": 5032,
       "links": {
-        "self": "/halls/kujira-hall"
+        "self": "/communities/kujira-hall"
       },
       "member_count": 1,
       "name": "Kujira Hall",
@@ -187,7 +187,7 @@
       "collection_count": 0,
       "id": 5041,
       "links": {
-        "self": "/halls/near-protocol-hall"
+        "self": "/communities/near-protocol-hall"
       },
       "member_count": 1,
       "name": "NEAR Protocol Hall",
@@ -200,7 +200,7 @@
       "collection_count": 0,
       "id": 5039,
       "links": {
-        "self": "/halls/optimism-hall"
+        "self": "/communities/optimism-hall"
       },
       "member_count": 1,
       "name": "Optimism Hall",
@@ -213,7 +213,7 @@
       "collection_count": 0,
       "id": 5033,
       "links": {
-        "self": "/halls/osmosis-hall"
+        "self": "/communities/osmosis-hall"
       },
       "member_count": 1,
       "name": "Osmosis Hall",
@@ -226,7 +226,7 @@
       "collection_count": 0,
       "id": 5042,
       "links": {
-        "self": "/halls/polkadot-hall"
+        "self": "/communities/polkadot-hall"
       },
       "member_count": 1,
       "name": "Polkadot Hall",
@@ -239,7 +239,7 @@
       "collection_count": 0,
       "id": 5040,
       "links": {
-        "self": "/halls/polygon-hall"
+        "self": "/communities/polygon-hall"
       },
       "member_count": 1,
       "name": "Polygon Hall",
@@ -252,7 +252,7 @@
       "collection_count": 99,
       "id": 5043,
       "links": {
-        "self": "/halls/solana-hall"
+        "self": "/communities/solana-hall"
       },
       "member_count": 1,
       "name": "Solana Hall",

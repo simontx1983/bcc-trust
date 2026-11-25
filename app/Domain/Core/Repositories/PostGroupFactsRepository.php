@@ -55,6 +55,9 @@ final class PostGroupFactsRepository
     /** BCC's per-post group visibility (members_only, public_group, public_all). */
     public const META_VISIBILITY = '_bcc_post_visibility';
 
+    /** The one PERMISSIVE visibility value: syndication outside the group. */
+    public const VISIBILITY_GLOBAL = 'public_all';
+
     /**
      * More rows than this for one post cannot be proven complete (the read
      * is bounded), so the facts are refused rather than guessed. No real
@@ -75,8 +78,10 @@ final class PostGroupFactsRepository
      *     the membership gates cast it with `(int) … > 0`.
      *   - `group_ids`: every positive `peepso_group_id`, in meta_id order,
      *     as `get_post_meta(…, false)` returned them.
-     *   - `visibility`, `privacy_at_post`: the first value of each, '' when
-     *     absent.
+     *   - `visibility`, `privacy_at_post`: folded STRICTEST-WINS across
+     *     every row of that key, '' when absent. NOT the first value: with
+     *     duplicate rows, first-wins let a permissive one through. See
+     *     {@see strictestVisibility()} and {@see strictestPrivacyAtPost()}.
      *
      * @phpstan-return PostGroupFacts|null
      */
@@ -105,18 +110,20 @@ final class PostGroupFactsRepository
             return null;
         }
 
-        $groupValues   = [];
-        $visibility    = null;
-        $privacyAtPost = null;
+        // ⚠⚠ EVERY value is collected, not just the first. Folding the
+        // duplicates is done below, STRICTEST-WINS — see the two helpers.
+        $groupValues     = [];
+        $visibilityRows  = [];
+        $privacyRows     = [];
         foreach ($rows as $row) {
             $key   = (string) ($row->meta_key ?? '');
             $value = (string) ($row->meta_value ?? '');
             if ($key === self::META_GROUP_ID) {
                 $groupValues[] = $value;
             } elseif ($key === self::META_VISIBILITY) {
-                $visibility ??= $value;
+                $visibilityRows[] = $value;
             } elseif ($key === GroupSyndicationGate::META_PRIVACY_AT_POST) {
-                $privacyAtPost ??= $value;
+                $privacyRows[] = $value;
             }
         }
 
@@ -126,8 +133,79 @@ final class PostGroupFactsRepository
                 array_map('intval', $groupValues),
                 static fn(int $id): bool => $id > 0
             )),
-            'visibility'      => $visibility ?? '',
-            'privacy_at_post' => $privacyAtPost ?? '',
+            'visibility'      => self::strictestVisibility($visibilityRows),
+            'privacy_at_post' => self::strictestPrivacyAtPost($privacyRows),
         ];
+    }
+    /**
+     * Fold duplicate `_bcc_post_visibility` rows, STRICTEST-WINS.
+     *
+     * ⚠⚠ `public_all` is the PERMISSIVE value: it is the one that lets a
+     * group-tagged post syndicate OUTSIDE its group. So it is returned only
+     * when EVERY row says so. One row disagreeing is enough to withhold it.
+     *
+     * Duplicate rows should not exist — `attachToGroup()` is the single
+     * writer — but "should not exist" is not a gate, and `meta_id` order is
+     * not a permission model. Taking the first row made the answer depend on
+     * insert order, which nothing guarantees and no caller could inspect.
+     *
+     * ⚠ When rows disagree this returns a REAL stored value (the first that
+     * is not `public_all`) rather than a synthesised one, so the field stays
+     * truthful about what is on the post. Which non-`public_all` value it is
+     * does not matter to any caller: every consumer tests equality with
+     * `public_all` and treats everything else alike.
+     *
+     * @param list<string> $values every row of the key, in meta_id order
+     */
+    private static function strictestVisibility(array $values): string
+    {
+        if ($values === []) {
+            return '';
+        }
+
+        foreach ($values as $value) {
+            if ($value !== self::VISIBILITY_GLOBAL) {
+                return $value;
+            }
+        }
+
+        return self::VISIBILITY_GLOBAL;
+    }
+
+    /**
+     * Fold duplicate `_bcc_post_group_privacy_at_post` rows, STRICTEST-WINS.
+     *
+     * ⚠⚠ HERE THE PERMISSIVE ANSWER IS "NON-OPEN", which is the opposite
+     * of how it reads. A post recorded as made while its group was ALREADY
+     * closed or secret is a DELIBERATE syndication, and
+     * `GroupSyndicationGate::allows()` admits it early and keeps it public
+     * after the group closes. So "made while non-open" is only returned when
+     * EVERY row agrees; one open row withholds it and the post is judged on
+     * the group's current privacy instead.
+     *
+     * ⛔ EACH ROW IS JUDGED BY `GroupSyndicationGate::madeWhileNonOpen()`,
+     * THE CONSUMER'S OWN PREDICATE, and not by a second copy of the rule.
+     * That is the whole point rather than a tidiness preference: the fold is
+     * only as strict as the test it shares with the code that acts on the
+     * result. An exact `in_array(…, NON_OPEN_PRIVACY, true)` here looks
+     * equivalent and is not — the predicate TRIMS first, so the two
+     * disagreed about any padded value, and a row this fold read as "open"
+     * was read as non-open downstream. One rule, one implementation.
+     *
+     * @param list<string> $values every row of the key, in meta_id order
+     */
+    private static function strictestPrivacyAtPost(array $values): string
+    {
+        if ($values === []) {
+            return '';
+        }
+
+        foreach ($values as $value) {
+            if (!GroupSyndicationGate::madeWhileNonOpen($value)) {
+                return $value;
+            }
+        }
+
+        return $values[0];
     }
 }

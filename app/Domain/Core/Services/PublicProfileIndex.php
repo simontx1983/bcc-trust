@@ -171,8 +171,8 @@ final class PublicProfileIndex
      * One keyset page of listable groups: bcc-core's explicitly OPEN groups,
      * kept only when GroupContextResolver can place them AND reads them open.
      *
-     * The URL uses the resolver's own type (Hall → /halls/, otherwise
-     * /communities/), so a group the app cannot route — disagreeing kind
+     * The URL is built from the resolver's own type (every kind lives on
+     * /communities/{slug}), so a group the app cannot route — disagreeing kind
      * rows, an unreadable kind — has no context and is not listed: every
      * advertised group URL is one the app serves.
      *

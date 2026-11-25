@@ -518,6 +518,13 @@ final class NotificationViewService
             // manage view, so neither notice deep-links to it.
             NotificationType::ANNOUNCEMENT_HIDDEN   => '/',
             NotificationType::ANNOUNCEMENT_RESTORED => '/',
+            // Validator relationships: administrators land on the admin
+            // page view; the member on the validator page itself.
+            NotificationType::VALIDATOR_OWNER_LINKED,
+            NotificationType::VALIDATOR_OWNER_REVOKED,
+            NotificationType::VALIDATOR_OWNER_LINK_CANCELLED => '/admin/validators/' . $externalId,
+            NotificationType::VALIDATOR_OWNERSHIP_GRANTED,
+            NotificationType::VALIDATOR_OWNERSHIP_REMOVED => self::resolvePageLink($externalId),
             default                       => '/',
         };
     }
@@ -527,8 +534,8 @@ final class NotificationViewService
      * the Hall's group_id; we look up the slug via the shared
      * PeepSoGroupRepository (which automatically filters by the hall-kind
      * meta — null means "not a Hall anymore" or "deleted").
-     * Falls back to /halls on any resolution failure so the bell row
-     * never produces a 404 URL.
+     * Falls back to the Halls list on any resolution failure so the
+     * bell row never produces a 404 URL.
      */
     /**
      * A plain (user/system) community's page, plus `$suffix` (a sub-route
@@ -548,14 +555,16 @@ final class NotificationViewService
     private static function resolveHallLink(int $groupId): string
     {
         if ($groupId <= 0) {
-            return '/halls';
+            return \BCC\Trust\Core\Support\CardUrlMap::HALLS_LIST_URL;
         }
         $group = PeepSoGroupRepository::findHallById($groupId);
         if ($group === null) {
-            return '/halls';
+            return \BCC\Trust\Core\Support\CardUrlMap::HALLS_LIST_URL;
         }
         $slug = isset($group->post_name) ? (string) $group->post_name : '';
-        return $slug !== '' ? '/halls/' . $slug : '/halls';
+        return $slug !== ''
+            ? \BCC\Trust\Core\Support\CardUrlMap::groupUrl(\BCC\Trust\Core\ValueObjects\GroupType::Hall->value, $slug)
+            : \BCC\Trust\Core\Support\CardUrlMap::HALLS_LIST_URL;
     }
 
     private static function resolvePageLink(int $pageId): string

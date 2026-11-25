@@ -1053,7 +1053,7 @@ final class UserViewService
             }
         }
 
-        $primaryGroupId = self::loadPrimaryGroupId($userId);
+        $primaryGroupId = self::publishedHallOrNull(self::loadPrimaryGroupId($userId));
         $groupInfo      = PeepSoGroupRepository::findManyByIds($myGroupIds);
 
         // Roles: the member's status per group, and (for anyone but the
@@ -1151,6 +1151,23 @@ final class UserViewService
             }
         }
         return null;
+    }
+
+    /**
+     * The home-Hall pointer, kept only when it names a published,
+     * non-secret Hall (HallRepository::publishedHallIds). A read that
+     * cannot be verified shows no home Hall rather than an unchecked group.
+     */
+    private static function publishedHallOrNull(?int $groupId): ?int
+    {
+        if ($groupId === null) {
+            return null;
+        }
+        try {
+            return \BCC\Trust\Onchain\Repositories\HallRepository::publishedHallIds([$groupId]) === [$groupId] ? $groupId : null;
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
     }
 
     private static function loadPrimaryGroupId(int $userId): ?int

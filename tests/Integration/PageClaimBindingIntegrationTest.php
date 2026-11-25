@@ -52,6 +52,12 @@ final class PageClaimBindingIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // A validator claim now writes its relationship log row in the same
+        // run, and the log's HMAC key derives from BCC_ENCRYPTION_KEY (set
+        // in every deployed environment). Separate process: safe to define.
+        if (!defined('BCC_ENCRYPTION_KEY')) {
+            define('BCC_ENCRYPTION_KEY', 'page-claim-integration-test-key');
+        }
         require_once dirname(__DIR__) . '/Stubs/page-claim-endpoint-stubs.php';
 
         $GLOBALS['__bcc_actions']      = [];

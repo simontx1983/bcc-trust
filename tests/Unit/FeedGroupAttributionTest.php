@@ -108,7 +108,7 @@ final class FeedGroupAttributionTest extends TestCase
     public function testHallLinksToHallsNonHallToCommunities(): void
     {
         $hall = self::attribution(self::ctx(GroupType::Hall, PeepSoPrivacy::Open), 'Ethereum Hall', 'ethereum-hall', false);
-        self::assertSame('/halls/ethereum-hall', $hall['link']);
+        self::assertSame('/communities/ethereum-hall', $hall['link']);
 
         $nft = self::attribution(self::ctx(GroupType::Nft, PeepSoPrivacy::Open), 'Bored Apes', 'bored-apes', false);
         self::assertSame('/communities/bored-apes', $nft['link']);

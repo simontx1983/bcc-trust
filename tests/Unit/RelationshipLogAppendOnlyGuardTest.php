@@ -42,7 +42,9 @@ final class RelationshipLogAppendOnlyGuardTest extends TestCase
         $reaching = [];
         foreach ($files as $relative) {
             $code = GateOrder::code($relative);
-            if (str_contains($code, 'bcc_validator_relationship_log')
+            // The table name itself, not a longer name that starts with it
+            // (the health check's `bcc_validator_relationship_log_health` hook).
+            if (preg_match('/bcc_validator_relationship_log(?![a-z0-9_])/', $code) === 1
                 || str_contains($code, 'validatorRelationshipLog(')
                 || str_contains($code, 'ValidatorRelationshipLogRepository::table(')
             ) {

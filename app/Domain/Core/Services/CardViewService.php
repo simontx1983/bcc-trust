@@ -51,6 +51,7 @@ use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
+use BCC\Trust\Core\ValueObjects\OwnerVerification;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\PageClaimRolePolicy;
 use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
@@ -273,6 +274,18 @@ final class CardViewService
             $isClaimedByViewer = self::viewerHasClaim($viewerId, $pageId);
         }
 
+        // The viewer's role on this page (contract v1.NEXT): `owner` when they
+        // hold its verified owner claim, a team role when they hold an ACTIVE
+        // team row, else null. A card flag only: every write re-checks.
+        if ($viewerId <= 0 || $isClaimedByViewer) {
+            $viewerTeamRole = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_team_roles'])) {
+            $viewerTeamRole = $prefetched['viewer_team_roles'][$pageId] ?? null;
+        } else {
+            $viewerTeamRole = ClaimRepository::activeTeamRolesOnPages($viewerId, [$pageId])[$pageId] ?? null;
+        }
+        $viewerPageRole = self::viewerPageRole($isClaimedByViewer, $viewerTeamRole);
+
         if ($viewerId <= 0) {
             $viewerHasReviewed = false;
         } elseif ($prefetched !== null && isset($prefetched['viewer_votes'])) {
@@ -352,13 +365,16 @@ final class CardViewService
             : null;
 
         $operatorProfile = null;
+        $ownerMethods    = [];
         if ($kind === 'validator') {
             if ($prefetched !== null && isset($prefetched['operator_profiles'])) {
                 $operatorProfile = $prefetched['operator_profiles'][$pageId] ?? null;
+                $ownerMethods    = $prefetched['owner_methods'][$pageId] ?? [];
             } else {
-                $operators = ClaimRepository::resolveVerifiedOperatorForPages([$pageId]);
+                $resolved        = ClaimRepository::resolveVerifiedOperatorsWithMethodsForPages([$pageId]);
+                $ownerMethods    = $resolved['methods'][$pageId] ?? [];
                 $operatorProfile = (new OperatorProfileRepository())
-                    ->findPublicForResolvedPages($operators)[$pageId] ?? null;
+                    ->findPublicForResolvedPages($resolved['operators'])[$pageId] ?? null;
             }
         }
         $operatorProfileLogo = self::operatorProfileLogoUrl($operatorProfile);
@@ -423,6 +439,14 @@ final class CardViewService
             // ClaimRepository query, so the prefetched-list path stays
             // N+1-free. Distinct from the owner-EMAIL verification signal.
             'is_claim_verified'   => $rm !== null && (bool) ($rm->has_verified_claim ?? 0),
+            // Contract v1.NEXT: how the page's owner proved it, as public
+            // badge copy rendered verbatim: {kind: wallet|node_key|staff,
+            // label, description}. Never a method or a date. null = no badge
+            // (no owner, an ambiguous page, an unknown method, or not a
+            // validator page).
+            'owner_verification'  => OwnerVerification::fromMethods($ownerMethods)?->toApiResponse(),
+            // Contract v1.NEXT: owner | administrator | representative | null.
+            'viewer_page_role'    => $viewerPageRole,
             // §D2 — true when the current viewer has already cast a
             // vote on this page. Drives the entity profile's
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
@@ -892,6 +916,9 @@ final class CardViewService
             // Members aren't on-chain-claimed — always false, emitted for
             // shape uniformity with entity cards (matches is_claimed above).
             'is_claim_verified'   => false,
+            // Page-only (contract v1.NEXT); always present, null here.
+            'owner_verification'  => null,
+            'viewer_page_role'    => null,
             'claim_target'        => null,
             // Entity-addressed messaging is validator-only at V1;
             // members are messaged directly through the DM surface.
@@ -1072,10 +1099,19 @@ final class CardViewService
             'name'                => $name,
             'handle'              => $slug,
             'card_kind'           => 'community',
-            // Producers already truncate the description to ~200 chars
-            // (same bound as truncateBio) — pass through; '' when unset
-            // to match the page/member bio convention.
-            'bio'                 => $groupData['description'] ?? '',
+            // ⚠ THROUGH THE SAME CUT AS EVERY OTHER KIND. This used to
+            // pass the producers' ~200-char description straight
+            // through, which was fine while the bound WAS ~200 chars
+            // — but row 16 moved page and member cards to 25 words,
+            // and a community card left on the old bound would have
+            // made the five kinds disagree about one field.
+            //
+            // The producers' cut stays upstream as the cheap bound
+            // (GroupsDiscoveryEndpoint::truncateDescription,
+            // GroupsService::getGroup); 25 words after 200 characters
+            // is strictly tighter, so nothing regresses. '' when
+            // unset, matching the page/member convention.
+            'bio'                 => self::truncateBio((string) ($groupData['description'] ?? '')),
             'trust_score'         => 0,
             'reputation_tier'     => 'neutral',
             'reputation_tier_label' => null,
@@ -1103,6 +1139,9 @@ final class CardViewService
             // Communities aren't on-chain-claimed — always false, emitted
             // for shape uniformity (mirrors is_claimed above).
             'is_claim_verified'   => false,
+            // Page-only (contract v1.NEXT); always present, null here.
+            'owner_verification'  => null,
+            'viewer_page_role'    => null,
             'claim_target'        => null,
             // Entity-addressed messaging is validator-only at V1.
             'messaging'           => ['destination' => 'none', 'operator' => null],
@@ -1487,6 +1526,21 @@ final class CardViewService
     }
 
     /**
+     * The viewer's role on a page, for the card: `owner` when they hold its
+     * verified owner claim; else their ACTIVE team role
+     * (ClaimRepository::activeTeamRolesOnPages: an invite or any other
+     * status holds none); else null.
+     */
+    private static function viewerPageRole(bool $isOwner, ?string $activeTeamRole): ?string
+    {
+        if ($isOwner) {
+            return 'owner';
+        }
+
+        return $activeTeamRole !== null && PageClaimRolePolicy::isTeamRole($activeTeamRole) ? $activeTeamRole : null;
+    }
+
+    /**
      * The status==='verified' reduction shared by the single-page
      * fallback (viewerHasClaim) and the prefetched path — one place,
      * so the two can never disagree on what "claimed by viewer" means.
@@ -1780,12 +1834,53 @@ final class CardViewService
         return self::truncateBio($raw);
     }
 
+    /** Structure A row 16 — the front-face bio is bounded in WORDS. */
+    private const CARD_BIO_MAX_WORDS = 25;
+
     /**
-     * Truncate a bio string to ~200 chars at a word boundary, with an
-     * ellipsis suffix when it actually got cut. Server-side per §A2 so
-     * the frontend renders verbatim and back-face layout stays stable.
+     * … and in characters as well, which is not redundant.
+     *
+     * ⚠ A word here is a whitespace-delimited token, so text written
+     * WITHOUT spaces — Chinese, Japanese, Korean — is ONE word, and the
+     * word bound alone would pass a whole paragraph through onto the
+     * front of a card. This is the backstop for that, and whichever
+     * bound bites first wins.
+     */
+    private const CARD_BIO_MAX_CHARS = 120;
+
+    /**
+     * Cut a bio to the front-face bound: at most 25 words AND at most
+     * 120 characters, with a single '…' when it actually got cut.
+     * Server-side per §A2, so the frontend renders verbatim.
      *
      * Empty / whitespace-only input → "".
+     *
+     * ── THE RULES, AND WHY EACH ONE IS HERE ──────────────────
+     *
+     * • WORDS, not characters, because this now shows on the FRONT of
+     *   the card (row 16) where the space is a line count, not a
+     *   character count. The old bound was ~200 characters.
+     *
+     * • A URL or an @handle counts as ONE word, and is never cut into.
+     *   Half a link is not a shorter link, it is a broken one, and half
+     *   an @handle names somebody else. When such a token does not fit,
+     *   the WHOLE token is dropped.
+     *
+     * ⚠ ⇒ That has one honest consequence: a bio that is nothing but a
+     *   single over-long URL yields "" — no line on the card rather
+     *   than a truncated link. The full bio is on the page, and the
+     *   alternative (emitting a lone '…') would be a line that says
+     *   nothing. Stated here because it is a choice, not an oversight.
+     *
+     * • Everything else MAY be cut mid-token, because that is exactly
+     *   what the CJK case needs: one 400-character token has no
+     *   boundary to fall back to, and the alternative is "".
+     *
+     * • Grapheme-safe: `grapheme_*` when intl is present, `mb_*`
+     *   otherwise. `mb_substr` never splits a UTF-8 SEQUENCE, but it
+     *   can still separate a combining mark from its base character or
+     *   cut an emoji ZWJ sequence; `grapheme_substr` will not. Both
+     *   beat `substr`, which is the last resort.
      */
     private static function truncateBio(string $raw): string
     {
@@ -1793,24 +1888,101 @@ final class CardViewService
         if ($clean === '') {
             return '';
         }
-        $maxChars = 200;
-        $length = function_exists('mb_strlen')
-            ? mb_strlen($clean)
-            : strlen($clean);
-        if ($length <= $maxChars) {
-            return $clean;
+
+        $tokens = explode(' ', $clean);
+        $cut    = count($tokens) > self::CARD_BIO_MAX_WORDS;
+        if ($cut) {
+            $tokens = array_slice($tokens, 0, self::CARD_BIO_MAX_WORDS);
         }
-        $cut = function_exists('mb_substr')
-            ? mb_substr($clean, 0, $maxChars)
-            : substr($clean, 0, $maxChars);
-        // Backtrack to the last space so we don't slice mid-word.
-        $lastSpace = (function_exists('mb_strrpos') ? mb_strrpos($cut, ' ') : strrpos($cut, ' '));
-        if ($lastSpace !== false && $lastSpace > 0) {
-            $cut = function_exists('mb_substr')
-                ? mb_substr($cut, 0, $lastSpace)
-                : substr($cut, 0, $lastSpace);
+
+        $kept = '';
+        foreach ($tokens as $token) {
+            $candidate = $kept === '' ? $token : $kept . ' ' . $token;
+            if (self::bioLength($candidate) <= self::CARD_BIO_MAX_CHARS) {
+                $kept = $candidate;
+                continue;
+            }
+
+            // This token does not fit inside the character bound.
+            $cut = true;
+            if (self::bioTokenIsUnsplittable($token)) {
+                break;
+            }
+
+            $used      = $kept === '' ? 0 : self::bioLength($kept) + 1;
+            $remaining = self::CARD_BIO_MAX_CHARS - $used;
+            if ($remaining > 0) {
+                $piece = self::bioSubstr($token, $remaining);
+                $kept  = $kept === '' ? $piece : $kept . ' ' . $piece;
+            }
+            break;
         }
-        return rtrim($cut, " \t\n\r\0\x0B,;:.") . '…';
+
+        if (!$cut) {
+            return $kept;
+        }
+        if ($kept === '') {
+            // One unsplittable token, longer than the bound. See above.
+            return '';
+        }
+        if (str_ends_with($kept, '…')) {
+            // Already ellipsised upstream (group producers cut to ~200
+            // and append one). Never '……'.
+            return $kept;
+        }
+
+        // ASCII-only character list, so this is byte-safe on UTF-8: a
+        // continuation byte is always >= 0x80 and can never match one
+        // of these.
+        return rtrim($kept, " \t\n\r\0\x0B,;:.") . '…';
+    }
+
+    /**
+     * A token that must survive whole or not at all: a URL or an
+     * @handle. {@see truncateBio()} for why.
+     */
+    private static function bioTokenIsUnsplittable(string $token): bool
+    {
+        if ($token === '') {
+            return false;
+        }
+        if (str_starts_with($token, '@')) {
+            return true;
+        }
+
+        $lower = strtolower($token);
+
+        return str_contains($lower, '://')
+            || str_starts_with($lower, 'www.')
+            || str_starts_with($lower, 'mailto:');
+    }
+
+    /** Grapheme count when intl is present, else codepoints. */
+    private static function bioLength(string $text): int
+    {
+        if (function_exists('grapheme_strlen')) {
+            $n = grapheme_strlen($text);
+            if (is_int($n)) {
+                return $n;
+            }
+        }
+
+        return function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+    }
+
+    /** The first $length graphemes (or codepoints) of $text. */
+    private static function bioSubstr(string $text, int $length): string
+    {
+        if (function_exists('grapheme_substr')) {
+            $out = grapheme_substr($text, 0, $length);
+            if (is_string($out)) {
+                return $out;
+            }
+        }
+
+        return function_exists('mb_substr')
+            ? mb_substr($text, 0, $length)
+            : substr($text, 0, $length);
     }
 
     /**
@@ -2165,6 +2337,13 @@ final class CardViewService
                 'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_image'     => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                // Contract v1.NEXT: owner controls with no flag of their own
+                // yet (can_edit_bio above now covers the profile text: name,
+                // bio, banner). Owner-only until team members exist; then
+                // the page role policy decides them.
+                'can_manage_team'        => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_links'         => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_notifications' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 // Mirrors the DM write gates exactly (MessagesService's
                 // single policy evaluator) against the page's resolved
                 // operator, or the queue-mode gates when the validator
@@ -2336,7 +2515,7 @@ final class CardViewService
                 'can_watch'          => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
                 'can_review'         => $isSelf
                     ? self::deny(null, 'self_action_blocked')
-                    : $this->writeReviewPermission($viewerId),
+                    : $this->writeReviewPermission($viewerId, \BCC\Trust\Core\Support\MemberCardPrefetcher::viewerWriteReview($prefetched, $viewerId)),
                 // §4.4 can_open_dispute — members are full trust subjects:
                 // a member viewing their OWN self-page can open a dispute
                 // when the self-page carries a contestable active downvote
@@ -2445,8 +2624,13 @@ final class CardViewService
             'can_open_dispute'   => $sign,
             'can_endorse'        => $sign,
             'can_post_as_entity' => $sign,
-            'can_edit_bio'       => $sign,
+            // Owner-only controls are HIDDEN from a signed-out viewer (no
+            // hint): signing in would not unlock them (contract v1.NEXT).
+            'can_edit_bio'           => self::deny(null, 'not_claimer'),
             'can_edit_image'     => $sign,
+            'can_manage_team'        => self::deny(null, 'not_claimer'),
+            'can_edit_links'         => self::deny(null, 'not_claimer'),
+            'can_edit_notifications' => self::deny(null, 'not_claimer'),
         ];
     }
 
@@ -2511,11 +2695,16 @@ final class CardViewService
      * requirement. It says so (the attestation entries' sentence), with
      * the `unavailable` reason code, never the "keep your standing" hint.
      *
+     * The decision depends on the viewer alone, so a list of member cards
+     * passes the one its prefetch computed for the page
+     * (MemberCardPrefetcher::viewerWriteReview()); without it, it is read
+     * here.
+     *
      * @return Permission
      */
-    private function writeReviewPermission(int $viewerId): array
+    private function writeReviewPermission(int $viewerId, ?\BCC\Trust\Core\ValueObjects\CapabilityDecision $decided = null): array
     {
-        $decision = $this->capabilityResolver->can($viewerId, 'write_review');
+        $decision = $decided ?? $this->capabilityResolver->can($viewerId, 'write_review');
         if ($decision->isAllowed()) {
             return self::allow();
         }

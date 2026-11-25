@@ -314,6 +314,7 @@ final class HallsEndpoint
                 'bcc_unauthorized'    => 401,
                 'bcc_forbidden'       => 403,
                 'bcc_invalid_request' => 400,
+                'bcc_unavailable'     => 503,
                 default               => 400,
             };
             return ApiResponse::error($code, (string) ($result['message'] ?? ''), $status);
