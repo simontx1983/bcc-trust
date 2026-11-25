@@ -41,13 +41,23 @@ final class GroupActivityHeatService {
      * heat bucket. The frontend renders it verbatim per §A2 / §S — no
      * client-side `heat === "hot" ? "Hot" : ...` mapping.
      *
+     * The counts exclude moderated posts: a post moderation has hidden
+     * stays `publish`, so the hidden set (HiddenActivityRepository::
+     * getAllHiddenIds(), cached) is left out of the posts, the active
+     * posters and the last activity alike.
+     *
+     * ⚠ When the hidden set cannot be read (no last-known-good list exists),
+     * every group gets an UNKNOWN block: posts_last_7d, active_members_7d,
+     * heat, heat_label and last_activity_at are all null. A guessed number
+     * (an unfiltered count, or 0) is never shown.
+     *
      * @param int[] $groupIds
      * @return array<int, array{
-     *     posts_last_7d: int,
-     *     active_members_7d: int,
+     *     posts_last_7d: int|null,
+     *     active_members_7d: int|null,
      *     last_activity_at: string|null,
-     *     heat: string,
-     *     heat_label: string
+     *     heat: string|null,
+     *     heat_label: string|null
      * }>
      */
     public function forGroups(array $groupIds): array {
@@ -55,7 +65,18 @@ final class GroupActivityHeatService {
             return [];
         }
 
-        $raw = PeepSoGroupRepository::getActivityHeat($groupIds);
+        $hidden = self::hiddenActIds();
+        if ($hidden === null) {
+            return array_fill_keys($groupIds, [
+                'posts_last_7d'     => null,
+                'active_members_7d' => null,
+                'last_activity_at'  => null,
+                'heat'              => null,
+                'heat_label'        => null,
+            ]);
+        }
+
+        $raw = PeepSoGroupRepository::getActivityHeat($groupIds, 7 * DAY_IN_SECONDS, $hidden);
         [$warmAt, $hotAt] = $this->thresholds();
 
         $out = [];
@@ -79,6 +100,27 @@ final class GroupActivityHeatService {
             ];
         }
         return $out;
+    }
+
+    /**
+     * The act ids moderation has hidden, which every activity count leaves
+     * out; null when they cannot be read (getAllHiddenIds() then has no
+     * last-known-good list to serve either). Logged.
+     *
+     * Public so the rank stewardship sweep counts its active posters the
+     * same way.
+     *
+     * @return list<int>|null
+     */
+    public static function hiddenActIds(): ?array {
+        try {
+            return \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()->getAllHiddenIds();
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+            \BCC\Core\Log\Logger::error('[GroupActivityHeatService] moderated posts could not be read; activity counts left out', [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
     }
 
     /**
