@@ -45,9 +45,10 @@ final class GroupRosterVisibilityTest extends TestCase
     /** @param list<object> $rows @return list<int> */
     private static function kept(PeepSoPrivacy $privacy, array $rows): array
     {
-        $m = new ReflectionMethod(GroupMembersService::class, 'rowsTheViewerMaySee');
-        /** @var list<object> $out */
-        $out = $m->invoke(null, $privacy, $rows, (int) $GLOBALS['__bcc_fv_viewer'], self::GROUP);
+        $m = new ReflectionMethod(GroupMembersService::class, 'visibleRows');
+        /** @var array{0: list<object>, 1: array<int, true>|null} $res */
+        $res = $m->invoke(null, $privacy, $rows, (int) $GLOBALS['__bcc_fv_viewer'], self::GROUP);
+        $out = $res[0];
         return array_map(static fn (object $r): int => (int) $r->user_id, $out);
     }
 
@@ -166,6 +167,33 @@ final class GroupRosterVisibilityTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_fv']['constructed'], 'no visibility query for a members-only roster');
     }
 
+    /**
+     * The set the open roster read is handed on to gate the cards, so the
+     * page is judged once. A roster that was not filtered hands on none,
+     * and listMembers() judges the cards itself.
+     */
+    public function testAnOpenRosterHandsOnTheSetItReadForTheCards(): void
+    {
+        $GLOBALS['__bcc_fv']['visible'] = [11 => true, 13 => true];
+        $m = new ReflectionMethod(GroupMembersService::class, 'visibleRows');
+        $set = static function (PeepSoPrivacy $privacy, array $rows) use ($m): ?array {
+            /** @var array{0: list<object>, 1: array<int, true>|null} $res */
+            $res = $m->invoke(null, $privacy, $rows, (int) $GLOBALS['__bcc_fv_viewer'], self::GROUP);
+            if ($res[1] !== null) {
+                ksort($res[1]);
+            }
+            return $res[1];
+        };
+
+        self::assertSame([11 => true, 13 => true], $set(PeepSoPrivacy::Open, self::rows([13, 12, 11])));
+        self::assertNull($set(PeepSoPrivacy::Closed, self::rows([12, 13])));
+        self::assertNull($set(PeepSoPrivacy::Secret, self::rows([12, 13])));
+        self::assertNull($set(PeepSoPrivacy::Open, []));
+
+        $GLOBALS['__bcc_gjr']['memberships'][self::VIEWER][self::GROUP] = 'member_owner';
+        self::assertNull($set(PeepSoPrivacy::Open, self::rows([12, 13])), "this group's owner: every tile, cards judged later");
+    }
+
     public function testAnEmptyPageAsksNothing(): void
     {
         self::assertSame([], self::kept(PeepSoPrivacy::Open, []));
@@ -182,11 +210,11 @@ final class GroupRosterVisibilityTest extends TestCase
     {
         $src  = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/Services/GroupMembersService.php');
         $body = substr($src, (int) strpos($src, 'public function listMembers('));
-        $body = substr($body, 0, (int) strpos($body, 'private static function rowsTheViewerMaySee('));
+        $body = substr($body, 0, (int) strpos($body, 'private static function visibleRows('));
 
         $hasMore = strpos($body, '$hasMore = ($offset + count($rows)) < $total;');
-        $filter  = strpos($body, '$rows = self::rowsTheViewerMaySee($ctx->privacy, $rows, $viewerId, $groupId);');
-        $prime   = strpos($body, 'MemberSummaryPrefetcher::primeFor(');
+        $filter  = strpos($body, '[$rows, $visible] = self::visibleRows($ctx->privacy, $rows, $viewerId, $groupId);');
+        $prime   = strpos($body, 'MemberCardPrefetcher::primeFor(');
 
         self::assertNotFalse($hasMore);
         self::assertNotFalse($filter);

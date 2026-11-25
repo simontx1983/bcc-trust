@@ -530,6 +530,16 @@ final class ApiRetry
                         'CLIENT ERROR (%d) %s — not retrying',
                         $code, $label
                     ));
+
+                    // ⚠ STILL NOT CHARGED ("code bug, not provider load").
+                    // Noted on the caller's receipt only, so a domain verdict
+                    // that charges because this refusal failed its operation
+                    // can name it instead of reading back as "Not recorded"
+                    // ({@see ProviderOutcomeReceipt::domainChargeKind()}).
+                    if ($chainId > 0) {
+                        $receipt?->recordProviderRefusal();
+                    }
+
                     return $lastResponse;
                 }
 

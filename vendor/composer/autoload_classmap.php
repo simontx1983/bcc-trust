@@ -479,6 +479,7 @@ return array(
     'BCC\\Trust\\Onchain\\Factories\\FetcherFactory' => $baseDir . '/app/Domain/Onchain/Factories/FetcherFactory.php',
     'BCC\\Trust\\Onchain\\Fetchers\\CosmosFetcher' => $baseDir . '/app/Domain/Onchain/Fetchers/CosmosFetcher.php',
     'BCC\\Trust\\Onchain\\Fetchers\\EvmFetcher' => $baseDir . '/app/Domain/Onchain/Fetchers/EvmFetcher.php',
+    'BCC\\Trust\\Onchain\\Fetchers\\IndexTimeBudgetSpent' => $baseDir . '/app/Domain/Onchain/Fetchers/IndexTimeBudgetSpent.php',
     'BCC\\Trust\\Onchain\\Fetchers\\NearFetcher' => $baseDir . '/app/Domain/Onchain/Fetchers/NearFetcher.php',
     'BCC\\Trust\\Onchain\\Fetchers\\PolkadotFetcher' => $baseDir . '/app/Domain/Onchain/Fetchers/PolkadotFetcher.php',
     'BCC\\Trust\\Onchain\\Fetchers\\SolanaFetcher' => $baseDir . '/app/Domain/Onchain/Fetchers/SolanaFetcher.php',

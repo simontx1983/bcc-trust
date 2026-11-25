@@ -14,9 +14,11 @@ use PHPUnit\Framework\TestCase;
  * non-secret pages count (bcc-core PeepSoPageRepository::listablePageSql).
  * Rationale: F-427 (private tracker).
  *
- * Covers every member-facing reader: bcc-core's per-type counts, its
- * owners-of-a-type list and its global per-type counts, and bcc-trust's
- * UserSyncRepository::getOwnedPageCountsForUsers (the card's total).
+ * Covers every member-facing reader: bcc-core's per-type counts and its
+ * owners-of-a-type list, and bcc-trust's
+ * UserSyncRepository::getOwnedPageCountsForUsers (the card's total). The
+ * directory's chip counts are per viewer in bcc-trust since #826, so
+ * bcc-core's global per-type count has no reader left to cover here.
  */
 #[Group('integration')]
 #[Group('mariadb')]
@@ -121,19 +123,6 @@ final class OwnedPageCountsSecretIntegrationTest extends TestCase
 
         self::assertSame([self::OWNER, self::NO_META_OWNER], $validators);
         self::assertSame([self::OWNER], $projects, 'owning only a trashed builders page does not list a member');
-    }
-
-    public function testTheGlobalChipCountsAddOnlyOwnersOfACountablePage(): void
-    {
-        // Global over the whole table, so measure what the fixture adds.
-        $before = PeepSoPageRepository::getGlobalOwnedPageUserCountsByType();
-        $this->seed();
-        $after = PeepSoPageRepository::getGlobalOwnedPageUserCountsByType();
-
-        self::assertSame(2, $after['validator'] - $before['validator'], 'OWNER and NO_META_OWNER');
-        self::assertSame(1, $after['project'] - $before['project'], 'OWNER only');
-        self::assertSame(0, $after['nft'] - $before['nft']);
-        self::assertSame(0, $after['dao'] - $before['dao']);
     }
 
     // ── fixture ─────────────────────────────────────────────────────────

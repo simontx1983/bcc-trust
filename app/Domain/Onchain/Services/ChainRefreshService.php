@@ -828,8 +828,11 @@ class ChainRefreshService
                         // rows, a cached-empty set, a driver that never called
                         // out — nothing was charged, the answer is unusable, and
                         // this verdict is correctly the operation's one charge.
+                        // It names a provider refusal (a 4xx the transport
+                        // noted but did not charge) when that is what ended
+                        // the fetch, and nothing otherwise.
                         if ($indexOutcome->domainMayCharge()) {
-                            OnchainCircuitBreaker::recordFailure($chainId);
+                            OnchainCircuitBreaker::recordFailure($chainId, $indexOutcome->domainChargeKind());
                         }
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
@@ -842,6 +845,19 @@ class ChainRefreshService
                     // It is now this chain's partial fetch, like any other.
                     $hasPartialFetch = true;
 
+                    // ⚠ A WALK THAT STOPPED AT ITS OWN TIME BUDGET IS NOT A
+                    // PROVIDER FAILURE. Every page it asked for may have been
+                    // answered; the fetcher refused to hand back a list it
+                    // knew was unfinished. So it is this chain's partial
+                    // fetch (nothing written, the run-wide sweep withheld, no
+                    // clean-index success), and the breaker is NOT charged:
+                    // a slow but healthy provider must not be walked into an
+                    // open breaker. The next run starts the walk again.
+                    if ($e instanceof \BCC\Trust\Onchain\Fetchers\IndexTimeBudgetSpent) {
+                        \BCC\Core\Log\Logger::warning('[Onchain] Validator index for ' . $chain->name . ' stopped at its time budget; nothing written for it this run: ' . $e->getMessage());
+                        continue;
+                    }
+
                     // ⚠ THIS CATCH SPANS MORE THAN ONE PROVIDER REQUEST — the
                     // whole index for this chain, plus the bulk upsert and the
                     // option writes after it. Most throws reaching here are
@@ -849,9 +865,10 @@ class ChainRefreshService
                     // are have already been charged once by ApiRetry. The
                     // receipt keeps this verdict from becoming that failure's
                     // second charge; a throw after a healthy request, or before
-                    // any request, still charges exactly once.
+                    // any request, still charges exactly once, naming a
+                    // provider refusal when that is what ended the fetch.
                     if ($indexOutcome->domainMayCharge()) {
-                        OnchainCircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure($chainId, $indexOutcome->domainChargeKind());
                     }
                     \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
