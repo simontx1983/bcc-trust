@@ -237,8 +237,9 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
     {
         $index = self::index();
 
-        // The SQL pass keeps every member whose exclusion is usermeta (flags,
-        // handle), so the first page of 5 scans 01, 02, 03, 12, 14.
+        // The SQL pass keeps every member whose exclusion is the HANDLE
+        // check, which usermeta cannot express in SQL, so the first page of
+        // 5 scans 01, 02, 03, 12, 14 and every one of them is listed.
         $first = $index->membersAfter(self::FIRST_ID, 5);
         self::assertNotNull($first);
         self::assertSame(
@@ -247,12 +248,32 @@ final class PublicSitemapIndexIntegrationTest extends TestCase
         );
         self::assertSame(951814, $first['next_after']);
 
-        // The next page scans 15..19: all dropped by the meta checks except
-        // 18. A short page that still has a next one.
+        // ⚠⚠ AN EMPTY PAGE IS NOT THE END, and this is the case that
+        // proves `next_after` is the last SCANNED id rather than the last
+        // RETURNED one — there is no returned id here to mistake it for.
+        // The next 5 SQL survivors are 19..23, every one dropped by the
+        // handle check, so the page is empty and still advances. A consumer
+        // that stopped on an empty page would never reach 828.
+        //
+        // ℹ This page USED to return 951818 `f518-flag-false`. The four
+        // moderation-flag fixtures sat at 15..18 and were SQL survivors
+        // (a usermeta flag cannot be excluded in SQL), so they filled this
+        // window; they went with the three flags F-582 retired, and the
+        // window moved on to the handle-shape fixtures.
         $second = $index->membersAfter(951814, 5);
         self::assertNotNull($second);
-        self::assertSame(['/u/f518-flag-false'], array_column($second['items'], 'path'));
-        self::assertSame(951819, $second['next_after']);
+        self::assertSame([], array_column($second['items'], 'path'));
+        self::assertSame(951823, $second['next_after']);
+
+        // The last page is SHORT AND NON-EMPTY: one survivor, 828, scanned
+        // out of a limit of 5, so the walk ends here. Asserted so the pair
+        // above cannot be satisfied by a reader that simply stops returning
+        // members after the first page — something has to come back after
+        // the empty one.
+        $third = $index->membersAfter(951823, 5);
+        self::assertNotNull($third);
+        self::assertSame(['/u/f518-legacy-off'], array_column($third['items'], 'path'));
+        self::assertNull($third['next_after'], 'fewer ids scanned than the limit = the end');
 
         // Walking to the end collects exactly the listed set, once each.
         $walked = [];
