@@ -147,6 +147,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Core\Repositories\UserMetaRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\StrictBoolParam;
@@ -530,6 +531,13 @@ final class MyProfilePrefsEndpoint
                 do_action('bcc_profile_visibility_changed', $userId, $profileAcc);
             }
         }
+        // ⚠ BEFORE the writes: the listing-visible fields in this loop
+        // are written DIRECTLY (and the opt-out through its own writer),
+        // so they never reach PrivacySettings::writePartial's change
+        // detection. Captured here so each purge key is covered by
+        // exactly one mechanism. {@see LISTING_VISIBLE_META}
+        $listingBefore = self::readListingVisibleBefore($userId, $meta);
+
         foreach ($meta as $metaKey => $value) {
             $field = self::META_FIELDS[$metaKey];
             // F-519: hide_from_search goes through its one writer, which also
@@ -543,6 +551,15 @@ final class MyProfilePrefsEndpoint
             }
             $saved[] = $field;
         }
+
+        // Only the listing-visible fields that actually MOVED. A settings
+        // form resends every value, so firing on a mere save would purge
+        // the members tag every time anybody touched any preference.
+        $listingChanged = self::listingVisibleChanged($meta, $listingBefore);
+        if ($listingChanged !== []) {
+            do_action('bcc_member_listing_fields_changed', $userId, $listingChanged);
+        }
+
         foreach ($privacyFlags as $flag => $hidden) {
             // One flag per call, so `saved`/`failed` can name the REQUEST
             // field that failed — the v1.108 partial-failure contract.
@@ -734,6 +751,95 @@ final class MyProfilePrefsEndpoint
         'bcc_show_operator_on_profile'             => 'show_operator_on_profile',
         'bcc_show_blogs_on_profile'                => 'show_blogs_on_profile',
     ];
+
+    /**
+     * The meta keys this endpoint writes DIRECTLY that a cached member
+     * LISTING renders, mapped to the key name the cache layer uses.
+     *
+     * ⚠ Only these two. Everything else in `$meta` changes the profile
+     * payload, not a member card, and the §K2 flags are covered by
+     * `PrivacySettings::writePartial`. One key, one mechanism — so
+     * adding a key here means checking it is not already covered there.
+     *
+     * The opt-out is reported under its PUBLIC name,
+     * `discovery_optout`, rather than the `hide_from_search` request
+     * field, so the cache layer keeps one vocabulary
+     * ({@see EdgeCache::MEMBER_LISTING_KEYS}).
+     *
+     * @var array<string, string>
+     */
+    private const LISTING_VISIBLE_META = [
+        'bcc_show_about_on_profile'                => 'show_about_on_profile',
+        PrivacySettings::HIDE_FROM_LISTING_META     => 'discovery_optout',
+    ];
+
+    /**
+     * The stored value of each listing-visible key this save will write.
+     *
+     * `null` means the before-state could not be trusted, and
+     * {@see listingVisibleChanged()} then treats every such key as
+     * changed — over-purging costs a cache miss, under-purging serves a
+     * stale listing to everyone for the rest of its TTL.
+     *
+     * @param  array<string, string> $meta
+     * @return array<string, bool>|null
+     */
+    private static function readListingVisibleBefore(int $userId, array $meta): ?array
+    {
+        $keys = array_values(array_intersect(
+            array_keys(self::LISTING_VISIBLE_META),
+            array_keys($meta)
+        ));
+        if ($keys === []) {
+            return [];
+        }
+
+        $rows = UserMetaRepository::firstValuesOrUnknown([$userId], $keys);
+        if ($rows === null) {
+            return null;
+        }
+
+        $before = [];
+        foreach ($keys as $key) {
+            $raw = $rows[$userId][$key] ?? null;
+            // An ABSENT row is the show-flags' permissive default (ON) and
+            // the opt-out's default (OFF); both read correctly through
+            // filter_var on '' — which is why the stored '1'/'0' strings
+            // are compared as booleans rather than as text.
+            $before[$key] = $raw === null
+                ? ($key !== PrivacySettings::HIDE_FROM_LISTING_META)
+                : (bool) filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return $before;
+    }
+
+    /**
+     * Which listing-visible keys this save actually moved, under the
+     * cache layer's names.
+     *
+     * @param  array<string, string>    $meta
+     * @param  array<string, bool>|null $before
+     * @return list<string>
+     */
+    private static function listingVisibleChanged(array $meta, ?array $before): array
+    {
+        $changed = [];
+        foreach (self::LISTING_VISIBLE_META as $metaKey => $publicKey) {
+            if (!array_key_exists($metaKey, $meta)) {
+                continue;
+            }
+            if ($before === null) {
+                $changed[] = $publicKey;
+                continue;
+            }
+            if (($before[$metaKey] ?? null) !== ($meta[$metaKey] === '1')) {
+                $changed[] = $publicKey;
+            }
+        }
+
+        return $changed;
+    }
 
     /**
      * Run one write and report whether the database accepted it, via

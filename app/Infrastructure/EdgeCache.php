@@ -173,6 +173,104 @@ final class EdgeCache
         do_action('litespeed_tag_add', $tag);
     }
 
+    /**
+     * The privacy keys a cached MEMBER LISTING actually renders.
+     *
+     * ⚠ This list is the whole point of the feature: an anonymous
+     * member list can sit in the edge cache for its TTL, so a member who
+     * changes one of these would keep seeing the old value served to
+     * everyone else until it expired. A key belongs here when it changes
+     * something a member CARD renders, or whether the member appears in
+     * the list at all — and NOT merely because it is a privacy setting.
+     *
+     *   show_about_on_profile   the card's bio (as of F-341's card gate)
+     *   real_name_hidden        the card's name
+     *   follower_count_hidden   the card's Watchers count
+     *   watching_hidden         the card's Watching count
+     *   reviews_hidden          the card's review counts
+     *   disputes_hidden         the card's dispute counts
+     *   discovery_optout        whether the member is listed at all
+     *
+     * ⚠ DELIBERATELY EXCLUDED, so the exclusions are a decision rather
+     * than an oversight: `email_hidden` and `delegations_hidden`, and the
+     * verifications / operator / blogs / groups show-flags. Those change
+     * the PROFILE payload, which is not edge-cached per member listing.
+     * Adding them would purge the whole members tag for a change no
+     * listing renders.
+     *
+     * @var list<string>
+     */
+    public const MEMBER_LISTING_KEYS = [
+        'show_about_on_profile',
+        'real_name_hidden',
+        'follower_count_hidden',
+        'watching_hidden',
+        'reviews_hidden',
+        'disputes_hidden',
+        'discovery_optout',
+    ];
+
+    /**
+     * Purge the members tag when any of $keys is one a listing renders.
+     *
+     * Returns whether it purged, so a caller (and a test) can tell a
+     * decision not to purge from a purge that did nothing.
+     *
+     * ⚠ THE CALLER PASSES ONLY KEYS THAT ACTUALLY CHANGED. This function
+     * cannot tell a real change from a settings form resending the same
+     * value, and purging on every save would drop the members tag every
+     * time anybody touched any preference.
+     *
+     * @param list<string> $keys
+     */
+    public static function purgeMembersForKeys(array $keys): bool
+    {
+        foreach ($keys as $key) {
+            if (in_array((string) $key, self::MEMBER_LISTING_KEYS, true)) {
+                self::purge(self::TAG_MEMBERS);
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Subscribe the members-tag purge to the two places a listing-visible
+     * field is written.
+     *
+     * Both actions carry ONLY the keys that actually changed:
+     *
+     *   `bcc_privacy_settings_changed`      §K2 flags, via
+     *                                       PrivacySettings::writePartial;
+     *   `bcc_member_listing_fields_changed` the fields the prefs endpoint
+     *                                       writes directly, outside
+     *                                       writePartial (today the About
+     *                                       show-flag and the listing
+     *                                       opt-out).
+     *
+     * Two actions rather than one because the two write paths are real and
+     * separate; ONE key set and ONE decision, so no key is covered twice
+     * and none is missed.
+     *
+     * Registered here rather than inline in Plugin so a test can register
+     * and fire them — the pattern FeedRankingService::registerIdentityHooks
+     * already uses.
+     */
+    public static function registerMemberListingHooks(): void
+    {
+        $purge = static function ($userId, $keys): void {
+            unset($userId);
+            if (is_array($keys)) {
+                /** @var list<string> $keys */
+                self::purgeMembersForKeys(array_values($keys));
+            }
+        };
+
+        add_action('bcc_privacy_settings_changed', $purge, 30, 2);
+        add_action('bcc_member_listing_fields_changed', $purge, 30, 2);
+    }
     /** Purge every edge entry carrying the tag. */
     public static function purge(string $tag): void
     {

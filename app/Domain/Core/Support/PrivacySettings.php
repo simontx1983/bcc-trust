@@ -229,6 +229,14 @@ final class PrivacySettings
         if ($userId <= 0) {
             return;
         }
+
+        // ⚠ BEFORE anything is written: the action below fires only for
+        // keys whose value actually MOVED, which cannot be decided after
+        // the write. `update_user_meta()` is no help — it answers false
+        // both for an unchanged value and for a failure, so the codebase
+        // deliberately ignores its return.
+        [$before, $beforeKnown] = self::readBefore($userId, $partial);
+
         foreach ($partial as $key => $value) {
             if (!in_array($key, self::ALL_KEYS, true)) {
                 continue;
@@ -245,13 +253,92 @@ final class PrivacySettings
         // covers a runtime where those hooks are not wired.
         UserMetaRepository::forget($userId);
 
-        // F-294: let caches that embed a member's name or listing react to a
-        // privacy change (the anon hot feed, on real_name_hidden). Only the
-        // keys this call actually wrote are passed.
-        $written = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
-        if ($written !== []) {
-            do_action('bcc_privacy_settings_changed', $userId, $written);
+        // F-294: let caches that embed a member's name or listing react to
+        // a privacy change — the anon hot feed on `real_name_hidden`, and
+        // the edge cache's members tag on anything a member CARD renders.
+        //
+        // ⚠⚠ ONLY THE KEYS WHOSE VALUE ACTUALLY MOVED, which is not what
+        // this used to pass: it passed every key the call TOUCHED. A
+        // settings form resends all of them, so the action fired on every
+        // save and its listeners did work for nothing — affordable for a
+        // single cache entry, not for purging a shared edge tag.
+        $changed = self::changedAmong($partial, $before, $beforeKnown);
+        if ($changed !== []) {
+            do_action('bcc_privacy_settings_changed', $userId, $changed);
         }
+    }
+
+    /**
+     * The stored value of each key this call will touch, read ONCE.
+     *
+     * ⭐ One read, not one per key: the first call primes
+     * `UserMetaRepository`'s memo for every public key (plus the legacy
+     * opt-out row, which `discovery_optout` is resolved from), and the
+     * per-key {@see flagOrUnknown()} calls below are then memo hits. That
+     * also means each key keeps its own storage convention instead of
+     * this method re-deciding it.
+     *
+     * The boolean is whether the before-state is TRUSTED. A read that
+     * could not be trusted — or a single key that answers unknown — makes
+     * the whole comparison untrustworthy, and {@see changedAmong()} then
+     * treats every touched key as changed.
+     *
+     * @param  array<string, bool> $partial
+     * @return array{0: array<string, bool>, 1: bool}
+     */
+    private static function readBefore(int $userId, array $partial): array
+    {
+        $touched = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
+        if ($touched === []) {
+            return [[], true];
+        }
+
+        $keys   = self::metaKeys();
+        $keys[] = self::LEGACY_DISCOVERY_OPTOUT_META;
+        if (UserMetaRepository::valuesOrUnknown([$userId], $keys) === null) {
+            return [[], false];
+        }
+
+        $before = [];
+        foreach ($touched as $key) {
+            $value = self::flagOrUnknown($userId, $key);
+            if ($value === null) {
+                return [[], false];
+            }
+            $before[$key] = $value;
+        }
+
+        return [$before, true];
+    }
+
+    /**
+     * Which of the touched keys actually moved.
+     *
+     * ⚠ With an untrusted before-state, EVERY touched key counts as
+     * changed. Over-firing drops a cache entry that did not need
+     * dropping; under-firing leaves a stale member listing being served
+     * to everyone for the rest of its TTL. Only one of those is a
+     * correctness problem.
+     *
+     * @param  array<string, bool> $partial
+     * @param  array<string, bool> $before
+     * @return list<string>
+     */
+    private static function changedAmong(array $partial, array $before, bool $beforeKnown): array
+    {
+        $touched = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
+        if (!$beforeKnown) {
+            return $touched;
+        }
+
+        $changed = [];
+        foreach ($touched as $key) {
+            if (($before[$key] ?? null) !== (bool) $partial[$key]) {
+                $changed[] = $key;
+            }
+        }
+
+        return $changed;
     }
 
     /**

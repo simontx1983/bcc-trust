@@ -1720,6 +1720,10 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 \BCC\Trust\Core\Support\BearerAuth::register();
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
+// A member who changes a listing-visible privacy field purges the members
+// tag, so an anonymous member list cannot serve the old value for its TTL.
+// Only ACTUAL changes fire; see EdgeCache::MEMBER_LISTING_KEYS.
+\BCC\Trust\Infrastructure\EdgeCache::registerMemberListingHooks();
 
 // Security review 2026-11-18 (H2): members sign in at the app only.
 // wp-login.php / XML-RPC refuse member accounts, wp-admin sends members
