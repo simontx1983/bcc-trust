@@ -49,7 +49,7 @@ namespace BCC\Trust\Tests\Integration {
     use BCC\Trust\Onchain\Repositories\WalletRepository;
     use BCC\Trust\Onchain\Services\HoldingsService;
     use BCC\Trust\Onchain\Services\NftGroupRevokeService;
-    use BCC\Trust\Onchain\Support\Bech32;
+    use BCC\Core\Crypto\Bech32;
     use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
     use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
     use PHPUnit\Framework\Attributes\Group;

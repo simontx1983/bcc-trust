@@ -9,9 +9,12 @@
  *   - is_self === false → omits the four own-only blocks entirely
  *
  * V1 wiring status (all real, no Phase-1 stubs remain):
- *   - flags                        → resolveFlags() composes V1 slugs
- *                                    from Permissions + wp_usermeta
- *                                    (suspended/shadow_limited/hidden/under_review)
+ *   - flags                        → resolveFlags() composes the V1 slug
+ *                                    list from Permissions ALONE. The only
+ *                                    slug is `suspended` (F-582).
+ *                                    ⚠ That is the UNGATED list. A payload
+ *                                    carries flagsForViewer(), which decides
+ *                                    whether this viewer may be told at all.
  *   - wallets                      → resolveWallets() reads WalletRepository::getForUser
  *   - living                       → delegated to LivingService::compose
  *   - counts.disputes_signed       → DisputeRepository::countByReporter
@@ -58,6 +61,7 @@ use BCC\Trust\Core\Support\ProfileGroupVisibility;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
+use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\WalletAddressValidator;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -74,9 +78,6 @@ final class UserViewService
      * the public index (F-518, PublicProfileIndex) reads the very same keys:
      * a flagged member must be out of the sitemap AND noindex on the page.
      */
-    public const META_SHADOW_LIMITED = 'bcc_shadow_limited';
-    public const META_HIDDEN         = 'bcc_hidden';
-    public const META_UNDER_REVIEW   = 'bcc_under_review';
 
     private VoteRepository $voteRepo;
     private ReputationRepository $reputationRepo;
@@ -191,7 +192,7 @@ final class UserViewService
             'rank_label'          => $state['rank_label'],
             'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
-            'flags'               => self::resolveFlags($userId),
+            'flags'               => self::flagsForViewer($userId, $viewerId),
             // F-341 — the ABOUT section. A documented EMPTY (null), never
             // an omitted key: a missing key breaks the client's shape, and
             // a refusal would disclose that something is being withheld.
@@ -632,7 +633,7 @@ final class UserViewService
             'rank_label'          => $state['rank_label'],
             'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
-            'flags'               => self::resolveFlags($userId),
+            'flags'               => self::flagsForViewer($userId, $viewerId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             // ⚠ §K2 count privacy (F-283). These two are what
             // `CardViewService::buildMemberStats()` renders as the
@@ -732,22 +733,88 @@ final class UserViewService
     }
 
     /**
-     * V1 contract `flags: string[]` (per api-contract-v1.md §3 / line 625).
+     * May this viewer be told a member's moderation flags?
      *
-     * Allowed slugs (exhaustive — frontend lights moderation chips ONLY
-     * for these values): suspended, shadow_limited, hidden, under_review.
+     * The member themselves, and administrators. Nobody else — including
+     * signed-out visitors, who have no id at all.
      *
-     * Sources are LOCKED — do not introduce new flag codes or new data
-     * sources without a contract amendment:
-     *   - suspended      ← Permissions::is_not_suspended($userId, false) === false
-     *   - shadow_limited ← wp_usermeta key 'bcc_shadow_limited' (boolean-truthy)
-     *   - hidden         ← wp_usermeta key 'bcc_hidden' (boolean-truthy)
-     *   - under_review   ← wp_usermeta key 'bcc_under_review' (boolean-truthy)
+     * ⚠⚠ NOT INSIDE {@see resolveFlags()}, and that is deliberate: its
+     * per-request memo is keyed by MEMBER ONLY, so a gate placed there
+     * would cache the first viewer's answer and hand it to the next one.
+     * The gate belongs where a payload is assembled — which is what
+     * {@see flagsForViewer()} is for.
      *
-     * "Boolean-truthy" uses FILTER_VALIDATE_BOOLEAN, NOT a `(bool)` cast —
-     * WP serialises meta as strings, so the literal string "false" cast
-     * to bool would be true, surfacing phantom flags. metaFlag() handles
-     * the {1, true, yes, on} / {0, false, no, off, ""} convention.
+     * ⚠ The admin test is `BearerAuth::userIsAdmin()`, the same check
+     * `AuthSupport::resolveCanModerate()` wraps for the `can_moderate`
+     * field the client already receives, so the two cannot disagree about
+     * who is an administrator.
+     *
+     * ⛔ A capability lookup that THROWS yields NO flags. That is the
+     * strict direction: the cost is an administrator briefly not seeing a
+     * list they can also read in wp-admin, against disclosing a member's
+     * moderation state to a stranger.
+     */
+    public static function viewerMaySeeFlags(int $viewerId, int $subjectId): bool
+    {
+        if ($viewerId <= 0) {
+            return false;
+        }
+
+        if ($viewerId === $subjectId) {
+            return true;
+        }
+
+        try {
+            return BearerAuth::userIsAdmin($viewerId);
+        } catch (\Throwable $e) {
+            unset($e);
+
+            return false;
+        }
+    }
+
+    /**
+     * The flags a given viewer may be told — the ONLY form a payload
+     * should carry.
+     *
+     * ⚠⚠ AN EMPTY LIST FROM HERE IS AMBIGUOUS BY CONSTRUCTION: it means
+     * EITHER "no flags" OR "not yours to see". No consumer may read
+     * emptiness as a statement about the member. The one that did —
+     * `MemberProfileComposer::buildStanding()`, which turned an empty
+     * list into the fact "No active moderation flags" — now takes
+     * {@see viewerMaySeeFlags()} and OMITS the fact instead, because
+     * silence is the only honest answer when the list is withheld.
+     *
+     * One implementation, used by every assembly point, so the payloads
+     * cannot drift apart on who sees what.
+     *
+     * @return list<string>
+     */
+    public static function flagsForViewer(int $userId, int $viewerId): array
+    {
+        return self::viewerMaySeeFlags($viewerId, $userId)
+            ? self::resolveFlags($userId)
+            : [];
+    }
+    /**
+     * V1 contract `flags: string[]`.
+     *
+     * ⚠⚠ THIS IS THE UNGATED LIST, AND IT IS NOT WHAT A PAYLOAD CARRIES.
+     * It answers "what is true of this member", with no view of who is
+     * asking. Every assembly point must route through
+     * {@see flagsForViewer()}, which is the only thing that decides whether
+     * a given viewer may be told.
+     *
+     * Allowed slugs (exhaustive): suspended.
+     *   - suspended ← Permissions::is_not_suspended($userId, false) === false
+     *
+     * ⚠ `shadow_limited`, `hidden` and `under_review` were REMOVED (F-582).
+     * NOTHING IN THE CODEBASE EVER WROTE THEM — no service, admin screen or
+     * command — so nothing was orphaned by removing them. They are not
+     * dormant features to be revived:
+     * reintroducing one means a contract amendment and a writer, not just a
+     * slug. ⭐ The real reach limit is the Caution/Risky reputation tier,
+     * which is a different mechanism entirely and never wrote these keys.
      *
      * Per-request memoisation: resolveFlags is invoked from both
      * UserViewService (for the user view-model) AND CardViewService
@@ -778,69 +845,26 @@ final class UserViewService
         // moderation UI is consistent with the actual account state.
         $suspended = !Permissions::is_not_suspended($userId, false);
 
-        $shadowLimited = self::metaFlag($userId, self::META_SHADOW_LIMITED);
-        $hidden        = self::metaFlag($userId, self::META_HIDDEN);
-        $underReview   = self::metaFlag($userId, self::META_UNDER_REVIEW);
-
-        return $memo[$userId] = self::composeFlagSlugs(
-            $suspended,
-            $shadowLimited,
-            $hidden,
-            $underReview
-        );
+        return $memo[$userId] = self::composeFlagSlugs($suspended);
     }
 
     /**
-     * Boolean-truthy meta lookup. WP stores user_meta as strings, so
-     * the literal "false" / "0" / "off" cast to bool would be true —
-     * use filter_var with FILTER_VALIDATE_BOOLEAN instead.
+     * Pure decision function: maps the one boolean signal V1 has to the
+     * flag-slug list. Extracted for testability — exercised directly by
+     * tests/Unit/UserViewFlagsTest.php without needing WordPress or
+     * Permissions in scope.
      *
-     * Returns true for {1, "1", true, "true", "yes", "on"} (case-insensitive).
-     * Returns false for {0, "0", "", false, "false", "no", "off", null}.
-     * Every row is read, and any row that reads as true sets the flag.
-     */
-    private static function metaFlag(int $userId, string $key): bool
-    {
-        // Every stored row, and ANY one that reads as on sets the flag
-        // (PrivacySettings::strictest()): WordPress allows duplicate rows,
-        // and a '0' row beside a '1' row must not hide the flag. The public
-        // index reads the flags the same way (PublicProfileIndex), so a
-        // flagged profile is never listed or indexable.
-        $rows = get_user_meta($userId, $key, false);
-        if (!is_array($rows)) {
-            return false;
-        }
-
-        return PrivacySettings::strictest(array_map(
-            static fn (mixed $raw): string => is_scalar($raw) ? (string) $raw : '',
-            array_values($rows)
-        ));
-    }
-
-    /**
-     * Pure decision function: maps four boolean signals to the V1
-     * flag-slug list, in deterministic order. Extracted for testability
-     * — exercised directly by tests/UserViewServiceFlagsTest.php without
-     * needing WordPress / Permissions / wp_usermeta in scope.
-     *
-     * Order is stable (suspended → shadow_limited → hidden → under_review)
-     * so frontend rendering and snapshot tests don't churn on flag-set
-     * changes. Each slug appears at most once by construction.
+     * ⚠ `suspended` is the ONLY slug this can emit (F-582), so there is
+     * no ordering left to keep stable and nothing to dedupe. A
+     * reintroduction guard in that test pins the one-slug shape, so
+     * widening this signature goes red rather than quietly shipping a
+     * slug no contract describes.
      *
      * @return list<string>
      */
-    public static function composeFlagSlugs(
-        bool $suspended,
-        bool $shadowLimited,
-        bool $hidden,
-        bool $underReview
-    ): array {
-        $flags = [];
-        if ($suspended)     { $flags[] = 'suspended'; }
-        if ($shadowLimited) { $flags[] = 'shadow_limited'; }
-        if ($hidden)        { $flags[] = 'hidden'; }
-        if ($underReview)   { $flags[] = 'under_review'; }
-        return $flags;
+    public static function composeFlagSlugs(bool $suspended): array
+    {
+        return $suspended ? ['suspended'] : [];
     }
 
     /**

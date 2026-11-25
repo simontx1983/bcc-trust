@@ -5,6 +5,7 @@ namespace BCC\Trust\Disputes\Repositories;
 use BCC\Core\DB\DB;
 use BCC\Core\DTO\RowAssert;
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Disputes\Domain\DisputeStatus;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
@@ -488,131 +489,64 @@ class DisputeRepository
     }
 
     /**
-     * Atomically create a dispute row (page limit, reporter limit,
-     * duplicate check, and the vote-row lock all run inside one
-     * transaction). The community-vote poll is opened by the caller
+     * Atomically create a dispute row. The page limit, the reporter limit,
+     * the duplicate check, the vote-row lock and the INSERT all run in ONE
+     * TransactionManager::run() transaction, so every FOR UPDATE lock taken
+     * here, the vote row's included, is held by that transaction until it
+     * commits (F-598). The community-vote poll is opened by the caller
      * AFTER commit (DisputeVoteService::openPollForDispute) — poll rows
      * belong to the Rank domain and must not join this transaction.
+     *
+     * Result codes (`db_error`, with `id` null):
+     *   - `dispute_limit_reached`, `reporter_limit_reached`,
+     *     `already_disputed`, `vote_no_longer_active`: refused, nothing
+     *     written;
+     *   - the INSERT's own error: refused, nothing written;
+     *   - `tx_failed`: the transaction could not start or commit, or one of
+     *     its reads did not run (TransactionManager retries a deadlock
+     *     first). Nothing was written; the caller may retry.
+     *   - `create_failed`: anything else went wrong inside it (a logic error,
+     *     a TypeError). Rolled back, so nothing was written; logged, and not
+     *     a transient failure.
+     *
+     * Nothing escapes as an exception: TransactionManager has already rolled
+     * back by the time it rethrows.
+     *
+     * ⚠ No caller may already be inside TransactionManager::run(): a
+     * nested call would run as a SAVEPOINT of the caller's transaction and
+     * commit with it, not here.
      *
      * @param array<string, mixed> $disputeData  Dispute column values.
      * @return array{id: ?int, db_error: ?string}
      */
     public static function createDispute(array $disputeData): array
     {
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-
-        if (!DisputeRepositorySupport::beginTx()) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in createDispute', [
-                'db_error' => (string) $wpdb->last_error,
+        try {
+            /** @var array{id: ?int, db_error: ?string} $result */
+            $result = TransactionManager::run(
+                static fn (): array => self::createDisputeInTransaction($disputeData)
+            );
+        } catch (\RuntimeException $e) {
+            // TransactionManager's start/commit failures and a read that did
+            // not run (RepositoryReadFailure) are all RuntimeExceptions.
+            \BCC\Core\Log\Logger::error('[bcc-disputes] createDispute transaction failed', [
+                'exception' => get_class($e),
+                'db_error'  => $e->getMessage(),
             ]);
-            return ['id' => null, 'db_error' => 'tx_begin_failed'];
+            return ['id' => null, 'db_error' => 'tx_failed'];
+        } catch (\Throwable $e) {
+            // Anything else (a LogicException, a TypeError, TransactionManager's
+            // own retries-exhausted Exception) was rolled back too. Not
+            // transient: the controller answers it as a 500.
+            \BCC\Core\Log\Logger::error('[bcc-disputes] createDispute failed unexpectedly', [
+                'exception' => get_class($e),
+                'error'     => $e->getMessage(),
+            ]);
+            return ['id' => null, 'db_error' => 'create_failed'];
         }
 
-        // Atomic dispute limit check: count recent disputes FOR UPDATE to
-        // prevent race where two concurrent requests both read count=2.
-        $pageId = (int) $disputeData['page_id'];
-        // UTC_TIMESTAMP() (not NOW()): created_at is now written in UTC on
-        // insert (see below), so this 30-day window must compare on the
-        // same clock. NOW() is the MySQL session tz (time_zone=SYSTEM),
-        // which skews the window by the server's UTC offset.
-        $recentCount = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$disputeTable}
-             WHERE page_id = %d
-               AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
-             FOR UPDATE",
-            $pageId
-        ));
-        if ($recentCount >= BCC_DISPUTES_MAX_PER_PAGE) {
-            DisputeRepositorySupport::rollbackTx('createDispute:dispute_limit_reached');
-            return ['id' => null, 'db_error' => 'dispute_limit_reached'];
-        }
-
-        // Per-reporter global limit: max active disputes at any time.
-        // Prevents dispute-queue flooding by users with many pages.
-        $reporterId = (int) $disputeData['reporter_id'];
-        $activeReporterCount = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$disputeTable}
-             WHERE reporter_id = %d AND status = 'reviewing'
-             FOR UPDATE",
-            $reporterId
-        ));
-        if ($activeReporterCount >= BCC_DISPUTES_REPORTER_MAX_ACTIVE) {
-            DisputeRepositorySupport::rollbackTx('createDispute:reporter_limit_reached');
-            return ['id' => null, 'db_error' => 'reporter_limit_reached'];
-        }
-
-        // Atomic duplicate check: verify no active dispute exists for this
-        // vote_id while holding a row-level lock. FOR UPDATE ensures that a
-        // concurrent transaction inserting for the same vote_id will block
-        // until this transaction commits or rolls back, preventing duplicate
-        // disputes from being created via race condition.
-        $voteId = (int) $disputeData['vote_id'];
-        $existingForVote = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$disputeTable}
-             WHERE vote_id = %d AND status = 'reviewing'
-             LIMIT 1
-             FOR UPDATE",
-            $voteId
-        ));
-        if ($existingForVote) {
-            DisputeRepositorySupport::rollbackTx('createDispute:already_disputed');
-            return ['id' => null, 'db_error' => 'already_disputed'];
-        }
-
-        // Verify the vote is still active via the TrustReadService contract.
-        // Cross-plugin coupling MUST go through the interface — a direct query
-        // against Trust\Database\TableRegistry::votes() would break silently
-        // when the trust-engine schema changes. lockActiveVoteForDispute also
-        // holds a FOR UPDATE lock on the vote row for the remainder of this
-        // transaction, preventing the trust engine from soft-deleting the
-        // vote underneath us. NullTrustReadService returns false here, so
-        // disputes cannot be created while the trust engine is inactive
-        // (fail-closed).
-        $trustRead = \BCC\Core\ServiceLocator::resolveTrustReadService();
-        if (!$trustRead->lockActiveVoteForDispute($voteId)) {
-            DisputeRepositorySupport::rollbackTx('createDispute:vote_no_longer_active');
-            return ['id' => null, 'db_error' => 'vote_no_longer_active'];
-        }
-
-        // created_at written explicitly in UTC. The column DEFAULT is
-        // CURRENT_TIMESTAMP (MySQL session tz, time_zone=SYSTEM), but every
-        // reader compares it against UTC cutoffs — the 30-day rate window
-        // above, the backstop sweep cutoff, recent-activity, and
-        // reporter-rate reads. Writing UTC here puts the column on the
-        // one clock they all use. Mirrors UserReportRepository's
-        // created_at handling.
-        $wpdb->insert($disputeTable, [
-            'vote_id'      => $disputeData['vote_id'],
-            'page_id'      => $disputeData['page_id'],
-            'reporter_id'  => $disputeData['reporter_id'],
-            'voter_id'     => $disputeData['voter_id'],
-            'reason'       => $disputeData['reason'],
-            'evidence_url' => $disputeData['evidence_url'],
-            'status'       => $disputeData['status'],
-            'created_at'   => gmdate('Y-m-d H:i:s'),
-        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%s']);
-
-        $dispute_id = $wpdb->insert_id;
-
-        if (!$dispute_id) {
-            // Capture last_error BEFORE the ROLLBACK — a subsequent $wpdb->query()
-            // clears it, which previously meant production logs contained empty
-            // db_error strings. Preserve the original INSERT failure reason.
-            $insertError = (string) $wpdb->last_error;
-            if ($insertError !== '' && stripos($insertError, 'Duplicate entry') !== false) {
-                DisputeRepositorySupport::rollbackTx('createDispute:duplicate_entry');
-                return ['id' => null, 'db_error' => 'already_disputed'];
-            }
-            DisputeRepositorySupport::rollbackTx('createDispute:insert_failed');
-            return ['id' => null, 'db_error' => $insertError];
-        }
-
-        if (!DisputeRepositorySupport::commitTx('createDispute')) {
-            // COMMIT failed → MySQL rolled back.  Returning here with
-            // db_error='commit_failed' lets the controller surface a 5xx and
-            // the reporter retry, instead of returning a dead insert_id.
-            return ['id' => null, 'db_error' => 'commit_failed'];
+        if ($result['id'] === null) {
+            return $result;
         }
 
         // Invalidate: reporter's dispute list, status counts.
@@ -625,7 +559,175 @@ class DisputeRepository
             wp_cache_delete("disputed_vote:{$disputeData['vote_id']}", self::CACHE_GROUP);
         }
 
-        return ['id' => $dispute_id, 'db_error' => null];
+        return $result;
+    }
+
+    /**
+     * The body of createDispute(), run ONLY as its TransactionManager::run()
+     * callback. Never call it directly.
+     *
+     * A refusal RETURNS its result instead of throwing. Every refusal comes
+     * before the INSERT, or is the INSERT failing, so the transaction holds
+     * only FOR UPDATE locks and committing it ends it exactly as a rollback
+     * would.
+     *
+     * A failed READ throws (fail-closed). An InnoDB deadlock rolls the whole
+     * transaction back, so carrying on as if the read found nothing would
+     * run the rest of this body outside any transaction.
+     * TransactionManager rolls back, retries a deadlock, and otherwise
+     * rethrows to createDispute().
+     *
+     * @param array<string, mixed> $disputeData
+     * @return array{id: ?int, db_error: ?string}
+     * @throws RepositoryReadFailure when a read did not run
+     */
+    private static function createDisputeInTransaction(array $disputeData): array
+    {
+        if (!TransactionManager::isInRunTransaction()) {
+            throw new \LogicException(
+                'DisputeRepository::createDisputeInTransaction() runs only inside TransactionManager::run().'
+            );
+        }
+
+        global $wpdb;
+        $disputeTable = self::disputes_table();
+
+        // Atomic dispute limit check: count recent disputes FOR UPDATE to
+        // prevent race where two concurrent requests both read count=2.
+        // UTC_TIMESTAMP() (not NOW()): created_at is written in UTC on
+        // insert (see below), so this 30-day window must compare on the
+        // same clock. NOW() is the MySQL session tz (time_zone=SYSTEM),
+        // which skews the window by the server's UTC offset.
+        $recentCount = self::lockedCount((string) $wpdb->prepare(
+            "SELECT COUNT(*) AS n FROM {$disputeTable}
+             WHERE page_id = %d
+               AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
+             FOR UPDATE",
+            (int) $disputeData['page_id']
+        ));
+        if ($recentCount >= BCC_DISPUTES_MAX_PER_PAGE) {
+            return ['id' => null, 'db_error' => 'dispute_limit_reached'];
+        }
+
+        // Per-reporter global limit: max active disputes at any time.
+        // Prevents dispute-queue flooding by users with many pages.
+        $activeReporterCount = self::lockedCount((string) $wpdb->prepare(
+            "SELECT COUNT(*) AS n FROM {$disputeTable}
+             WHERE reporter_id = %d AND status = 'reviewing'
+             FOR UPDATE",
+            (int) $disputeData['reporter_id']
+        ));
+        if ($activeReporterCount >= BCC_DISPUTES_REPORTER_MAX_ACTIVE) {
+            return ['id' => null, 'db_error' => 'reporter_limit_reached'];
+        }
+
+        // Atomic duplicate check: verify no active dispute exists for this
+        // vote_id while holding a row-level lock. FOR UPDATE ensures that a
+        // concurrent transaction inserting for the same vote_id will block
+        // until this transaction commits or rolls back, preventing duplicate
+        // disputes from being created via race condition.
+        $voteId = (int) $disputeData['vote_id'];
+        $existingForVote = self::runReadRow((string) $wpdb->prepare(
+            "SELECT id FROM {$disputeTable}
+             WHERE vote_id = %d AND status = 'reviewing'
+             LIMIT 1
+             FOR UPDATE",
+            $voteId
+        ), __FUNCTION__, true);
+        if ($existingForVote !== null) {
+            return ['id' => null, 'db_error' => 'already_disputed'];
+        }
+
+        // Verify the vote is still active via the TrustReadService contract.
+        // Cross-plugin coupling MUST go through the interface — a direct query
+        // against Trust\Database\TableRegistry::votes() would break silently
+        // when the trust-engine schema changes. lockActiveVoteForDispute also
+        // holds a FOR UPDATE lock on the vote row for the remainder of THIS
+        // transaction (it requires TransactionManager::run(), which is why
+        // this body runs inside one), preventing the trust engine from
+        // soft-deleting the vote underneath us. NullTrustReadService returns
+        // false here, so disputes cannot be created while the trust engine
+        // is inactive (fail-closed).
+        $trustRead = \BCC\Core\ServiceLocator::resolveTrustReadService();
+        if (!$trustRead->lockActiveVoteForDispute($voteId)) {
+            return ['id' => null, 'db_error' => 'vote_no_longer_active'];
+        }
+
+        // created_at written explicitly in UTC. The column DEFAULT is
+        // CURRENT_TIMESTAMP (MySQL session tz, time_zone=SYSTEM), but every
+        // reader compares it against UTC cutoffs — the 30-day rate window
+        // above, the backstop sweep cutoff, recent-activity, and
+        // reporter-rate reads. Writing UTC here puts the column on the
+        // one clock they all use. Mirrors UserReportRepository's
+        // created_at handling.
+        $inserted = $wpdb->insert($disputeTable, [
+            'vote_id'      => $disputeData['vote_id'],
+            'page_id'      => $disputeData['page_id'],
+            'reporter_id'  => $disputeData['reporter_id'],
+            'voter_id'     => $disputeData['voter_id'],
+            'reason'       => $disputeData['reason'],
+            'evidence_url' => $disputeData['evidence_url'],
+            'status'       => $disputeData['status'],
+            'created_at'   => gmdate('Y-m-d H:i:s'),
+        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%s']);
+
+        // ⚠ Checked BEFORE insert_id is read. A failure BEFORE the query
+        // runs (insert() refusing a value, or one of wpdb's silent bails)
+        // leaves insert_id holding the last SUCCESSFUL insert's id on this
+        // connection, so reading it first could report an earlier row as this
+        // dispute. (A driver error resets it to 0.) The INSERT's own result is
+        // the truth either way.
+        if ($inserted === false) {
+            // Capture last_error FIRST — the next $wpdb call (COMMIT
+            // included) clears it, which previously meant production logs
+            // contained empty db_error strings.
+            $insertError = (string) $wpdb->last_error;
+            if (self::isLockConflict($insertError)) {
+                // A deadlock or lock-wait timeout. Throw, so TransactionManager
+                // rolls back and retries the whole body; its isDeadlock()
+                // recognises this message.
+                throw new \RuntimeException('[bcc-disputes] dispute INSERT hit a lock conflict: ' . $insertError);
+            }
+            if (stripos($insertError, 'Duplicate entry') !== false) {
+                return ['id' => null, 'db_error' => 'already_disputed'];
+            }
+            return ['id' => null, 'db_error' => $insertError !== '' ? $insertError : 'insert_failed'];
+        }
+
+        $disputeId = (int) $wpdb->insert_id;
+        if ($disputeId <= 0) {
+            return ['id' => null, 'db_error' => 'insert_failed'];
+        }
+
+        return ['id' => $disputeId, 'db_error' => null];
+    }
+
+    /**
+     * MySQL / MariaDB 1213 (deadlock) or 1205 (lock-wait timeout), by the
+     * driver message. The same phrases TransactionManager::isDeadlock()
+     * retries on; keep them in step.
+     */
+    private static function isLockConflict(string $error): bool
+    {
+        return stripos($error, 'Deadlock found when trying to get lock') !== false
+            || stripos($error, 'Lock wait timeout exceeded') !== false;
+    }
+
+    /**
+     * Run a locking `SELECT COUNT(*) AS n …` and return n, fail-closed: a
+     * read that did not run throws, never counts as 0 (which would pass
+     * the limit check it feeds).
+     *
+     * @throws RepositoryReadFailure
+     */
+    private static function lockedCount(string $sql): int
+    {
+        $row = self::runReadRow($sql, 'createDispute', true);
+        if ($row === null || !isset($row->n)) {
+            throw new RepositoryReadFailure(static::class, 'createDispute', 'COUNT(*) returned no row');
+        }
+
+        return (int) $row->n;
     }
 
     /**

@@ -6,7 +6,7 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Services\ClaimService;
 use BCC\Trust\Onchain\Services\ValidatorClaimSupport;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;

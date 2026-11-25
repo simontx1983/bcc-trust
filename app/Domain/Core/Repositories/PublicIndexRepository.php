@@ -16,9 +16,11 @@
  * The member predicate is built ONCE ({@see memberWhereSql()}) and used both
  * for the keyset list and for the single-member check behind the profile's
  * `indexable` flag, so the sitemap and the page's robots tag cannot disagree.
- * The moderation flags and the handle are usermeta, read afterwards by
+ * The handle is usermeta, read afterwards by
  * {@see \BCC\Trust\Core\Services\PublicProfileIndex} through bcc-core's
- * UserMetaRepository.
+ * UserMetaRepository. (It used to read three moderation flags there too;
+ * F-582 retired them, and suspension was never among them — that is this
+ * class's own listing clause.)
  *
  * @package BCC\Trust\Core\Repositories
  */

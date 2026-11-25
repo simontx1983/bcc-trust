@@ -304,6 +304,13 @@ class VoteRepository {
      * in MySQL — the reversed order is a syntax error that $wpdb swallows
      * (get_var → null), which made every dispute creation fail as
      * "vote_no_longer_active".
+     *
+     * Fail-closed (F-598 follow-up): a read that did not run THROWS, so it
+     * rolls the caller's transaction back (and TransactionManager retries a
+     * deadlock) instead of answering "the vote is no longer active". false
+     * means only that no active vote row has that id.
+     *
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function lockActiveForDispute(int $voteId): bool
     {
@@ -320,10 +327,10 @@ class VoteRepository {
         }
 
         global $wpdb;
-        $locked = $wpdb->get_var($wpdb->prepare(
+        $locked = self::runReadRow((string) $wpdb->prepare(
             "SELECT id FROM {$this->table} WHERE id = %d AND status = 1 LIMIT 1 FOR UPDATE",
             $voteId
-        ));
+        ), __FUNCTION__, true);
 
         return $locked !== null;
     }
