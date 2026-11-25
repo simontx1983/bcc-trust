@@ -209,10 +209,12 @@ class DisputeController
             if ($result['db_error'] === 'already_disputed') {
                 return $this->error('already_disputed', 'This vote already has an active dispute.', 409);
             }
-            if ($result['db_error'] === 'commit_failed' || $result['db_error'] === 'tx_begin_failed') {
-                // Transient DB failure (commit-time deadlock, connection reset,
-                // failover mid-transaction). Surface as 503 so clients retry
-                // rather than treating the create as a hard failure.
+            if ($result['db_error'] === 'tx_failed') {
+                // Transient DB failure (the transaction could not start or
+                // commit, a read inside it did not run, or a deadlock outlived
+                // TransactionManager's retries). Nothing was written. Surface
+                // as 503 so clients retry rather than treating the create as
+                // a hard failure.
                 return $this->error('db_transient', 'Dispute submission temporarily unavailable — please try again.', 503);
             }
             return $this->error('db_error', 'Failed to create dispute.', 500);
