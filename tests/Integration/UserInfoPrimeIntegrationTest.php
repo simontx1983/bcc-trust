@@ -132,8 +132,8 @@ final class UserInfoPrimeIntegrationTest extends TestCase
     }
 
     /**
-     * A read that cannot be trusted caches NOTHING: no row and no '' (which
-     * would read as "not suspended"). Each member then gets its own read.
+     * A read that cannot be trusted caches NOTHING: no row and no ''. Each
+     * member then gets its own read.
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('faults')]
     public function testAReadThatFailedCachesNothing(string $fault): void
@@ -185,10 +185,9 @@ final class UserInfoPrimeIntegrationTest extends TestCase
     }
 
     /**
-     * Page discovery warms user_info through primeByUserIds() too, so a read
-     * that fails while it warms caches nothing (it used to cache '' for every
-     * author and owner, which reads as "not suspended"), and an entry already
-     * cached is left as it was.
+     * Page discovery warms user_info through primeByUserIds() too, which
+     * caches nothing on a failed read and leaves an entry already cached as
+     * it was.
      */
     public function testPageDiscoveryCachesNothingOnAFailedRead(): void
     {
