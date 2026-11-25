@@ -142,6 +142,8 @@ class RankStateService
         $maturity = $this->config->maturityFloor
             + ($elapsed / $this->config->maturitySpanDays) * (1.0 - $this->config->maturityFloor);
 
+        $findings = $this->findingsBlock($userId);
+
         return [
             'member_state'       => 'ranked',
             'rank'               => $current,
@@ -187,7 +189,10 @@ class RankStateService
                     'instructions'      => 'Restore the requirements shown below before the deadline to keep your rank.',
                 ]
                 : null,
-            'findings'           => $this->findingsBlock($userId),
+            // F-539: `findings_unavailable` says whether `findings` could be
+            // loaded at all; when true the list is empty and is NOT "none".
+            'findings'           => $findings['items'],
+            'findings_unavailable' => $findings['unavailable'],
             'quests'             => $this->questsBlock($userId),
         ];
     }
@@ -199,24 +204,26 @@ class RankStateService
      * method is reached solely through progressionFor (self-scoped by
      * the /me/progression endpoint). Empty list when clean.
      *
-     * @return list<array<string, mixed>>
+     * F-539: a list that could not be loaded is never shown as "no
+     * findings". When either read fails (both throw on failure, logged by
+     * the repository), `unavailable` is true and `items` is empty: the
+     * member is told their findings could not be loaded, never that they
+     * have none. All or nothing, so a partial list can never leave out an
+     * active ceiling. The progression itself still renders: this block only
+     * displays the member's own findings and writes nothing.
+     *
+     * @return array{items: list<array<string, mixed>>, unavailable: bool}
      */
     private function findingsBlock(int $userId): array
     {
-        // F-465: the read now throws on failure (the promotion engine must
-        // never take "no findings" for an answer). This block only DISPLAYS
-        // the member's own findings and writes nothing, so a failed read
-        // shows the list empty this time (logged by the repository) rather
-        // than failing the whole progression.
+        $since = gmdate('Y-m-d H:i:s', time() - (self::REVERSED_VISIBLE_DAYS * 86400));
         try {
             $rows = $this->findings->getActiveForUser($userId);
-        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
-            $rows = [];
-        }
-
-        $since = gmdate('Y-m-d H:i:s', time() - (self::REVERSED_VISIBLE_DAYS * 86400));
-        foreach ($this->findings->getRecentlyReversedForUser($userId, $since) as $reversed) {
-            $rows[] = $reversed;
+            foreach ($this->findings->getRecentlyReversedForUser($userId, $since) as $reversed) {
+                $rows[] = $reversed;
+            }
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return ['items' => [], 'unavailable' => true];
         }
 
         $out = [];
@@ -234,7 +241,7 @@ class RankStateService
                 'created_at'         => (string) $row->created_at,
             ];
         }
-        return $out;
+        return ['items' => $out, 'unavailable' => false];
     }
 
     /**

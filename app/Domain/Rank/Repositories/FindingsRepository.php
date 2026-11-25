@@ -182,8 +182,13 @@ class FindingsRepository
      * after $since (MySQL UTC datetime) — the own-view "recently
      * reversed" progression read.
      *
+     * FAIL-CLOSED (F-539), like getActiveForUser(): a failed read THROWS,
+     * never "no reversals", so the progression can say its findings could
+     * not be loaded instead of showing a list that is missing some.
+     *
      * @return list<object>
      * @phpstan-return list<FindingRow>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
      */
     public function getRecentlyReversedForUser(int $userId, string $since): array
     {
@@ -193,8 +198,8 @@ class FindingsRepository
 
         global $wpdb;
 
-        /** @var list<FindingRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        /** @var list<FindingRow> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE subject_user_id = %d AND status = 'reversed' AND reversed_at >= %s
               ORDER BY id ASC
@@ -202,9 +207,9 @@ class FindingsRepository
             $userId,
             $since,
             self::MAX_ROWS_PER_SUBJECT
-        ));
+        ), __FUNCTION__, true);
 
-        return $rows ?: [];
+        return $rows;
     }
 
     /**
