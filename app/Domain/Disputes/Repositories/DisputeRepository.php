@@ -660,7 +660,7 @@ class DisputeRepository
         // reporter-rate reads. Writing UTC here puts the column on the
         // one clock they all use. Mirrors UserReportRepository's
         // created_at handling.
-        $wpdb->insert($disputeTable, [
+        $inserted = $wpdb->insert($disputeTable, [
             'vote_id'      => $disputeData['vote_id'],
             'page_id'      => $disputeData['page_id'],
             'reporter_id'  => $disputeData['reporter_id'],
@@ -671,20 +671,46 @@ class DisputeRepository
             'created_at'   => gmdate('Y-m-d H:i:s'),
         ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%s']);
 
-        $disputeId = (int) $wpdb->insert_id;
-
-        if ($disputeId <= 0) {
+        // ⚠ Checked BEFORE insert_id is read. A failure BEFORE the query
+        // runs (insert() refusing a value, or one of wpdb's silent bails)
+        // leaves insert_id holding the last SUCCESSFUL insert's id on this
+        // connection, so reading it first could report an earlier row as this
+        // dispute. (A driver error resets it to 0.) The INSERT's own result is
+        // the truth either way.
+        if ($inserted === false) {
             // Capture last_error FIRST — the next $wpdb call (COMMIT
             // included) clears it, which previously meant production logs
             // contained empty db_error strings.
             $insertError = (string) $wpdb->last_error;
-            if ($insertError !== '' && stripos($insertError, 'Duplicate entry') !== false) {
+            if (self::isLockConflict($insertError)) {
+                // A deadlock or lock-wait timeout. Throw, so TransactionManager
+                // rolls back and retries the whole body; its isDeadlock()
+                // recognises this message.
+                throw new \RuntimeException('[bcc-disputes] dispute INSERT hit a lock conflict: ' . $insertError);
+            }
+            if (stripos($insertError, 'Duplicate entry') !== false) {
                 return ['id' => null, 'db_error' => 'already_disputed'];
             }
-            return ['id' => null, 'db_error' => $insertError];
+            return ['id' => null, 'db_error' => $insertError !== '' ? $insertError : 'insert_failed'];
+        }
+
+        $disputeId = (int) $wpdb->insert_id;
+        if ($disputeId <= 0) {
+            return ['id' => null, 'db_error' => 'insert_failed'];
         }
 
         return ['id' => $disputeId, 'db_error' => null];
+    }
+
+    /**
+     * MySQL / MariaDB 1213 (deadlock) or 1205 (lock-wait timeout), by the
+     * driver message. The same phrases TransactionManager::isDeadlock()
+     * retries on; keep them in step.
+     */
+    private static function isLockConflict(string $error): bool
+    {
+        return stripos($error, 'Deadlock found when trying to get lock') !== false
+            || stripos($error, 'Lock wait timeout exceeded') !== false;
     }
 
     /**
