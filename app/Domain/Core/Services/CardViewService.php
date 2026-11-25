@@ -50,6 +50,7 @@ use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\ValueObjects\OwnerVerification;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -857,7 +858,7 @@ final class CardViewService
             'name'                => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
-            'bio'                 => self::resolveMemberBio($user),
+            'bio'                 => self::resolveMemberBio($user, $viewerId),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // The member trust chip (Risky…Elite) — the sole tier vocabulary
@@ -1827,9 +1828,35 @@ final class CardViewService
      * Resolve a short editorial bio for a member card from the WP
      * user's `description` field (the standard profile-bio field).
      * Returns "" when not set.
+     *
+     * ⚠⚠ AND IT FOLLOWS THE MEMBER'S ABOUT VISIBILITY: "" when that
+     * section is not visible to this viewer.
+     *
+     * F-341's accessor is the single owner of that question, and both
+     * surfaces ask it: the profile returns `bio` as a documented
+     * `null`, the card returns `''`. One rule, so the two cannot
+     * drift — the owner always sees their own, an exempt viewer keeps
+     * the §F-02 exemption, and an untouched setting reads as SHOWN.
+     *
+     * ⚠ The accessor's read is fail-closed: an untrusted read hides.
+     * Card lists reach it through a batched meta prime, which is why
+     * that distinction is made there rather than here.
+     *
+     * ⚠ `''`, not `null`: the card's `bio` is a `string` on every
+     * kind (a group with no description sends `''` too), and the
+     * frontend already renders no line for an empty bio. A `null`
+     * here would change the field's type for one kind only.
      */
-    private static function resolveMemberBio(\WP_User $user): string
+    private static function resolveMemberBio(\WP_User $user, int $viewerId): string
     {
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_ABOUT,
+            (int) $user->ID,
+            $viewerId
+        )) {
+            return '';
+        }
+
         $raw = (string) ($user->description ?? '');
         return self::truncateBio($raw);
     }

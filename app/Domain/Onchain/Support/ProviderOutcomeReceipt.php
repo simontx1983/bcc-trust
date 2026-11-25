@@ -67,6 +67,8 @@ final class ProviderOutcomeReceipt
 
     private string $last = self::NONE;
     private ?string $lastFailureKind = null;
+    /** Was the most recent outcome on this receipt a provider refusal? See domainChargeKind(). */
+    private bool $refusedLast = false;
     private int $failureCharges = 0;
     private int $successCredits = 0;
 
@@ -81,6 +83,7 @@ final class ProviderOutcomeReceipt
         $this->last = self::FAILURE;
         $this->lastFailureKind = $kind;
         $this->failureCharges++;
+        $this->refusedLast = false;
     }
 
     /** Record that the transport layer just credited a success. */
@@ -88,12 +91,41 @@ final class ProviderOutcomeReceipt
     {
         $this->last = self::SUCCESS;
         $this->successCredits++;
+        $this->refusedLast = false;
     }
 
     /** Record that an already-open breaker refused the request before it was made. */
     public function recordBlockedByOpenBreaker(): void
     {
         $this->last = self::BLOCKED;
+        $this->refusedLast = false;
+    }
+
+    /**
+     * Record that the provider REFUSED the request (a 4xx other than 429).
+     *
+     * ⚠ NOT A SETTLEMENT. The transport charged nothing, so lastOutcome()
+     * and domainMayCharge() are unchanged; this only lets a domain charge
+     * that follows say WHY the operation failed (domainChargeKind()).
+     */
+    public function recordProviderRefusal(): void
+    {
+        $this->refusedLast = true;
+    }
+
+    /**
+     * The token a DOMAIN charge for this operation may record, or null.
+     *
+     * `refused` when the request that ended the operation was a provider
+     * refusal; null otherwise, which is what every domain site recorded
+     * before: an empty answer or a caught exception has no wire outcome to
+     * name. A later success or charge clears the refusal, because the last
+     * request is the one that ended the operation. Only meaningful where
+     * domainMayCharge() is true.
+     */
+    public function domainChargeKind(): ?string
+    {
+        return $this->refusedLast ? \BCC\Trust\Onchain\ValueObjects\ProviderFailureKind::REFUSED : null;
     }
 
     /**

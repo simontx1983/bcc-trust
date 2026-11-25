@@ -182,10 +182,18 @@ final class ActivityTabSectionVisibilityTest extends TestCase
         );
     }
 
-    /** ⭐ An admin keeps the §F-02 exemption, as on every other surface. */
+    /**
+     * ⭐ An admin keeps the §F-02 exemption, as on every other surface.
+     *
+     * ⚠ The exemption is THIS VIEWER's, so the fixture names the viewer
+     * in `admin_ids` as well as marking the request's user an admin. The
+     * two are different questions: a list composed for one member while
+     * an admin is signed in must not borrow that admin's exemption.
+     */
     public function testAnExemptAdminStillSeesHiddenSections(): void
     {
-        $GLOBALS['__bcc_f02feed']['is_admin'] = true;
+        $GLOBALS['__bcc_f02feed']['is_admin']  = true;
+        $GLOBALS['__bcc_f02feed']['admin_ids'] = [self::VIEWER];
         $this->hideForAuthor(self::BLOGS_KEY, '0');
         $this->hideForAuthor(self::REVIEWS_KEY, '1');
 

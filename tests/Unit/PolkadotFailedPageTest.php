@@ -54,14 +54,15 @@ final class PolkadotFailedPageTest extends TestCase
 
     public function testAFailedMiddlePageFailsTheRunInsteadOfTruncating(): void
     {
-        $f = self::fetcher([self::page(0, 100), self::page(100, 100), null, self::page(300, 50)]);
+        $size = PolkadotFetcher::PAGE_SIZE;
+        $f    = self::fetcher([self::page(0, $size), self::page($size, $size), null, self::page(3 * $size, 10)]);
 
         try {
             $f->fetch_all_validators(new ProviderOutcomeReceipt());
             self::fail('a failed page must not end the list');
         } catch (\RuntimeException $e) {
             self::assertStringContainsString('page 2 failed', $e->getMessage());
-            self::assertStringContainsString('200 validators fetched before it', $e->getMessage());
+            self::assertStringContainsString((2 * $size) . ' validators fetched before it', $e->getMessage());
         }
         self::assertSame([0, 1, 2], $f->requestedPages, 'no page after the failure is requested');
     }
@@ -74,7 +75,7 @@ final class PolkadotFailedPageTest extends TestCase
 
     public function testAGenuineShortLastPageStillEndsTheList(): void
     {
-        $f = self::fetcher([self::page(0, 100), self::page(100, 40)]);
+        $f = self::fetcher([self::page(0, PolkadotFetcher::PAGE_SIZE), self::page(PolkadotFetcher::PAGE_SIZE, 10)]);
 
         $rows = $f->fetch_all_validators();
 
@@ -84,7 +85,7 @@ final class PolkadotFailedPageTest extends TestCase
 
     public function testAGenuineEmptyPageStillEndsTheList(): void
     {
-        $f = self::fetcher([self::page(0, 100), ['list' => []]]);
+        $f = self::fetcher([self::page(0, PolkadotFetcher::PAGE_SIZE), ['list' => []]]);
 
         self::assertNotSame([], $f->fetch_all_validators());
         self::assertSame([0, 1], $f->requestedPages);

@@ -233,7 +233,7 @@ final class PageOwnershipAligner
     private static function remember(int $pageId): void
     {
         self::withPendingLock(static function () use ($pageId): void {
-            $pending = self::pending();
+            $pending = self::freshPending();
             if (in_array($pageId, $pending, true)) {
                 return;
             }
@@ -249,12 +249,38 @@ final class PageOwnershipAligner
     private static function forget(int $pageId): void
     {
         self::withPendingLock(static function () use ($pageId): void {
-            $pending = self::pending();
+            $pending = self::freshPending();
             $kept    = array_values(array_filter($pending, static fn (int $id): bool => $id !== $pageId));
             if ($kept !== $pending) {
                 update_option(self::PENDING, $kept, false);
             }
         });
+    }
+
+    /**
+     * The pending list as it is in the database NOW, for a read-modify-write
+     * under the pending lock. get_option() answers from the request's option
+     * cache (and, with a persistent cache, its in-memory copy), which another
+     * process's write since then does not refresh: drop this option's cached
+     * value, any stale "does not exist" entry, and an autoloaded copy, so the
+     * read below goes to the database.
+     *
+     * @return list<int>
+     */
+    private static function freshPending(): array
+    {
+        wp_cache_delete(self::PENDING, 'options');
+        $notoptions = wp_cache_get('notoptions', 'options');
+        if (is_array($notoptions) && isset($notoptions[self::PENDING])) {
+            unset($notoptions[self::PENDING]);
+            wp_cache_set('notoptions', $notoptions, 'options');
+        }
+        $alloptions = wp_cache_get('alloptions', 'options');
+        if (is_array($alloptions) && array_key_exists(self::PENDING, $alloptions)) {
+            wp_cache_delete('alloptions', 'options');
+        }
+
+        return self::pending();
     }
 
     /**
