@@ -505,6 +505,12 @@ class DisputeRepository
      *   - `tx_failed`: the transaction could not start or commit, or one of
      *     its reads did not run (TransactionManager retries a deadlock
      *     first). Nothing was written; the caller may retry.
+     *   - `create_failed`: anything else went wrong inside it (a logic error,
+     *     a TypeError). Rolled back, so nothing was written; logged, and not
+     *     a transient failure.
+     *
+     * Nothing escapes as an exception: TransactionManager has already rolled
+     * back by the time it rethrows.
      *
      * ⚠ No caller may already be inside TransactionManager::run(): a
      * nested call would run as a SAVEPOINT of the caller's transaction and
@@ -521,11 +527,22 @@ class DisputeRepository
                 static fn (): array => self::createDisputeInTransaction($disputeData)
             );
         } catch (\RuntimeException $e) {
+            // TransactionManager's start/commit failures and a read that did
+            // not run (RepositoryReadFailure) are all RuntimeExceptions.
             \BCC\Core\Log\Logger::error('[bcc-disputes] createDispute transaction failed', [
                 'exception' => get_class($e),
                 'db_error'  => $e->getMessage(),
             ]);
             return ['id' => null, 'db_error' => 'tx_failed'];
+        } catch (\Throwable $e) {
+            // Anything else (a LogicException, a TypeError, TransactionManager's
+            // own retries-exhausted Exception) was rolled back too. Not
+            // transient: the controller answers it as a 500.
+            \BCC\Core\Log\Logger::error('[bcc-disputes] createDispute failed unexpectedly', [
+                'exception' => get_class($e),
+                'error'     => $e->getMessage(),
+            ]);
+            return ['id' => null, 'db_error' => 'create_failed'];
         }
 
         if ($result['id'] === null) {

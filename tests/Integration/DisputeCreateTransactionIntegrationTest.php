@@ -173,6 +173,70 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
         self::assertSame(0, $this->disputeCount(), 'nothing written');
     }
 
+    /** @return array<string, array{class-string<\Throwable>}> */
+    public static function unexpectedErrors(): array
+    {
+        return [
+            'a LogicException' => [\LogicException::class],
+            'a TypeError'      => [\TypeError::class],
+        ];
+    }
+
+    /**
+     * Anything that is not a transaction or read failure is rolled back,
+     * logged and answered as `create_failed`, never an escaping exception.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('unexpectedErrors')]
+    public function testAnUnexpectedErrorIsRolledBackAndReportedNotThrown(string $throwable): void
+    {
+        $voteId = $this->seedVote(1);
+        $cache  = new \ReflectionProperty(\BCC\Core\ServiceLocator::class, 'cache');
+        $resolved = (array) $cache->getValue();
+        $resolved[self::LOCATOR_KEY] = new class ($throwable) implements \BCC\Core\Contracts\TrustReadServiceInterface {
+            /** @param class-string<\Throwable> $throwable */
+            public function __construct(private string $throwable)
+            {
+            }
+
+            public function lockActiveVoteForDispute(int $voteId): bool
+            {
+                throw new ($this->throwable)('stub: unexpected failure at the vote lock');
+            }
+
+            public function getVoteById(int $voteId): ?array
+            {
+                return null;
+            }
+
+            public function getActiveVotesForPage(int $pageId, int $limit = 50, int $offset = 0): array
+            {
+                return [];
+            }
+
+            public function countActiveVotesForPage(int $pageId): int
+            {
+                return 0;
+            }
+
+            public function getVotesByIds(array $voteIds): array
+            {
+                return [];
+            }
+
+            public function isSuspended(int $userId): bool
+            {
+                return false;
+            }
+        };
+        $cache->setValue(null, $resolved);
+
+        $result = DisputeRepository::createDispute($this->disputeData($voteId));
+
+        self::assertSame(['id' => null, 'db_error' => 'create_failed'], $result);
+        self::assertSame(0, $this->disputeCount(), 'nothing written');
+        $this->assertNoTransactionLeftOpen();
+    }
+
     public function testTheBodyRefusesToRunOutsideATransaction(): void
     {
         $body = new \ReflectionMethod(DisputeRepository::class, 'createDisputeInTransaction');
@@ -237,21 +301,43 @@ final class DisputeCreateTransactionIntegrationTest extends TestCase
         ));
     }
 
-    /**
-     * ⚠ INNODB_TRX, not `@@in_transaction`: that variable is MariaDB-only,
-     * and MySQL 8 answers "Unknown system variable". This reads the same on
-     * both engines.
-     */
+    /** ANTI-VACUITY for the probe below: inside a transaction it says so. */
+    public function testTheProbeSeesAnOpenTransaction(): void
+    {
+        $inside = TransactionManager::run(fn (): bool => $this->connectionIsInTransaction());
+
+        self::assertTrue($inside);
+        self::assertFalse($this->connectionIsInTransaction());
+    }
+
     private function assertNoTransactionLeftOpen(): void
     {
         self::assertFalse(TransactionManager::isInRunTransaction(), 'TransactionManager depth back to 0');
-        self::assertSame(
-            '0',
-            (string) $GLOBALS['wpdb']->get_var(
-                'SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_mysql_thread_id = CONNECTION_ID()'
-            ),
-            'no open InnoDB transaction on the connection'
-        );
+        self::assertFalse($this->connectionIsInTransaction(), 'no open transaction on the connection');
+    }
+
+    /**
+     * SAVEPOINT then RELEASE: RELEASE fails with "SAVEPOINT … does not
+     * exist" (1305) when no transaction is open, the same on MySQL 8 and
+     * MariaDB (bcc-core's ChallengeRepository::transactionState() probe).
+     *
+     * ⚠ Not `@@in_transaction` (MariaDB-only; MySQL 8 answers "Unknown
+     * system variable"), and not INNODB_TRX (MySQL serves it from a cache
+     * refreshed about every 100 ms, so it can describe an earlier moment).
+     */
+    private function connectionIsInTransaction(): bool
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $name = 'bcc_f598_probe';
+
+        self::assertNotFalse($wpdb->query("SAVEPOINT {$name}"), 'SAVEPOINT failed: ' . $wpdb->last_error);
+        if ($wpdb->query("RELEASE SAVEPOINT {$name}") !== false) {
+            return true;
+        }
+        self::assertStringContainsString('does not exist', $wpdb->last_error, 'RELEASE failed for another reason');
+        $wpdb->last_error = '';
+
+        return false;
     }
 
     private function purge(): void
