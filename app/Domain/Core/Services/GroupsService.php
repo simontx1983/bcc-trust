@@ -307,8 +307,10 @@ final class GroupsService
                 'chain_tag'        => $chainTag,
                 'trust_min'        => $trustMinWire,
                 'viewer_is_member' => $isMember,
-                'posts_last_7d'    => (int) $activity['posts_last_7d'],
-                'active_members_7d' => (int) ($activity['active_members_7d'] ?? 0),
+                // Null when the moderated posts could not be read: the card
+                // then shows no posts or active stat (GroupActivityHeatService).
+                'posts_last_7d'    => $activity['posts_last_7d'],
+                'active_members_7d' => $activity['active_members_7d'] ?? null,
                 // F-244: the page's own verdicts (real holder check here),
                 // so the hero card and the membership strip cannot disagree.
                 'can_join'                 => $permissions['can_join'],

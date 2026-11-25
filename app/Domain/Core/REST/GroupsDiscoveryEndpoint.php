@@ -283,7 +283,7 @@ final class GroupsDiscoveryEndpoint
                 'chain_tag'         => $chainSlugByGroup[$groupId] ?? null,
                 'trust_min'         => $trustMinByGroup[$groupId] ?? null,
                 'sort_verified'     => $ctx->isVerified() ? 1 : 0,
-                'sort_heat'         => (int) $heat['posts_last_7d'],
+                'sort_heat'         => (int) ($heat['posts_last_7d'] ?? 0),
                 'sort_member_cnt'   => $display !== null ? (int) $display->member_count : 0,
             ];
         }
@@ -355,8 +355,10 @@ final class GroupsDiscoveryEndpoint
                     'chain_tag'        => $row['chain_tag'],
                     'trust_min'        => $row['trust_min'],
                     'viewer_is_member' => $joinFields['viewer_membership_status'] === 'member',
-                    'posts_last_7d'    => (int) ($row['activity']['posts_last_7d'] ?? 0),
-                    'active_members_7d' => (int) ($row['activity']['active_members_7d'] ?? 0),
+                    // Null when the moderated posts could not be read
+                    // (GroupActivityHeatService): no stat, never a guessed 0.
+                    'posts_last_7d'    => $row['activity']['posts_last_7d'] ?? null,
+                    'active_members_7d' => $row['activity']['active_members_7d'] ?? null,
                     'can_join'                 => $joinFields['can_join'],
                     'can_request_join'         => $joinFields['can_request_join'],
                     'viewer_membership_status' => $joinFields['viewer_membership_status'],
