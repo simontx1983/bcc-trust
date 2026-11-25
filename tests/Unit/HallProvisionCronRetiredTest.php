@@ -258,13 +258,17 @@ final class HallProvisionCronRetiredTest extends TestCase
 
         sort($callers);
 
+        // The admin Halls API (topic Halls, F-597) is the second admin
+        // action: AdminHallsEndpoint gates it to manage_options, and its
+        // service reaches only provisionTopic(). Admitted deliberately.
         self::assertSame(
             [
+                'app/Domain/Core/Services/AdminHallsService.php',
                 'app/Domain/Onchain/Admin/ChainsPage.php',
                 'app/Domain/Onchain/OnchainPlugin.php',
             ],
             $callers,
-            'only the admin action (and the DI accessor) may reach Hall creation'
+            'only the admin actions (and the DI accessor) may reach Hall creation'
         );
     }
 

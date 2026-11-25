@@ -68,12 +68,23 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HallRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
+use BCC\Trust\Onchain\Support\HallTopicRules;
 use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * What a Hall is created for: a chain (`id` = the chain id, `slug` = the
+ * chain slug) or a topic (`id` = 0, `slug` = the topic slug, which is also
+ * the Hall's address, and `label` = the topic's display name). One creation
+ * pipeline serves both; only the marker, its proof and the audit target
+ * differ.
+ *
+ * @phpstan-type HallTarget array{kind: 'chain'|'topic', id: int, slug: string, label: string}
+ */
 final class HallProvisioningService {
 
     /** Audit actions. All four fit VARCHAR(50). */
@@ -101,6 +112,18 @@ final class HallProvisioningService {
      * {@see LOCK_WAIT_SECONDS}. Nothing was created. 24 chars.
      */
     public const FAIL_LOCK_CONTENDED   = 'hall_provision_contended';
+
+    /** Topic Halls: the input is not a valid topic Hall. Nothing was touched. */
+    public const FAIL_TOPIC_INVALID    = 'topic_hall_invalid';
+
+    /** Topic Halls: another group already has the topic's address. Nothing was created. */
+    public const FAIL_SLUG_TAKEN       = 'hall_slug_taken';
+
+    /** Topic Halls: the new group did not keep the topic's address, so it was rolled back. */
+    public const FAIL_SLUG_REFUSED     = 'hall_slug_refused';
+
+    /** A check that could not be read. Before the create nothing was made; after it, the Hall was rolled back. */
+    public const FAIL_READ_UNVERIFIED  = 'hall_read_unverified';
 
     /**
      * Seconds a second request waits for the per-chain lock before giving up.
@@ -134,7 +157,7 @@ final class HallProvisioningService {
      */
     public function provisionOne(int $chainId): array {
         if (!class_exists('\\PeepSoGroup')) {
-            return $this->fail(0, $chainId, '', self::FAIL_PEEPSO_ABSENT, 'PeepSo Groups inactive.');
+            return $this->fail(0, self::chainTarget($chainId, ''), self::FAIL_PEEPSO_ABSENT, 'PeepSo Groups inactive.');
         }
         if ($chainId <= 0) {
             return $this->refuse('Invalid chain id.', self::FAIL_CHAIN_UNRESOLVED);
@@ -154,6 +177,7 @@ final class HallProvisioningService {
         }
 
         $chainSlug = (string) $chain->slug;
+        $target    = self::chainTarget($chainId, $chainSlug);
 
         // ── THE CRITICAL SECTION, AND WHY IT STARTS HERE ────────────────
         // Everything above this line creates nothing, so it needs no lock --
@@ -179,7 +203,7 @@ final class HallProvisioningService {
         // pair that could collide is serialized.
         $lock = self::lockName($chainId);
         if (!self::acquire($lock)) {
-            return $this->contended($chainId, $chainSlug);
+            return $this->contended($target);
         }
 
         // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE. MySQL's GET_LOCK
@@ -193,17 +217,102 @@ final class HallProvisioningService {
             //    INSIDE the lock, which is the whole point ────────────────
             $existing = HallRepository::findHallForChain($chainId);
             if ($existing !== null) {
-                return $this->reconcileExistingHall((int) $existing, $chainId, $chainSlug);
+                return $this->reconcileExistingHall((int) $existing, $target);
             }
 
-            return $this->createHall($chainId, $chainSlug, $name);
+            return $this->createHall(
+                $target,
+                $name . ' Hall',
+                sprintf('The %s union hall — an open floor for everyone on %s.', $name, $name),
+                null
+            );
         } finally {
             \BCC\Core\DB\AdvisoryLock::release($lock);
         }
     }
 
     /**
-     * Create the Hall for a chain that has none, WITH THE PER-CHAIN LOCK
+     * Create a topic Hall: an official, open Hall about a subject rather than
+     * a chain (DeFi, NFTs, …). The same pipeline as a chain Hall: a per-topic
+     * lock, the idempotency check inside it, PeepSo's create, the marker and
+     * PROOF that it stuck (compensated if not), the deterministic owner, and a
+     * checked audit.
+     *
+     * The topic's slug is also the Hall's address (/communities/{slug}), set
+     * at create and never changed. It must be free: a group already at that
+     * address is a refusal, never a silently suffixed slug.
+     *
+     * Idempotent per topic: a topic that already has a Hall returns `exists`
+     * (or repairs a Hall marked owner-incomplete) and creates nothing.
+     *
+     * Inputs are trimmed here; the REST layer has already sanitized them.
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string|null, owner_id: int,
+     *               audit_degraded: bool}
+     *         status as provisionOne().
+     */
+    public function provisionTopic(string $name, string $topicSlug, string $topicLabel, string $description = ''): array {
+        $name        = trim($name);
+        $topicSlug   = trim($topicSlug);
+        $topicLabel  = trim($topicLabel);
+        $description = trim($description);
+
+        if (!class_exists('\\PeepSoGroup')) {
+            return $this->fail(0, self::topicTarget($topicSlug, $topicLabel), self::FAIL_PEEPSO_ABSENT, 'PeepSo Groups inactive.');
+        }
+
+        $invalid = self::invalidTopicInput($name, $topicSlug, $topicLabel, $description);
+        if ($invalid !== null) {
+            return $this->refuse($invalid, self::FAIL_TOPIC_INVALID);
+        }
+
+        $target = self::topicTarget($topicSlug, $topicLabel);
+
+        // The same critical section as a chain's, keyed on the topic: the
+        // existence check, the address check and the marker write must not
+        // interleave with another create for the same topic.
+        $lock = self::topicLockName($topicSlug);
+        if (!self::acquire($lock)) {
+            return $this->contended($target);
+        }
+
+        // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE (see provisionOne).
+        try {
+            try {
+                $existing = HallRepository::findHallForTopic($topicSlug);
+                $taken    = $existing === null && HallRepository::groupSlugInUse($topicSlug);
+            } catch (RepositoryReadFailure) {
+                return $this->fail(0, $target, self::FAIL_READ_UNVERIFIED,
+                    'The topic could not be checked just now; nothing was created.');
+            }
+
+            if ($existing !== null) {
+                return $this->reconcileExistingHall($existing, $target);
+            }
+            if ($taken) {
+                return $this->refuse('Another group already uses this address.', self::FAIL_SLUG_TAKEN);
+            }
+
+            return $this->createHall($target, $name, $description, $topicSlug);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * Why these topic Hall inputs are refused, or null when they are valid
+     * (HallTopicRules, the same rules the admin edit applies).
+     */
+    private static function invalidTopicInput(string $name, string $slug, string $label, string $description): ?string {
+        return HallTopicRules::nameError($name)
+            ?? HallTopicRules::labelError($label)
+            ?? HallTopicRules::descriptionError($description)
+            ?? HallTopicRules::slugError($slug);
+    }
+
+    /**
+     * Create the Hall for a target that has none, WITH THE TARGET'S LOCK
      * ALREADY HELD.
      *
      * Private and lock-dependent on purpose: the existence check and the
@@ -213,8 +322,10 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
+     *
+     * @param HallTarget $target
      */
-    private function createHall(int $chainId, string $chainSlug, string $name): array {
+    private function createHall(array $target, string $title, string $description, ?string $slug): array {
         // ── The acting administrator ────────────────────────────────────
         // Creation is admin-initiated only, so there is always a current
         // user. Without one the two ownership books cannot be made to agree
@@ -222,21 +333,21 @@ final class HallProvisioningService {
         // create a public group owned by user 0.
         $creatorId = get_current_user_id();
         if ($creatorId <= 0) {
-            return $this->fail(0, $chainId, $chainSlug, self::FAIL_NO_ACTING_ADMIN,
+            return $this->fail(0, $target, self::FAIL_NO_ACTING_ADMIN,
                 'Hall creation requires a signed-in administrator.');
         }
 
         // ── The intended, deterministic owner ───────────────────────────
         $ownerId = $this->resolveOwnerId();
         if ($ownerId === 0) {
-            return $this->fail(0, $chainId, $chainSlug, self::FAIL_OWNER_UNRESOLVED,
+            return $this->fail(0, $target, self::FAIL_OWNER_UNRESOLVED,
                 'No administrator account could be resolved to own the Hall.');
         }
 
         // ── Create. NOT transactional; compensated below. ───────────────
-        $groupId = $this->createHallGroup($creatorId, $name);
+        $groupId = $this->createHallGroup($creatorId, $title, $description, $slug);
         if ($groupId === 0) {
-            return $this->fail(0, $chainId, $chainSlug, self::FAIL_CREATE_FAILED,
+            return $this->fail(0, $target, self::FAIL_CREATE_FAILED,
                 'Hall creation failed; see the bcc-trust error log.');
         }
 
@@ -244,23 +355,27 @@ final class HallProvisioningService {
         // This is the duplicate-preventing write: until the chain resolves
         // to this group, another attempt would create a second Hall. A
         // marker that did not take is therefore compensated, not marked.
-        HallRepository::writeHallMeta($groupId, $chainId);
+        self::writeMarker($target, $groupId);
         $this->invalidateGroupCaches($groupId);
 
-        if (HallRepository::findHallForChain($chainId) !== $groupId) {
+        $unproven = self::unprovenMarker($target, $groupId);
+        if ($unproven !== null) {
             Logger::error('[bcc-trust] Hall marker did not survive its re-read; compensating', [
                 'group_id' => $groupId,
-                'chain_id' => $chainId,
+                ...self::targetLog($target),
             ]);
 
-            $auditOk = $this->compensate($groupId, $chainId, $chainSlug, $creatorId);
+            $auditOk = $this->compensate($groupId, $target, $creatorId, $unproven);
 
             return $this->fail(
                 $groupId,
-                $chainId,
-                $chainSlug,
-                self::FAIL_MARKER_REFUSED,
-                'The Hall could not be linked to its chain and was rolled back.',
+                $target,
+                $unproven,
+                match ($unproven) {
+                    self::FAIL_SLUG_REFUSED    => 'The Hall could not take its address and was rolled back.',
+                    self::FAIL_READ_UNVERIFIED => 'The new Hall could not be checked, so it was rolled back.',
+                    default                    => 'The Hall could not be linked to its ' . $target['kind'] . ' and was rolled back.',
+                },
                 $auditOk === false
             );
         }
@@ -271,8 +386,7 @@ final class HallProvisioningService {
         if (!$reconciled['ok']) {
             return $this->recordIncomplete(
                 $groupId,
-                $chainId,
-                $chainSlug,
+                $target,
                 $creatorId,
                 $ownerId,
                 (string) $reconciled['step']
@@ -281,24 +395,23 @@ final class HallProvisioningService {
 
         Logger::info('[bcc-trust] Hall created', [
             'group_id'   => $groupId,
-            'chain_id'   => $chainId,
-            'chain_slug' => $chainSlug,
+            ...self::targetLog($target),
             'owner_id'   => $ownerId,
             'operator'   => $creatorId,
         ]);
 
+        [$auditTargetId, $auditTargetType] = self::auditTarget($target, $groupId);
         $auditId = AuditLogger::logChecked(
             self::AUDIT_CREATED,
-            $chainId,
+            $auditTargetId,
             [
-                'chain_id'         => $chainId,
-                'chain_slug'       => $chainSlug,
+                ...self::targetMeta($target),
                 'group_id'         => $groupId,
                 'operator_user_id' => $creatorId,
                 'owner_user_id'    => $ownerId,
                 'reconcile_step'   => (string) $reconciled['step'],
             ],
-            'chain',
+            $auditTargetType,
             $creatorId
         );
 
@@ -309,13 +422,15 @@ final class HallProvisioningService {
         if ($auditId === null) {
             Logger::error('[bcc-trust] Hall created but its checked audit could not be written', [
                 'group_id' => $groupId,
-                'chain_id' => $chainId,
+                ...self::targetLog($target),
             ]);
         }
 
         // Fan-out hook for downstream subscribers. Stable signature:
-        // (groupId, chainId, chainSlug).
-        do_action('bcc_hall_provisioned', $groupId, $chainId, $chainSlug);
+        // (groupId, chainId, chainSlug), so it fires for a chain Hall only.
+        if ($target['kind'] === 'chain') {
+            do_action('bcc_hall_provisioned', $groupId, $target['id'], $target['slug']);
+        }
 
         return [
             'status'         => 'created',
@@ -338,13 +453,15 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
+     *
+     * @param HallTarget $target
      */
-    private function reconcileExistingHall(int $groupId, int $chainId, string $chainSlug): array {
+    private function reconcileExistingHall(int $groupId, array $target): array {
         if (!HallRepository::isOwnerIncomplete($groupId)) {
             return [
                 'status'         => 'exists',
                 'group_id'       => $groupId,
-                'message'        => 'This chain already has a Hall.',
+                'message'        => 'This ' . $target['kind'] . ' already has a Hall.',
                 'failure_code'   => null,
                 'owner_id'       => 0,
                 'audit_degraded' => false,
@@ -375,18 +492,18 @@ final class HallProvisioningService {
         HallRepository::clearOwnerIncomplete($groupId);
         $this->invalidateGroupCaches($groupId);
 
+        [$auditTargetId, $auditTargetType] = self::auditTarget($target, $groupId);
         $auditId = AuditLogger::logChecked(
             self::AUDIT_CREATED,
-            $chainId,
+            $auditTargetId,
             [
-                'chain_id'         => $chainId,
-                'chain_slug'       => $chainSlug,
+                ...self::targetMeta($target),
                 'group_id'         => $groupId,
                 'operator_user_id' => $creatorId,
                 'owner_user_id'    => $ownerId,
                 'reconcile_step'   => 'repaired',
             ],
-            'chain',
+            $auditTargetType,
             $creatorId ?: null
         );
 
@@ -429,9 +546,13 @@ final class HallProvisioningService {
      * {@see \BCC\Trust\Onchain\Admin\ChainsPage::handle_hall_create()} runs
      * `requireCapability()` (manage_options) → `requirePost()` (405) →
      * `requireNonce(ACTION_HALL_CREATE . '_' . $chainId)` → the chain must
-     * resolve through `ChainRepository`. No cron, hook, shortcode, CLI command
-     * or bulk sweep can reach this method — that is asserted by
-     * HallProvisionCronRetiredTest::testOnlyTheAdminActionCallsTheHallCreator.
+     * resolve through `ChainRepository`. A topic Hall (F-597) arrives through
+     * {@see \BCC\Trust\Core\REST\AdminHallsEndpoint}: `BearerAuth::requireAdmin`
+     * (manage_options) as the permission_callback and again in the handler,
+     * then provisionTopic()'s input checks; a topic Hall is created exactly as
+     * open as a chain Hall, so facts 1-3 hold unchanged. No cron, hook,
+     * shortcode, CLI command or bulk sweep can reach this method — that is
+     * asserted by HallProvisionCronRetiredTest::testOnlyTheAdminActionCallsTheHallCreator.
      *
      * This is NOT the "admin fix-membership button" the guard rejects: that
      * pattern re-joins ARBITRARY users on stale approval. This joins one
@@ -485,11 +606,12 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
+     *
+     * @param HallTarget $target
      */
     private function recordIncomplete(
         int $groupId,
-        int $chainId,
-        string $chainSlug,
+        array $target,
         int $creatorId,
         int $ownerId,
         string $step
@@ -499,36 +621,39 @@ final class HallProvisioningService {
 
         Logger::error('[bcc-trust] Hall created but ownership could not be reconciled', [
             'group_id'       => $groupId,
-            'chain_id'       => $chainId,
-            'chain_slug'     => $chainSlug,
+            ...self::targetLog($target),
             'operator'       => $creatorId,
             'intended_owner' => $ownerId,
             'reconcile_step' => $step,
         ]);
 
+        [$auditTargetId, $auditTargetType] = self::auditTarget($target, $groupId);
         $auditId = AuditLogger::logChecked(
             self::AUDIT_INCOMPLETE,
-            $chainId,
+            $auditTargetId,
             [
-                'chain_id'         => $chainId,
-                'chain_slug'       => $chainSlug,
+                ...self::targetMeta($target),
                 'group_id'         => $groupId,
                 'operator_user_id' => $creatorId,
                 'owner_user_id'    => $ownerId,
                 'reconcile_step'   => $step,
                 'error_code'       => 'ownership_unreconciled',
             ],
-            'chain',
+            $auditTargetType,
             $creatorId
         );
 
-        do_action('bcc_hall_provisioned', $groupId, $chainId, $chainSlug);
+        if ($target['kind'] === 'chain') {
+            do_action('bcc_hall_provisioned', $groupId, $target['id'], $target['slug']);
+        }
 
         return [
             'status'         => 'incomplete',
             'group_id'       => $groupId,
             'message'        => 'The Hall was created, but its ownership could not be set. '
-                . 'It is flagged for repair — run Create Chain Hall again to retry.',
+                . ($target['kind'] === 'chain'
+                    ? 'It is flagged for repair — run Create Chain Hall again to retry.'
+                    : 'It is flagged for repair — create the same topic Hall again to retry.'),
             'failure_code'   => 'ownership_unreconciled',
             'owner_id'       => $ownerId,
             'audit_degraded' => $auditId === null,
@@ -567,11 +692,16 @@ final class HallProvisioningService {
      * and cannot be recalled — recorded, not hidden.
      *
      * @return bool whether the compensation's own audit row committed
+     *
+     * @param HallTarget $target
      */
-    private function compensate(int $groupId, int $chainId, string $chainSlug, int $creatorId): bool {
+    private function compensate(int $groupId, array $target, int $creatorId, string $failureCode): bool {
         $notes = [];
 
-        foreach ([HallRepository::META_KIND, HallRepository::META_CHAIN_TAG, HallRepository::META_OWNER_INCOMPLETE] as $key) {
+        $markers = $target['kind'] === 'chain'
+            ? [HallRepository::META_KIND, HallRepository::META_CHAIN_TAG, HallRepository::META_OWNER_INCOMPLETE]
+            : [HallRepository::META_KIND, HallRepository::META_TOPIC, HallRepository::META_TOPIC_LABEL, HallRepository::META_OWNER_INCOMPLETE];
+        foreach ($markers as $key) {
             delete_post_meta($groupId, $key);
         }
 
@@ -591,11 +721,11 @@ final class HallProvisioningService {
         $this->invalidateGroupCaches($groupId);
 
         // PROVE it: compensation that cannot show the Hall is gone is a hope.
-        $residue = HallRepository::findHallForChain($chainId) === $groupId ? 'chain_still_resolves' : 'clean';
+        $residue = self::compensationResidue($target, $groupId);
         if ($residue !== 'clean') {
             Logger::error('[bcc-trust] Hall compensation left residue; a live Hall may remain', [
                 'group_id' => $groupId,
-                'chain_id' => $chainId,
+                ...self::targetLog($target),
             ]);
         }
 
@@ -604,27 +734,27 @@ final class HallProvisioningService {
             $notifyOn = (bool) \PeepSo::get_option('groups_create_notify_admin', 0);
         }
 
+        [$auditTargetId, $auditTargetType] = self::auditTarget($target, $groupId);
         $auditId = AuditLogger::logChecked(
             self::AUDIT_COMPENSATED,
-            $chainId,
+            $auditTargetId,
             [
-                'chain_id'         => $chainId,
-                'chain_slug'       => $chainSlug,
+                ...self::targetMeta($target),
                 'group_id'         => $groupId,
                 'operator_user_id' => $creatorId,
-                'failure_code'     => self::FAIL_MARKER_REFUSED,
+                'failure_code'     => $failureCode,
                 'error_code'       => $residue,
                 'cleanup_markers'  => $notes === [] ? 'none' : implode('|', $notes),
                 'admin_email_sent' => $notifyOn ? 'possible' : 'no',
             ],
-            'chain',
+            $auditTargetType,
             $creatorId ?: null
         );
 
         if ($auditId === null) {
             Logger::error(
                 '[bcc-trust] Hall compensation completed but its checked audit could not be written',
-                ['chain_id' => $chainId, 'group_id' => $groupId]
+                [...self::targetLog($target), 'group_id' => $groupId]
             );
 
             return false;
@@ -636,6 +766,105 @@ final class HallProvisioningService {
     /** The advisory-lock name for one chain. Well under MySQL's 64 chars. */
     private static function lockName(int $chainId): string {
         return 'bcc_hall_provision:' . $chainId;
+    }
+
+    /** The advisory-lock name for one topic: a fixed-length hash, so any slug fits MySQL's 64 chars. */
+    private static function topicLockName(string $topicSlug): string {
+        return 'bcc_hall_provision_topic:' . substr(hash('sha256', $topicSlug), 0, 32);
+    }
+
+    /** @return HallTarget */
+    private static function chainTarget(int $chainId, string $chainSlug): array {
+        return ['kind' => 'chain', 'id' => $chainId, 'slug' => $chainSlug, 'label' => ''];
+    }
+
+    /** @return HallTarget */
+    private static function topicTarget(string $topicSlug, string $topicLabel): array {
+        return ['kind' => 'topic', 'id' => 0, 'slug' => $topicSlug, 'label' => $topicLabel];
+    }
+
+    /**
+     * The audit meta naming the target. For a chain, exactly the keys this
+     * service has always written (`chain_id`, `chain_slug`).
+     *
+     * @param HallTarget $target
+     * @return array<string, int|string>
+     */
+    private static function targetMeta(array $target): array {
+        return $target['kind'] === 'chain'
+            ? ['chain_id' => $target['id'], 'chain_slug' => $target['slug']]
+            : ['topic_slug' => $target['slug']];
+    }
+
+    /**
+     * The log context naming the target (as the audit meta).
+     *
+     * @param HallTarget $target
+     * @return array<string, int|string>
+     */
+    private static function targetLog(array $target): array {
+        return self::targetMeta($target);
+    }
+
+    /**
+     * The audit row's target: the chain for a chain Hall (as always), the
+     * Hall itself for a topic Hall (null before it exists).
+     *
+     * @param HallTarget $target
+     * @return array{0: int|null, 1: string}
+     */
+    private static function auditTarget(array $target, int $groupId): array {
+        return $target['kind'] === 'chain'
+            ? [$target['id'], 'chain']
+            : [$groupId > 0 ? $groupId : null, 'hall'];
+    }
+
+    /** @param HallTarget $target */
+    private static function writeMarker(array $target, int $groupId): void {
+        if ($target['kind'] === 'chain') {
+            HallRepository::writeHallMeta($groupId, $target['id']);
+            return;
+        }
+        HallRepository::writeTopicHallMeta($groupId, $target['slug'], $target['label']);
+    }
+
+    /**
+     * Null when the target now resolves to this group (and a topic Hall kept
+     * its address); otherwise the failure code to compensate with.
+     *
+     * @param HallTarget $target
+     */
+    private static function unprovenMarker(array $target, int $groupId): ?string {
+        if ($target['kind'] === 'chain') {
+            return HallRepository::findHallForChain($target['id']) === $groupId ? null : self::FAIL_MARKER_REFUSED;
+        }
+
+        try {
+            if (HallRepository::findHallForTopic($target['slug']) !== $groupId) {
+                return self::FAIL_MARKER_REFUSED;
+            }
+
+            return HallRepository::groupSlug($groupId) === $target['slug'] ? null : self::FAIL_SLUG_REFUSED;
+        } catch (RepositoryReadFailure) {
+            return self::FAIL_READ_UNVERIFIED;
+        }
+    }
+
+    /**
+     * Whether a compensated Hall still resolves: `clean` when it does not.
+     *
+     * @param HallTarget $target
+     */
+    private static function compensationResidue(array $target, int $groupId): string {
+        if ($target['kind'] === 'chain') {
+            return HallRepository::findHallForChain($target['id']) === $groupId ? 'chain_still_resolves' : 'clean';
+        }
+
+        try {
+            return HallRepository::findHallForTopic($target['slug']) === $groupId ? 'topic_still_resolves' : 'clean';
+        } catch (RepositoryReadFailure) {
+            return 'residue_unverified';
+        }
     }
 
     /**
@@ -677,18 +906,19 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
+     *
+     * @param HallTarget $target
      */
-    private function contended(int $chainId, string $chainSlug): array {
-        Logger::info('[bcc-trust] Hall creation skipped: another run holds this chain', [
-            'chain_id'   => $chainId,
-            'chain_slug' => $chainSlug,
+    private function contended(array $target): array {
+        Logger::info('[bcc-trust] Hall creation skipped: another run holds this ' . $target['kind'], [
+            ...self::targetLog($target),
             'operator'   => get_current_user_id(),
         ]);
 
         return [
             'status'         => 'busy',
             'group_id'       => 0,
-            'message'        => 'Another Hall creation for this chain is already running; nothing was created.',
+            'message'        => 'Another Hall creation for this ' . $target['kind'] . ' is already running; nothing was created.',
             'failure_code'   => self::FAIL_LOCK_CONTENDED,
             'owner_id'       => 0,
             'audit_degraded' => false,
@@ -723,11 +953,12 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
+     *
+     * @param HallTarget $target
      */
     private function fail(
         int $groupId,
-        int $chainId,
-        string $chainSlug,
+        array $target,
         string $code,
         string $message,
         bool $auditDegraded = false
@@ -735,24 +966,23 @@ final class HallProvisioningService {
         $operator = get_current_user_id();
 
         Logger::warning('[bcc-trust] Hall creation refused', [
-            'chain_id'     => $chainId,
-            'chain_slug'   => $chainSlug,
+            ...self::targetLog($target),
             'group_id'     => $groupId,
             'failure_code' => $code,
             'operator'     => $operator,
         ]);
 
+        [$auditTargetId, $auditTargetType] = self::auditTarget($target, $groupId);
         $auditId = AuditLogger::logChecked(
             self::AUDIT_FAILED,
-            $chainId,
+            $auditTargetId,
             [
-                'chain_id'         => $chainId,
-                'chain_slug'       => $chainSlug,
+                ...self::targetMeta($target),
                 'group_id'         => $groupId,
                 'operator_user_id' => $operator,
                 'failure_code'     => $code,
             ],
-            'chain',
+            $auditTargetType,
             $operator ?: null
         );
 
@@ -844,17 +1074,11 @@ final class HallProvisioningService {
      *
      * privacy = 0 (OPEN) — a Hall is joinable by anyone.
      */
-    private function createHallGroup(int $creatorId, string $chainName): int {
-        $title = $chainName . ' Hall';
-
+    private function createHallGroup(int $creatorId, string $title, string $description, ?string $slug): int {
         $data = [
             'owner_id'    => $creatorId,
             'name'        => $title,
-            'description' => sprintf(
-                'The %s union hall — an open floor for everyone on %s.',
-                $chainName,
-                $chainName
-            ),
+            'description' => $description,
             'meta' => [
                 'privacy'                     => 0, // PeepSoGroupPrivacy::PRIVACY_PUBLIC (OPEN)
                 'is_joinable'                 => true,
@@ -863,6 +1087,12 @@ final class HallProvisioningService {
                 'is_auto_accept_join_request' => true,
             ],
         ];
+        // A topic Hall's address. PeepSo's create applies it in the same
+        // pinned write (`update(['slug' => …])` maps to `post_name`), and
+        // createHall() proves it stuck.
+        if ($slug !== null) {
+            $data['slug'] = $slug;
+        }
 
         try {
             // ⚠⚠ F-361 — A PEEPSO MODEL WRITE, and this file already said so
@@ -885,7 +1115,7 @@ final class HallProvisioningService {
             return $id > 0 ? $id : 0;
         } catch (\Throwable $e) {
             Logger::error('[bcc-trust] PeepSoGroup constructor threw (Hall)', [
-                'chain' => $chainName,
+                'title' => $title,
                 'error' => $e->getMessage(),
             ]);
             return 0;

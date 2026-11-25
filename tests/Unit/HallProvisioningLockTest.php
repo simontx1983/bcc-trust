@@ -473,13 +473,42 @@ final class HallProvisioningLockTest extends TestCase
             'createHall() writes the duplicate-preventing marker and must be reachable only from inside the lock'
         );
 
-        // And the one public entry point is still the only public one.
+        // And the two public entry points (a chain Hall, a topic Hall) are
+        // still the only public ones.
         $public = array_values(array_map(
             static fn(\ReflectionMethod $m): string => $m->getName(),
             $r->getMethods(\ReflectionMethod::IS_PUBLIC)
         ));
         sort($public);
-        self::assertSame(['provisionOne'], $public, 'provisionOne() must remain the only public entry point');
+        self::assertSame(['provisionOne', 'provisionTopic'], $public, 'provisionOne() and provisionTopic() must remain the only public entry points');
+    }
+
+    /**
+     * Each public entry point takes its lock, and checks for an existing Hall
+     * inside it, BEFORE it can reach createHall(). Source order, comments
+     * removed.
+     *
+     * @return array<string, array{string, list<string>}>
+     */
+    public static function entryPoints(): array
+    {
+        return [
+            'a chain Hall' => ['provisionOne', ['self::acquire($lock)', 'HallRepository::findHallForChain(', '$this->createHall(']],
+            'a topic Hall' => ['provisionTopic', ['self::acquire($lock)', 'HallRepository::findHallForTopic(', '$this->createHall(']],
+        ];
+    }
+
+    /** @param list<string> $order */
+    #[\PHPUnit\Framework\Attributes\DataProvider('entryPoints')]
+    public function testEachEntryPointLocksAndChecksBeforeCreating(string $method, array $order): void
+    {
+        $body = \BCC\Trust\Tests\Support\GateOrder::body(
+            \BCC\Trust\Tests\Support\GateOrder::code('app/Domain/Onchain/Services/HallProvisioningService.php'),
+            $method
+        );
+
+        \BCC\Trust\Tests\Support\GateOrder::assertOrder($body, $order, "{$method}(): lock, then the existence check, then the create");
+        self::assertStringContainsString('\\BCC\\Core\\DB\\AdvisoryLock::release($lock);', $body, "{$method}() releases its lock");
     }
     /**
      * ⚠ THE OPERATOR-FACING COPY IS NOT DOUBLE-ENCODED.

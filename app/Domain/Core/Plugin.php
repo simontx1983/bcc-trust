@@ -1948,6 +1948,10 @@ final class Plugin
         // GET /admin/reports + POST /admin/reports/:id/resolve.
         // Capability-gated to manage_options (V1 = admins only).
         \BCC\Trust\Core\REST\AdminReportsEndpoint::register();
+
+        // GET/POST /admin/halls + PATCH /admin/halls/:id (topic Halls, F-597).
+        // Capability-gated to manage_options, as the reports routes are.
+        \BCC\Trust\Core\REST\AdminHallsEndpoint::register();
     }
 
     /**
