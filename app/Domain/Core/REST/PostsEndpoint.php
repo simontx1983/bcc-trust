@@ -747,7 +747,7 @@ final class PostsEndpoint
         }
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -809,7 +809,7 @@ final class PostsEndpoint
         $result     = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId, $visibility, $hallFeed);
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -843,7 +843,7 @@ final class PostsEndpoint
 
         $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId, $visibility, $hallFeed);
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -894,7 +894,7 @@ final class PostsEndpoint
         $result = Plugin::instance()->blogService()->getBlogForEdit($postId, $viewerId);
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -1095,7 +1095,7 @@ final class PostsEndpoint
         );
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -1118,7 +1118,7 @@ final class PostsEndpoint
         $result = Plugin::instance()->postsService()->deletePost($feedId, $viewerId);
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
@@ -1142,51 +1142,11 @@ final class PostsEndpoint
         $result = Plugin::instance()->postsService()->removeReview($viewerId, $pageId);
 
         if (isset($result['error'])) {
-            $code   = (string) $result['error'];
-            $status = self::statusForCode($code);
-            return ApiResponse::error($code, (string) ($result['message'] ?? ''), $status);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
         $response->header('Cache-Control', 'no-store');
         return $response;
-    }
-
-    private static function statusForCode(string $code): int
-    {
-        return match ($code) {
-            'bcc_unauthorized'           => 401,
-            'bcc_forbidden'              => 403,
-            'bcc_permission_denied'      => 403,
-            'bcc_not_found'              => 404,
-            'bcc_invalid_request'        => 400,
-            'bcc_invalid_mention_target' => 400,
-            'bcc_too_many_mentions'      => 400,
-            'bcc_rate_limited'           => 429,
-            'bcc_unavailable'            => 503,
-            'bcc_feature_disabled'       => 403,
-            default                      => 400,
-        };
-    }
-
-    /**
-     * Forward an error envelope from PostsService through ApiResponse.
-     *
-     * Carries the optional `data` block (per §3.3.12 — used by
-     * `bcc_invalid_mention_target` to echo `user_id`,
-     * `bcc_too_many_mentions` to echo `max`). Other handlers can
-     * adopt this helper as more endpoints grow structured error
-     * payloads.
-     *
-     * @param array<string, mixed> $result
-     */
-    private static function forwardServiceError(array $result): WP_REST_Response
-    {
-        $code    = (string) ($result['error'] ?? 'bcc_unavailable');
-        $message = (string) ($result['message'] ?? '');
-        $status  = self::statusForCode($code);
-        /** @var array<string, mixed>|null $data */
-        $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
-        return ApiResponse::error($code, $message, $status, $data);
     }
 }
