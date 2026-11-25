@@ -98,9 +98,17 @@ final class PageDiscoveryMediaTest extends TestCase
 
     public function testAPageWithACoverGetsItsCover(): void
     {
-        $GLOBALS['__bcc_pm'][self::PAGE_ID]['page_cover_photo'] = 'https://img.example/cover.jpg';
+        $GLOBALS['__bcc_pm'][self::PAGE_ID]['page_cover_photo']
+            = 'https://stage.example.test/wp-content/peepso/pages/4100/cover.jpg';
 
-        self::assertSame('https://img.example/cover.jpg', $this->card()['cover_url']);
+        // ⚠ REBASED onto the content origin, not the stored host. The
+        // stored value is built from content_url() at upload time, so a
+        // pre-cutover row carries a host that may serve no /wp-content.
+        self::assertSame(
+            'https://cms.example.test/wp-content/peepso/pages/4100/cover.jpg',
+            $this->card()['cover_url'],
+            'the discovery cover must be rebased onto the content origin too'
+        );
     }
 
     /**

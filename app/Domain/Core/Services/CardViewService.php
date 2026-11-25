@@ -50,6 +50,7 @@ use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\PageAccess;
+use BCC\Trust\Core\Support\PageCoverUrl;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -1756,44 +1757,20 @@ final class CardViewService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Server-derived crest data (per §L5: monogram + background are
-     * server-computed). Initials = up to two leading letters from the
-     * first two whitespace-separated tokens, uppercased.
+     * §3.2 `cover_photo_url` for a page card.
      *
-     * @return array{initials: string, monogram_color: string, background: string}
-     */
-    /**
-     * §3.2 `cover_photo_url` for a page card — the `page_cover_photo`
-     * meta, or null when the page has none.
-     *
-     * ⚠⚠ THE META, NOT `PeepSoPage::get_cover_url()`. That accessor
-     * starts from `get_cover_default()` and overwrites it only when this
-     * same meta is non-empty (peepso-pages page.php:722-735), so it can
-     * never report "no cover": every page would receive PeepSo's default
-     * image and no caller could tell a real cover from a placeholder.
-     * This meta is the only signal that separates them, and it is what
-     * the accessor itself reads.
-     *
-     * Fail-safe: anything that is not a non-empty string reads as "no
-     * cover", never as an error. `esc_url_raw()` is hygiene on a value
-     * that reaches an `<img src>`.
-     *
-     * ⚠ Stated rather than assumed: the stored value is whatever the
-     * uploader wrote, and no SAME-HOST restriction is applied here. In
-     * practice PeepSo's uploader writes a local uploads URL, so the
-     * emitted value is WP media; a host allow-list would be a policy
-     * decision, not hygiene, and is not made in this change.
+     * {@see PageCoverUrl} owns the rule, because page discovery emits
+     * the same cover and two copies would be two chances to get the
+     * origin rebase wrong. In short: the stored value is a full URL
+     * built from `content_url()` AT UPLOAD TIME, so a row written
+     * before the headless cutover carries a host that may not serve
+     * `/wp-content` at all — it is therefore rebased BY PATH onto the
+     * current content origin, and refused when its path does not sit
+     * under the content directory.
      */
     private static function resolvePageCoverUrl(\WP_Post $post): ?string
     {
-        $cover = get_post_meta((int) $post->ID, 'page_cover_photo', true);
-        if (!is_string($cover) || $cover === '') {
-            return null;
-        }
-
-        $url = esc_url_raw($cover);
-
-        return $url === '' ? null : $url;
+        return PageCoverUrl::forPage((int) $post->ID);
     }
 
     /**

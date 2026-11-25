@@ -67,13 +67,21 @@ final class CardCoverPhotoTest extends TestCase
 
     // ── page ────────────────────────────────────────────────────────────
 
-    public function testAPageWithACoverEmitsIt(): void
+    /**
+     * A page with a cover emits it — REBASED onto the content origin.
+     *
+     * ⚠ The fixture's host is the FRONT DOOR, which is what a row
+     * written before the headless cutover looks like, and which serves no
+     * `/wp-content`. The emitted URL is the same PATH on the content
+     * origin. {@see PageCoverUrlOriginTest} covers the rule itself.
+     */
+    public function testAPageWithACoverEmitsItRebased(): void
     {
         $GLOBALS['__bcc_ccp']['meta'][self::PAGE_ID]['page_cover_photo']
-            = 'https://example.test/wp-content/uploads/cover.jpg';
+            = 'https://example.test/wp-content/peepso/pages/7100/cover.jpg';
 
         self::assertSame(
-            'https://example.test/wp-content/uploads/cover.jpg',
+            'https://cms.example.test/wp-content/peepso/pages/7100/cover.jpg',
             $this->pageCover()
         );
     }

@@ -58,6 +58,14 @@ namespace {
         }
     }
 
+    // PageCoverUrl rebases the stored value onto this origin.
+    if (!function_exists('content_url')) {
+        function content_url(string $path = ''): string
+        {
+            return 'https://cms.example.test/wp-content' . $path;
+        }
+    }
+
     if (!function_exists('esc_url_raw')) {
         function esc_url_raw(string $url): string
         {

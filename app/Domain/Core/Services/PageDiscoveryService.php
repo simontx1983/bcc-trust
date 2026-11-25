@@ -512,9 +512,16 @@ class PageDiscoveryService {
      */
     private function resolvePageCoverUrl(int $postId): string
     {
-        $cover = get_post_meta($postId, 'page_cover_photo', true);
-
-        return is_string($cover) ? $cover : '';
+        // ⚠ THROUGH THE SHARED READER, which also REBASES the origin.
+        // This used to return the stored value as-is, and the stored
+        // value is a full URL built from `content_url()` at upload time
+        // — so a row written before the headless cutover carries a host
+        // that may not serve `/wp-content`. {@see PageCoverUrl} has the
+        // rule and the reasoning.
+        //
+        // '' rather than null here, because this card's `cover_url` is a
+        // string on the wire; the §3.2 Card field is nullable.
+        return \BCC\Trust\Core\Support\PageCoverUrl::forPage($postId) ?? '';
     }
     /**
      * Build a deterministic cache key from query parameters.

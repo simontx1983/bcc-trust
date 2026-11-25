@@ -136,6 +136,14 @@ namespace {
         }
     }
 
+    // PageCoverUrl rebases the stored cover onto this origin.
+    if (!function_exists('content_url')) {
+        function content_url(string $path = ''): string
+        {
+            return 'https://cms.example.test/wp-content' . $path;
+        }
+    }
+
     if (!function_exists('get_the_post_thumbnail_url')) {
         /** @return string|false */
         function get_the_post_thumbnail_url(int $postId = 0, string $size = 'post-thumbnail')
