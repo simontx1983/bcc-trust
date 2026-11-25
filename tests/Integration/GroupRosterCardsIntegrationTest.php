@@ -175,15 +175,15 @@ final class GroupRosterCardsIntegrationTest extends TestCase
     }
 
     /**
-     * Bounded: the cards add no per-member query; the viewer's own
-     * write_review decision is read once for the page, not once per card.
-     * The only per-member read left is each member's `user_info` row on a
-     * cold object cache (the tile's suspension check, which predates the
-     * card and which /members pays too; a follow-up primes it in bulk).
-     * So four more members cost exactly four more queries. Measured after
-     * one warm-up page, so a first-call read counts against neither.
+     * Bounded: a page of eight costs exactly what a page of four does. The
+     * cards add no per-member query; the viewer's own write_review decision
+     * is read once for the page, not once per card; and each member's
+     * `user_info` row (the suspension check behind the tile's flags) is
+     * read for the whole page at once (UserInfoRepository::primeByUserIds).
+     * Measured after one warm-up page, so a first-call read counts against
+     * neither.
      */
-    public function testAPageOfEightCostsOneUserInfoReadPerMemberMoreThanFour(): void
+    public function testAPageOfEightCostsWhatAPageOfFourDoes(): void
     {
         global $wpdb;
         $this->roster(self::VIEWER, self::G_WARM);
@@ -201,7 +201,7 @@ final class GroupRosterCardsIntegrationTest extends TestCase
         foreach ([...$four, ...$eight] as $item) {
             self::assertSame('member', $item['card']['card_kind'] ?? null, 'every visible member has a card');
         }
-        self::assertSame($fourQueries + 4, $eightQueries, "queries per page: {$fourQueries} for 4 members, {$eightQueries} for 8");
+        self::assertSame($fourQueries, $eightQueries, "queries per page: {$fourQueries} for 4 members, {$eightQueries} for 8");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
