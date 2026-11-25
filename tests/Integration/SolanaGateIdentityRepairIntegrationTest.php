@@ -721,7 +721,7 @@ final class SolanaGateIdentityRepairIntegrationTest extends TestCase
         // 20 distinct, checksum-valid cosmos addresses generated from a
         // fixed 20-byte payload that varies by index.
         $data = str_pad((string) $i, 40, '0', STR_PAD_LEFT);
-        $addr = \BCC\Trust\Onchain\Support\Bech32::encode('cosmos', hex2bin($data));
+        $addr = \BCC\Core\Crypto\Bech32::encode('cosmos', hex2bin($data));
 
         self::assertIsString($addr, 'fixture bech32 encode failed');
 

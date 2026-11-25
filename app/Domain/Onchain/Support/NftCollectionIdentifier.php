@@ -53,6 +53,8 @@
 
 namespace BCC\Trust\Onchain\Support;
 
+use BCC\Core\Crypto\Bech32;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -113,9 +115,11 @@ final class NftCollectionIdentifier
                 return NftCollectionIdentity::accept(strtolower($value));
 
             case self::FAMILY_COSMOS:
-                // Full checksum verification via the shared Bech32
-                // implementation — not a regex. `decode()` also rejects
-                // mixed case, which bech32 forbids outright.
+                // Full checksum verification via bcc-core's strict
+                // Crypto\Bech32 — not a regex. `decode()` also rejects mixed
+                // case, which bech32 forbids outright, and any spelling that
+                // is not the one canonical encoding (overlong, a non-printable
+                // HRP byte, non-zero or excess padding).
                 if (Bech32::decode($value) === null) {
                     return NftCollectionIdentity::refuse(NftCollectionIdentity::REASON_BAD_BECH32);
                 }

@@ -19,7 +19,7 @@ use BCC\Trust\Onchain\Services\NftGroupGateService;
 use BCC\Trust\Onchain\Services\ValidatorGroupProvisioningService;
 use BCC\Trust\Onchain\Services\ValidatorGroupRevokeService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use BCC\Trust\Onchain\Support\ValidatorStatusProjection;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
 use PHPUnit\Framework\Attributes\CoversClass;

@@ -598,7 +598,6 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\AlchemyEndpoint' => $baseDir . '/app/Domain/Onchain/Support/AlchemyEndpoint.php',
     'BCC\\Trust\\Onchain\\Support\\ApiRetry' => $baseDir . '/app/Domain/Onchain/Support/ApiRetry.php',
     'BCC\\Trust\\Onchain\\Support\\Base58' => $baseDir . '/app/Domain/Onchain/Support/Base58.php',
-    'BCC\\Trust\\Onchain\\Support\\Bech32' => $baseDir . '/app/Domain/Onchain/Support/Bech32.php',
     'BCC\\Trust\\Onchain\\Support\\ChainSupport' => $baseDir . '/app/Domain/Onchain/Support/ChainSupport.php',
     'BCC\\Trust\\Onchain\\Support\\CosmosEndpointVerifier' => $baseDir . '/app/Domain/Onchain/Support/CosmosEndpointVerifier.php',
     'BCC\\Trust\\Onchain\\Support\\EndpointDescriptor' => $baseDir . '/app/Domain/Onchain/Support/EndpointDescriptor.php',

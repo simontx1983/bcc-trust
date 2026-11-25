@@ -1,5 +1,16 @@
 <?php
 /**
+ * FROZEN COPY of bcc-trust's former `Onchain\Support\Bech32`, the lenient
+ * decoder (no length cap, no HRP byte check, padding not verified), as it
+ * stood at b56aa445 before the move onto bcc-core's strict
+ * `BCC\Core\Crypto\Bech32`.
+ *
+ * It exists ONLY for Bech32StrictDecoderDifferentialTest: every address the
+ * old decoder accepted must decode to the same HRP and bytes under the strict
+ * one, or appear in that test as a named case showing why it is invalid.
+ * Never use it from production code, and never edit it.
+ */
+/**
  * Bech32 encoding/decoding with checksum verification.
  *
  * Shared implementation used by ClaimService (address comparison) and
@@ -10,13 +21,13 @@
  * @package BCC\Trust\Onchain\Support
  */
 
-namespace BCC\Trust\Onchain\Support;
+namespace BCC\Trust\Tests\Support;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-class Bech32
+final class LegacyBech32
 {
     /** @var string Bech32 character set (BIP-173). */
     private const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';

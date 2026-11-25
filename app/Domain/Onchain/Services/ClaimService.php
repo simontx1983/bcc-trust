@@ -23,7 +23,7 @@ use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -631,11 +631,12 @@ class ClaimService {
      * Decode a bech32 address to its raw address bytes (binary string).
      * Returns null on invalid input (including failed checksum). Pure function — no instance state.
      *
-     * Delegates to the shared Bech32 support class which performs full
-     * polymod checksum verification before returning bytes.
+     * Delegates to bcc-core's strict Crypto\Bech32 decoder: checksum, case,
+     * length and padding are all verified, so only one spelling of an
+     * address decodes (a non-canonical spelling no encoder writes does not).
      */
     private static function bech32DecodeToBytes(string $bech32): ?string {
-        return Bech32::decodeToBytes($bech32);
+        return Bech32::decode($bech32)['bytes'] ?? null;
     }
 
     /**
