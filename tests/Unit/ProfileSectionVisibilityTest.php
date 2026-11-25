@@ -63,6 +63,10 @@ final class ProfileSectionVisibilityTest extends TestCase
         // test in this process and hide sections they never asked to hide.
         \BCC\Core\Repositories\UserMetaRepository::$unreadable = [];
         \BCC\Core\Repositories\UserMetaRepository::$rows       = [];
+        \BCC\Core\Repositories\UserMetaRepository::$memo       = [];
+        \BCC\Core\Repositories\UserMetaRepository::$reads      = [];
+        // Back OFF for whatever runs next, wherever it runs.
+        \BCC\Core\Repositories\UserMetaRepository::$memoize    = false;
         parent::tearDown();
     }
 
@@ -70,11 +74,11 @@ final class ProfileSectionVisibilityTest extends TestCase
      * @param array<string, mixed> $meta
      *
      * ⚠ Also drops that member from the meta double's memo, because this
-     * is standing in for a WRITE. The real `UserMetaRepository` memoizes
-     * per (user, key) and is wired to every user-meta write, so a stored
-     * change busts the memo in production; a fixture assignment cannot be
-     * seen that way, so the bust is explicit here. Without it a test that
-     * rewrites the fixture mid-test would keep reading its first value.
+     * stands in for a WRITE: the real `UserMetaRepository` is wired to
+     * every user-meta write, and a fixture assignment cannot be seen that
+     * way. It is a no-op while the double's memo is off (its default),
+     * and it is what keeps THIS file correct — the read-count tests below
+     * turn the memo on, so a rewrite here must behave as a write does.
      */
     private function storeFor(int $userId, array $meta): void
     {
@@ -194,9 +198,15 @@ final class ProfileSectionVisibilityTest extends TestCase
             $ids[] = 9000 + $i;
         }
 
-        \BCC\Core\Repositories\UserMetaRepository::$calls = [];
-        \BCC\Core\Repositories\UserMetaRepository::$reads = [];
-        \BCC\Core\Repositories\UserMetaRepository::$memo  = [];
+        // ⚠ The double's memo is OPT-IN and off by default, because the
+        // double is autoloaded into every unit process and an always-on
+        // memo would leak between tests in a shared-process suite. This
+        // measurement is ABOUT the memo, so it turns it on and clears
+        // both counters; tearDown() puts it back.
+        \BCC\Core\Repositories\UserMetaRepository::$memoize = true;
+        \BCC\Core\Repositories\UserMetaRepository::$calls   = [];
+        \BCC\Core\Repositories\UserMetaRepository::$reads   = [];
+        \BCC\Core\Repositories\UserMetaRepository::$memo    = [];
 
         if ($prime) {
             PSV::prime($ids);
