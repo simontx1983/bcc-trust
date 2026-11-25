@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Services\CosmosTxInclusionFetcher as Fetcher;
-use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Core\Crypto\Bech32;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\CosmosSecurityContact;

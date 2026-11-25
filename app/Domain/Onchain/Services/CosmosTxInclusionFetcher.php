@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Core\Crypto\Bech32;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
-use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\Support\CosmosEndpointVerifier;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
@@ -270,16 +270,14 @@ final class CosmosTxInclusionFetcher
         if ($prefix === '' || $valoper !== strtolower($valoper)) {
             return null;
         }
+        // bcc-core's strict decoder: checksum, case, length and padding, so only
+        // the one canonical spelling of an address decodes.
         $decoded = Bech32::decode($valoper);
-        if ($decoded === null || $decoded['hrp'] !== $prefix . 'valoper') {
-            return null;
-        }
-        $bytes = Bech32::decodeToBytes($valoper);
-        if ($bytes === null || strlen($bytes) !== 20) {
+        if ($decoded === null || $decoded['hrp'] !== $prefix . 'valoper' || strlen($decoded['bytes']) !== 20) {
             return null;
         }
 
-        return Bech32::encode($prefix, $bytes);
+        return Bech32::encode($prefix, $decoded['bytes']);
     }
 
     /**
