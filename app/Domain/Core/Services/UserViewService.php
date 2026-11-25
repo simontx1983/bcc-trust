@@ -806,9 +806,9 @@ final class UserViewService
      *   - suspended ← Permissions::is_not_suspended($userId, false) === false
      *
      * ⚠ `shadow_limited`, `hidden` and `under_review` were REMOVED (F-582).
-     * No code, admin screen or command ever set them, and a read-only count
-     * on production and staging found zero rows for all three usermeta keys,
-     * so nothing was orphaned. They are not dormant features to be revived:
+     * NOTHING IN THE CODEBASE EVER WROTE THEM — no service, admin screen or
+     * command — so nothing was orphaned by removing them. They are not
+     * dormant features to be revived:
      * reintroducing one means a contract amendment and a writer, not just a
      * slug. ⭐ The real reach limit is the Caution/Risky reputation tier,
      * which is a different mechanism entirely and never wrote these keys.

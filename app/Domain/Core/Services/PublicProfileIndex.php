@@ -63,10 +63,8 @@ final class PublicProfileIndex
      *
      * ⚠ F-582 retired `bcc_hidden`, `bcc_shadow_limited` and
      * `bcc_under_review`, which were read here to drop a flagged member
-     * from the index. Nothing ever wrote them — a read-only count found
-     * zero rows for all three on production and staging — so no member
-     * was being dropped by that check, and removing it changes no
-     * listing.
+     * from the index. NOTHING IN THE CODEBASE EVER WROTE THEM, so no member
+     * was being dropped by that check and removing it changes no listing.
      *
      * ⚠⚠ SUSPENSION IS NOT AFFECTED and never came through these keys:
      * a suspended member is excluded by the SQL pass itself
