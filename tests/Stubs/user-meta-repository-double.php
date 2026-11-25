@@ -47,6 +47,42 @@ if (!class_exists(UserMetaRepository::class, false)) {
         public static array $calls = [];
 
         /**
+         * Only the calls that actually TOUCHED the fixture - i.e. what
+         * would have been a query. A call served entirely from the memo
+         * does not appear here, which is how a test tells a primed list
+         * from one read member-by-member.
+         *
+         * @var list<array{users: list<int>, keys: list<string>}>
+         */
+        public static array $reads = [];
+
+        /**
+         * ⚠⚠ OPT-IN, and OFF by default. This file is autoloaded into
+         * every unit process, so a memo that were always on would leak
+         * between tests in a SHARED-process suite and make results
+         * ORDER-DEPENDENT — a test could pass only because an earlier one
+         * happened to memoize the same member.
+         *
+         * Off, the double reads on every call, which is what every
+         * existing suite was written against.
+         *
+         * A suite that turns it on is asserting something ABOUT the memo
+         * (that a primed list costs one read), and must run in separate
+         * processes or reset {@see $memo} and {@see $reads} itself.
+         */
+        public static bool $memoize = false;
+
+        /**
+         * user => key => values, as the REAL class memoizes — only while
+         * {@see $memoize} is on. Without a memo at all, the double
+         * answered a primed list and an unprimed one identically, so no
+         * test could see the difference.
+         *
+         * @var array<int, array<string, list<string>>>
+         */
+        public static array $memo = [];
+
+        /**
          * Several stored rows for one (member, key), in umeta_id order, which
          * a get_user_meta() shim cannot express: `$rows[$id][$key] = ['0', '1']`.
          * Answers for that pair instead of the shim.
@@ -64,22 +100,74 @@ if (!class_exists(UserMetaRepository::class, false)) {
         {
             self::$calls[] = ['users' => array_values($userIds), 'keys' => array_values($keys), 'fresh' => $fresh];
 
-            $out = [];
+            // Which (user, key) pairs are not held? With the memo off that
+            // is all of them, which is the pre-existing behaviour: read on
+            // every call.
+            $toRead = [];
             foreach ($userIds as $id) {
+                $id = (int) $id;
                 if ($id <= 0) {
                     continue;
                 }
-                if (isset(self::$unreadable[$id])) {
-                    return null;
+                if (!self::$memoize || $fresh) {
+                    $toRead[$id] = true;
+                    continue;
                 }
                 foreach ($keys as $key) {
-                    if (isset(self::$rows[$id][$key])) {
-                        $out[$id][$key] = self::$rows[$id][$key];
-                        continue;
+                    if (!isset(self::$memo[$id][$key])) {
+                        $toRead[$id] = true;
+                        break;
                     }
-                    $raw = self::getUserMeta($id, $key);
-                    if ($raw !== '' && $raw !== null && $raw !== false) {
-                        $out[$id][$key] = [is_scalar($raw) ? (string) $raw : ''];
+                }
+            }
+
+            $readValues = [];
+
+            if ($toRead !== []) {
+                self::$reads[] = ['users' => array_keys($toRead), 'keys' => array_values($keys)];
+
+                // ⚠ THE WHOLE BATCH OR NOTHING, as in core: one untrusted
+                // member makes the read untrusted, and nothing from it is
+                // kept. Memoizing id-by-id and bailing part way would leave
+                // the earlier ids held from a read that answered null.
+                foreach (array_keys($toRead) as $id) {
+                    if (isset(self::$unreadable[$id])) {
+                        return null;
+                    }
+                    foreach ($keys as $key) {
+                        if (isset(self::$rows[$id][$key])) {
+                            $readValues[$id][$key] = self::$rows[$id][$key];
+                            continue;
+                        }
+                        $raw = self::getUserMeta($id, $key);
+                        $readValues[$id][$key] = ($raw !== '' && $raw !== null && $raw !== false)
+                            ? [is_scalar($raw) ? (string) $raw : '']
+                            : [];
+                    }
+                }
+
+                if (self::$memoize && !$fresh) {
+                    // A fresh read deliberately does NOT seed the memo, which
+                    // is core's rule: `$fresh` means "do not serve me
+                    // anything remembered", not "remember this".
+                    foreach ($readValues as $id => $byKey) {
+                        self::$memo[$id] = array_replace(self::$memo[$id] ?? [], $byKey);
+                    }
+                }
+            }
+
+            $held = self::$memoize && !$fresh ? self::$memo : $readValues;
+
+            $out = [];
+            foreach ($userIds as $id) {
+                $id = (int) $id;
+                if ($id <= 0) {
+                    continue;
+                }
+                foreach ($keys as $key) {
+                    $values = $held[$id][$key] ?? [];
+                    if ($values !== []) {
+                        $out[$id][$key] = $values;
                     }
                 }
             }
@@ -110,7 +198,7 @@ if (!class_exists(UserMetaRepository::class, false)) {
 
         public static function forget(int $userId): void
         {
-            unset($userId);
+            unset(self::$memo[$userId]);
         }
 
         /** @return mixed */

@@ -87,6 +87,28 @@ final class StewardshipSweepServiceTest extends TestCase
         self::assertSame([], $svc->ingestCalls);
     }
 
+    /**
+     * Poster counts exclude moderated posts. When those cannot be read the
+     * counts are unknown: no credit is minted, and the cursor stays where it
+     * was, so the next run covers the same communities.
+     */
+    public function testUnknownPosterCountsMintNothingAndKeepTheCursor(): void
+    {
+        $svc = $this->sweep(
+            candidates: [[self::GROUP_A, self::OWNER_A]],
+            actives:    [self::GROUP_A => 9],
+        );
+        $svc->heatUnknown = true;
+        $cursorBefore     = $svc->cursor;
+
+        $svc->run();
+
+        self::assertSame([], $svc->ingestCalls, 'no credit on unknown counts');
+        self::assertSame([], $svc->cursorWrites, 'the cursor is not moved');
+        self::assertSame($cursorBefore, $svc->cursor);
+        self::assertSame([], $svc->advances);
+    }
+
     public function testCommunityWithNoHeatRowCreditsNothing(): void
     {
         $svc = $this->sweep(
@@ -346,6 +368,9 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
     /** In-memory stand-in for the bcc_rank_stewardship_cursor wp_option. */
     public int $cursor;
 
+    /** True: the poster counts are unknown (the moderated posts could not be read). */
+    public bool $heatUnknown = false;
+
     /** @var list<int> Cursor values persisted, in order. */
     public array $cursorWrites = [];
 
@@ -415,8 +440,11 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
         $this->advances[] = [$from, $to, $wrapped];
     }
 
-    protected function activityHeat(array $groupIds, int $sinceSeconds): array
+    protected function activityHeat(array $groupIds, int $sinceSeconds): ?array
     {
+        if ($this->heatUnknown) {
+            return null;
+        }
         $out = [];
         foreach ($groupIds as $groupId) {
             if (isset($this->actives[$groupId])) {
