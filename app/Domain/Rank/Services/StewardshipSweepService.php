@@ -119,6 +119,12 @@ class StewardshipSweepService
             $groupIds[] = $c->group_id;
         }
         $activesByGroup = $this->activityHeat($groupIds, self::ACTIVITY_WINDOW_SECONDS);
+        if ($activesByGroup === null) {
+            // The moderated posts could not be read, so no poster count can
+            // be trusted: mint no credit, and leave the cursor where it is so
+            // the next run covers these communities. Logged by the read.
+            return;
+        }
 
         $period     = $this->isoPeriod();
         $maxGroupId = $afterGroupId;
@@ -219,14 +225,21 @@ class StewardshipSweepService
     }
 
     /**
-     * groupId => distinct active posters in the window.
+     * groupId => distinct active posters in the window. Posts moderation has
+     * hidden are not counted (GroupActivityHeatService::hiddenActIds()).
+     * Null when those could not be read: the run then mints no credit.
      *
      * @param list<int> $groupIds
-     * @return array<int, int>
+     * @return array<int, int>|null
      */
-    protected function activityHeat(array $groupIds, int $sinceSeconds): array
+    protected function activityHeat(array $groupIds, int $sinceSeconds): ?array
     {
-        $heat = \BCC\Core\Repositories\PeepSoGroupRepository::getActivityHeat($groupIds, $sinceSeconds);
+        $hidden = \BCC\Trust\Core\Services\GroupActivityHeatService::hiddenActIds();
+        if ($hidden === null) {
+            return null;
+        }
+
+        $heat = \BCC\Core\Repositories\PeepSoGroupRepository::getActivityHeat($groupIds, $sinceSeconds, $hidden);
         $out  = [];
         foreach ($heat as $groupId => $row) {
             $out[(int) $groupId] = (int) $row->actives;

@@ -117,8 +117,8 @@ if (!defined('ABSPATH')) {
  *   chain_tag: string|null,
  *   trust_min: int|null,
  *   viewer_is_member: bool,
- *   posts_last_7d: int,
- *   active_members_7d?: int,
+ *   posts_last_7d: int|null,
+ *   active_members_7d?: int|null,
  *   can_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
  *   can_request_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
  *   viewer_membership_status?: string|null
@@ -1076,8 +1076,10 @@ final class CardViewService
         $chainTag    = $groupData['chain_tag'];
         $imageUrl    = $groupData['image_url'];
         $memberCount = $groupData['member_count'];
+        // Null when the moderated posts could not be read: no Posts or
+        // Active stat then, never a guessed number (GroupActivityHeatService).
         $posts7d     = $groupData['posts_last_7d'];
-        $actives     = (int) ($groupData['active_members_7d'] ?? 0);
+        $actives     = $groupData['active_members_7d'] ?? null;
         // Defensive: membership is only meaningful for authed viewers.
         $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
 
@@ -1185,16 +1187,21 @@ final class CardViewService
             // difference between a room and a mailing list. Window is 7d
             // rather than 30d because it rides free on that query; the
             // label deliberately omits the duration.
-            'stats'               => [
+            //
+            // Both counts exclude moderated posts. When those could not be
+            // read, the two stats are left out rather than shown as a guess.
+            'stats'               => array_values(array_filter([
                 ['key' => 'members',  'label' => 'Members',    'value' => (string) $memberCount, 'raw' => $memberCount, 'format' => 'count'],
-                ['key' => 'posts_7d', 'label' => 'Posts (7d)', 'value' => (string) $posts7d,     'raw' => $posts7d,     'format' => 'count'],
-                ['key' => 'active',   'label' => 'Active',     'value' => (string) $actives,     'raw' => $actives,     'format' => 'count'],
+                $posts7d === null ? null
+                    : ['key' => 'posts_7d', 'label' => 'Posts (7d)', 'value' => (string) $posts7d, 'raw' => $posts7d, 'format' => 'count'],
+                $actives === null ? null
+                    : ['key' => 'active',   'label' => 'Active',     'value' => (string) $actives, 'raw' => $actives, 'format' => 'count'],
                 // Access is a word, not a number — but it answers "can I
                 // get in?", which is the first thing anyone asks of a
                 // community. Server-rendered so the client never derives
                 // the gate (§A2).
                 ['key' => 'access',   'label' => 'Access',     'value' => self::communityAccessLabel($groupData), 'format' => 'text'],
-            ],
+            ], static fn (?array $stat): bool => $stat !== null)),
             'permissions'         => self::communityPermissions(),
             'social_proof'        => null,
             'links'               => ['self' => CardUrlMap::groupUrl($groupData['type'], $slug)],
