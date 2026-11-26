@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\NotificationRepository;
+use BCC\Trust\Core\REST\DigestUnsubscribeEndpoint;
 use BCC\Trust\Core\Services\DigestScheduler;
 use BCC\Trust\Core\Services\DigestService;
 use BCC\Trust\Core\Support\DigestSettings;
@@ -49,6 +50,7 @@ final class EmailDigestAdminControlsTest extends TestCase
     private static function member(int $id, int $n = 1): void
     {
         $GLOBALS['__dg_optins'][] = $id;
+        $GLOBALS['__dg_digest_prefs'][$id]['bcc_notif_pref_email_digest'] = '1';
         $GLOBALS['__dg_users'][$id] = 'm' . $id . '@example.test';
         $GLOBALS['__dg_unread'][$id] = $n > 0
             ? array_map(static fn ($i) => self::unread('note ' . $i), range(1, $n))
@@ -307,6 +309,60 @@ final class EmailDigestAdminControlsTest extends TestCase
         self::assertSame('manual', $run['trigger']);
     }
 
+    public function testUnsubscribingDuringTheRunSkipsAnAlreadyListedRecipient(): void
+    {
+        self::member(1);
+        self::member(2);
+        $GLOBALS['__dg_query_url'] = true;
+        $preview = self::service()->previewFor(2);
+        self::assertNotNull($preview);
+        self::assertSame(1, preg_match('/https:\/\/[^\s]*rest_route=[^\s]+/', $preview['body'], $links));
+        parse_str((string) parse_url($links[0], PHP_URL_QUERY), $params);
+        self::assertSame('/bcc/v1/digest/unsubscribe', $params['rest_route']);
+
+        $GLOBALS['__dg_after_mail'] = static function () use ($params): void {
+            $endpoint = new DigestUnsubscribeEndpoint();
+            foreach ([1, 2] as $_) {
+                $response = $endpoint->handle(new \WP_REST_Request($params));
+                self::assertSame(200, $response->status);
+                self::assertSame('no-store', $response->headers['Cache-Control']);
+            }
+        };
+
+        self::assertSame(1, self::service()->sendWeeklyDigest());
+        self::assertSame(['m1@example.test'], self::recipients());
+        self::assertSame(1, DigestSettings::runs()[0]['excluded']);
+        self::assertSame('0', get_user_meta(2, 'bcc_notif_pref_email_digest', true));
+        self::assertSame(1, self::service()->sendWeeklyDigest());
+        self::assertSame(['m1@example.test', 'm1@example.test'], self::recipients());
+    }
+
+    public function testUnreadableOptInPreventsSending(): void
+    {
+        self::member(1);
+        $GLOBALS['__dg_gate_fail'] = true;
+
+        self::assertSame(0, self::service()->sendWeeklyDigest());
+        self::assertSame([], self::recipients());
+        self::assertSame(1, DigestSettings::runs()[0]['excluded']);
+    }
+
+    public function testUnsubscribeReportsFailureIfTheFlagWasNotSaved(): void
+    {
+        self::member(1);
+        $GLOBALS['__dg_preference_write_fails'] = true;
+        $expiry = time() + 60;
+
+        $response = (new DigestUnsubscribeEndpoint())->handle(new \WP_REST_Request([
+            'uid' => 1,
+            'exp' => $expiry,
+            'sig' => hash_hmac('sha256', '1|' . $expiry, wp_salt('auth')),
+        ]));
+
+        self::assertSame(503, $response->status);
+        self::assertSame('1', get_user_meta(1, 'bcc_notif_pref_email_digest', true));
+    }
+
     public function testMaxItemsCapsTheEmailAndNotesTheOverflow(): void
     {
         DigestSettings::save(['max_items' => 5]);
@@ -339,6 +395,9 @@ final class EmailDigestAdminControlsTest extends TestCase
         self::assertSame(DigestService::RESULT_SENT, self::service()->sendTestTo(7));
         self::assertSame(['admin@example.test'], self::recipients());
         self::assertStringStartsWith('[TEST] ', $GLOBALS['__dg_mail'][0]['subject']);
+        $mail = $GLOBALS['__dg_mail'][0];
+        self::assertStringContainsString('Unsubscribe (one click): ', $mail['body']);
+        self::assertStringContainsString('digest/unsubscribe?uid=7', $mail['body']);
         self::assertSame([], DigestSettings::runs(), 'a test is not a run');
     }
 }

@@ -253,7 +253,9 @@ final class NotificationPrefs
         if ($userId <= 0) {
             return false;
         }
-        return self::flag($userId, 'email_digest');
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->hasUserMetaOptIn($userId, self::META_PREFIX . 'email_digest');
     }
 
     /**
@@ -354,12 +356,18 @@ final class NotificationPrefs
      * flip just `email_digest` without round-tripping through the full
      * partial-write surface.
      */
-    public static function setEmailDigest(int $userId, bool $enabled): void
+    public static function setEmailDigest(int $userId, bool $enabled): bool
     {
         if ($userId <= 0) {
-            return;
+            return false;
         }
-        self::writeFlag($userId, 'email_digest', $enabled);
+
+        $metaKey = self::META_PREFIX . 'email_digest';
+        $value = $enabled ? '1' : '0';
+        // WordPress returns false both for a failed write and an identical
+        // value. Only acknowledge the latter if the explicit value is present.
+        return update_user_meta($userId, $metaKey, $value) !== false
+            || get_user_meta($userId, $metaKey, true) === $value;
     }
 
     /**

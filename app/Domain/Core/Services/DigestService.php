@@ -68,6 +68,7 @@ final class DigestService
     public const RESULT_NO_UNREAD = 'no_unread';
     public const RESULT_NO_EMAIL  = 'no_email';
     public const RESULT_FAILED    = 'failed';
+    private const RESULT_EXCLUDED = 'excluded';
 
     public const TRIGGER_CRON   = 'cron';
     public const TRIGGER_MANUAL = 'manual';
@@ -100,7 +101,7 @@ final class DigestService
 
         $counts = [
             'opted_in'             => 0,
-            'excluded'             => 0,
+            self::RESULT_EXCLUDED  => 0,
             self::RESULT_SENT      => 0,
             self::RESULT_NO_UNREAD => 0,
             self::RESULT_NO_EMAIL  => 0,
@@ -118,7 +119,7 @@ final class DigestService
                 $counts['opted_in']++;
 
                 if (self::isExcluded($userId)) {
-                    $counts['excluded']++;
+                    $counts[self::RESULT_EXCLUDED]++;
                     continue;
                 }
                 try {
@@ -142,7 +143,7 @@ final class DigestService
             'finished_at' => time(),
             'trigger'     => $trigger === self::TRIGGER_MANUAL ? self::TRIGGER_MANUAL : self::TRIGGER_CRON,
             'opted_in'    => $counts['opted_in'],
-            'excluded'    => $counts['excluded'],
+            'excluded'    => $counts[self::RESULT_EXCLUDED],
             'sent'        => $counts[self::RESULT_SENT],
             'no_unread'   => $counts[self::RESULT_NO_UNREAD],
             'no_email'    => $counts[self::RESULT_NO_EMAIL],
@@ -238,12 +239,17 @@ final class DigestService
                 return self::RESULT_NO_UNREAD;
             }
             // A test with nothing unread still proves delivery.
+            $unsubscribeUrl = $this->buildUnsubscribeUrl($userId);
             $message = [
                 'subject' => 'Your weekly Floor digest — 0 notifications',
-                'body'    => self::emptyTestBody(),
+                'body'    => self::emptyTestBody() . self::unsubscribeFooter($unsubscribeUrl),
                 'count'   => 0,
-                'unsub'   => $this->buildUnsubscribeUrl($userId),
+                'unsub'   => $unsubscribeUrl,
             ];
+        }
+
+        if (!$test && !NotificationPrefs::isEmailDigestEnabled($userId)) {
+            return self::RESULT_EXCLUDED;
         }
 
         $subject = $test ? '[TEST] ' . $message['subject'] : $message['subject'];
@@ -321,6 +327,11 @@ final class DigestService
             . "digest would not be sent to you this week.\n";
     }
 
+    private static function unsubscribeFooter(string $unsubscribeUrl): string
+    {
+        return "\n---\nDon't want these emails? Unsubscribe (one click): " . $unsubscribeUrl . "\n";
+    }
+
     /**
      * Compose the plain-text body. Format:
      *
@@ -375,15 +386,12 @@ final class DigestService
             "Hey @%s,\n\n"
             . "Here's what happened on the Floor this past week:\n\n"
             . "%s%s\n\n"
-            . "See it all: %s\n\n"
-            . "---\n"
-            . "Don't want these emails? Unsubscribe (one click): %s\n",
+            . "See it all: %s\n",
             $handle,
             $bullets,
             $overflowNote,
-            $floorUrl,
-            $unsubUrl
-        );
+            $floorUrl
+        ) . self::unsubscribeFooter($unsubUrl);
     }
 
     /**
@@ -396,15 +404,15 @@ final class DigestService
         $payload = $userId . '|' . $exp;
         $sig   = hash_hmac('sha256', $payload, wp_salt('auth'));
 
-        $params = http_build_query([
+        $params = [
             'uid' => $userId,
             'exp' => $exp,
             'sig' => $sig,
-        ]);
+        ];
 
         // Land directly on the WP REST endpoint — it returns an HTML
         // confirmation page so the user doesn't need a frontend round-trip.
-        return rest_url('bcc/v1/digest/unsubscribe') . '?' . $params;
+        return add_query_arg($params, rest_url('bcc/v1/digest/unsubscribe'));
     }
 
     /**

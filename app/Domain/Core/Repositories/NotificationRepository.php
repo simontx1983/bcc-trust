@@ -409,6 +409,26 @@ final class NotificationRepository
     }
 
     /**
+     * Read one opt-in directly before mail dispatch so an opted-out user
+     * cannot remain eligible through a batch snapshot or a cached preference.
+     */
+    public function hasUserMetaOptIn(int $userId, string $metaKey): bool
+    {
+        global $wpdb;
+
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$wpdb->usermeta}
+              WHERE user_id = %d AND meta_key = %s AND meta_value = %s
+              LIMIT 1",
+            $userId,
+            $metaKey,
+            '1'
+        ));
+
+        return $wpdb->last_error === '' && (string) $value === '1';
+    }
+
+    /**
      * How many users have $metaKey = '1'. Admin display only. Null when the
      * read fails — a DB error must not display as "0 members".
      */
