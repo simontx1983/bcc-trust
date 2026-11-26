@@ -35,6 +35,17 @@
 declare(strict_types=1);
 
 namespace {
+    if (!class_exists('WP_Post', false)) {
+        class WP_Post
+        {
+            public string $post_type = 'peepso-page';
+
+            public function __construct(public int $post_author)
+            {
+            }
+        }
+    }
+
     // F-334: what a failed wp_update_post(..., true) returns.
     if (!class_exists('WP_Error', false)) {
         class WP_Error
@@ -493,6 +504,16 @@ namespace BCC\Core\Log {
  * page-claim-dispatch-stubs.php uses for PagesEndpoint.
  */
 namespace BCC\Trust\Core\Integration {
+    function current_user_can(string $capability, int $postId): bool
+    {
+        return $capability === 'edit_post' && isset($GLOBALS['__bcc_drain']['on_post_update']);
+    }
+
+    function get_post_meta(int $postId, string $key, bool $single): int
+    {
+        return $GLOBALS['__bcc_drain']['page_owner_meta'][$postId] ?? 0;
+    }
+
     if (!function_exists('BCC\Trust\Core\Integration\get_post_field')) {
         /**
          * @param  int|string $postId
@@ -521,6 +542,9 @@ namespace BCC\Trust\Core\Integration {
             }
             $id = (int) ($post['ID'] ?? 0);
             $GLOBALS['__bcc_drain']['post_author'][$id] = (int) ($post['post_author'] ?? 0);
+            if (isset($GLOBALS['__bcc_drain']['on_post_update'])) {
+                ($GLOBALS['__bcc_drain']['on_post_update'])($id, new \WP_Post((int) ($post['post_author'] ?? 0)), true);
+            }
 
             return $id;
         }

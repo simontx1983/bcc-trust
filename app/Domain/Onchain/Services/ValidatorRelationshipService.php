@@ -27,9 +27,9 @@ if (!defined('ABSPATH')) {
  *   (only after a COMMIT) → RELEASE vrl (finally)
  *
  * A lock that cannot be taken means no write (503). Only claim rows and log
- * rows are written inside the transaction; the page OWNERSHIP move (PeepSo
- * owner role, post_author, score rows) is left to the PageOwnershipAligner,
- * scheduled after COMMIT and run asynchronously with no current user.
+ * rows are written inside the transaction. Revocation releases ownership
+ * after COMMIT. The PageOwnershipAligner retries page releases and applies
+ * deferred ownership transfers.
  *
  * ## D3 (permanent)
  *
