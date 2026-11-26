@@ -185,6 +185,21 @@ final class ValidatorRelationshipLogRepository
     }
 
     /**
+     * Staff evidence for the selected validator claim. Keep all log-table
+     * access in this canonical reader/writer; a page may bind several validators.
+     * @return array<string,mixed>|null
+     */
+    public static function latestOwnerLink(int $userId, int $validatorId): ?array
+    {
+        global $wpdb;
+        $row = self::runReadRow($wpdb->prepare('SELECT ' . self::COLUMNS . ' FROM ' . self::table() . "
+            WHERE action = 'owner_linked' AND subject_user_id = %d
+              AND JSON_VALID(payload) AND JSON_EXTRACT(payload, '$.validator_id') = %d
+            ORDER BY seq DESC LIMIT 1", $userId, $validatorId), __FUNCTION__, true);
+        return $row === null ? null : get_object_vars($row);
+    }
+
+    /**
      * The hash input of a stored row, so a row read back can be re-hashed.
      *
      * @param LogRow $row

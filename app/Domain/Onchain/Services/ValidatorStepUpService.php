@@ -115,8 +115,8 @@ final class ValidatorStepUpService
             'resend_after'   => $code === null ? null : gmdate('Y-m-d H:i:s', $now + self::RESEND_SECONDS),
         ]);
 
-        if ($code !== null) {
-            self::mailCode($actorId, $code, $action);
+        if ($code !== null && !self::mailCode($actorId, $code, $action)) {
+            return self::fail('mail_unavailable', 503);
         }
         AuditLogger::log('validator_step_up_started', $pageId, ['action' => $action, 'target_user_id' => $targetUserId], 'page', $actorId);
 
@@ -163,7 +163,9 @@ final class ValidatorStepUpService
         )) {
             return self::fail('resend_not_allowed', 409);
         }
-        self::mailCode($actorId, $code, (string) $row->action);
+        if (!self::mailCode($actorId, $code, (string) $row->action)) {
+            return self::fail('mail_unavailable', 503);
+        }
 
         return ['ok' => true, 'expires_in' => $expires - $now, 'resend_after' => self::RESEND_SECONDS];
     }
@@ -264,12 +266,11 @@ final class ValidatorStepUpService
         return preg_match('/^[0-9a-f]{32}$/', $stepUpId) === 1;
     }
 
-    private static function mailCode(int $actorId, string $code, string $action): void
+    private static function mailCode(int $actorId, string $code, string $action): bool
     {
         $user = get_userdata($actorId);
-        if ($user instanceof \WP_User) {
-            AuthMailer::sendValidatorStepUpCode((string) $user->user_email, $code, self::ACTION_LABELS[$action] ?? 'a validator change');
-        }
+        return $user instanceof \WP_User
+            && AuthMailer::sendValidatorStepUpCode((string) $user->user_email, $code, self::ACTION_LABELS[$action] ?? 'a validator change');
     }
 
     private static function recordFailure(int $actorId, string $action, int $pageId, int $targetUserId, string $reason, string $logAction = 'step_up_failed'): void

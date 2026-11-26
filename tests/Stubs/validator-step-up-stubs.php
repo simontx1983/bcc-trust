@@ -24,6 +24,7 @@ namespace {
 
     final class StepUpWorld
     {
+        public static bool $mailAccepted = true;
         public static ?bool $hasPassword = true;
         public static string $credential = 'password';
         /** @var array<string, bool> limiter key prefix => allowed */
@@ -40,6 +41,7 @@ namespace {
 
         public static function reset(): void
         {
+            self::$mailAccepted = true;
             self::$hasPassword = true;
             self::$credential  = 'password';
             self::$limits      = [];
@@ -105,9 +107,10 @@ namespace BCC\Trust\Core\Services {
     if (!class_exists(__NAMESPACE__ . '\\AuthMailer', false)) {
         final class AuthMailer
         {
-            public static function sendValidatorStepUpCode(string $to, string $code, string $label): void
+            public static function sendValidatorStepUpCode(string $to, string $code, string $label): bool
             {
                 \StepUpWorld::$mails[] = [$to, $code, $label];
+                return \StepUpWorld::$mailAccepted;
             }
         }
     }

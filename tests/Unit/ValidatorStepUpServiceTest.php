@@ -46,6 +46,26 @@ final class ValidatorStepUpServiceTest extends TestCase
         return [$r['step_up_id'], $mail[1]];
     }
 
+    public function testMailFailureDoesNotIssueAUsableStartResponse(): void
+    {
+        \StepUpWorld::$mailAccepted = false;
+
+        $result = S::start(self::request(), self::STAFF, 'link_owner', 501, 900, 'owner');
+
+        self::assertSame(['ok' => false, 'error' => 'mail_unavailable', 'status' => 503], $result);
+        self::assertSame([], \StepUpWorld::$audits);
+    }
+
+    public function testMailFailureDoesNotClaimAResendSucceeded(): void
+    {
+        [$id] = self::startLink();
+        \StepUpWorld::$rows[$id]->resend_after = gmdate('Y-m-d H:i:s', time() - 1);
+        \StepUpWorld::$mailAccepted = false;
+
+        self::assertSame(['ok' => false, 'error' => 'mail_unavailable', 'status' => 503], S::resend(self::STAFF, $id));
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+    }
+
     public function testAnOwnerChangeEmailsACodeAndReturnsOnlyAnOpaqueId(): void
     {
         $r = S::start(self::request(), self::STAFF, 'link_owner', 501, 900, 'owner');
