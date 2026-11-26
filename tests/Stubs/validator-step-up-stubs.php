@@ -38,6 +38,7 @@ namespace {
         /** @var list<string> */
         public static array $audits = [];
         public static string $now = '';
+        public static ?\Closure $beforeMarkCodeVerified = null;
 
         public static function reset(): void
         {
@@ -49,6 +50,7 @@ namespace {
             self::$mails       = [];
             self::$logRows     = [];
             self::$audits      = [];
+            self::$beforeMarkCodeVerified = null;
         }
     }
 
@@ -193,10 +195,15 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
-            public static function markCodeVerified(string $id, int $userId, string $now): bool
+            public static function markCodeVerified(string $id, int $userId, string $now, string $expectedCodeHash): bool
             {
+                $before = \StepUpWorld::$beforeMarkCodeVerified;
+                \StepUpWorld::$beforeMarkCodeVerified = null;
+                if ($before !== null) {
+                    $before($id);
+                }
                 $row = self::find($id, $userId);
-                if ($row === null || $row->code_hash === null || $row->code_verified_at !== null || $row->used_at !== null
+                if ($row === null || $row->code_hash !== $expectedCodeHash || $row->code_verified_at !== null || $row->used_at !== null
                     || strcmp((string) $row->expires_at, $now) <= 0 || $row->attempts > self::MAX_ATTEMPTS
                 ) {
                     return false;

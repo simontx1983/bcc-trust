@@ -434,7 +434,9 @@ final class ValidatorRelationshipService
             return ['result' => $result, 'appended' => $appended, 'user_id' => $link['user_id']];
         }, static function (array $done) use ($staffId, $pageId, $linkId, $reason, $logAction): array {
             self::safely('audit', static fn () => AuditLogger::log('validator_' . $logAction, $pageId, ['user_id' => $done['user_id'], 'link_id' => $linkId, 'reason' => $reason], 'page', $staffId));
-            self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, false));
+            // Existing page access checks can still depend on the stored
+            // owner. Release now, and keep the aligner as a retry.
+            self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, true));
             foreach ($done['result']['mirror_page_ids'] as $lostPage) {
                 self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule((int) $lostPage));
             }

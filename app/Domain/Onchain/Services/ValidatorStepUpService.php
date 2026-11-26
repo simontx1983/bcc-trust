@@ -200,17 +200,21 @@ final class ValidatorStepUpService
             // A password-only step-up, which an owner-level action never is.
             return in_array((string) $row->action, self::ACTIONS_WITH_CODE, true) ? 'step_up_invalid' : null;
         }
+        $expectedCodeHash = $row->code_hash;
         if ($code === null || preg_match('/^\d{6}$/', $code) !== 1
-            || !hash_equals((string) $row->code_hash, self::codeHash($stepUpId, $code))
+            || !hash_equals($expectedCodeHash, self::codeHash($stepUpId, $code))
         ) {
             self::recordFailure($actorId, (string) $row->action, (int) $row->page_id, (int) $row->target_user_id, 'code_invalid');
             return 'code_invalid';
         }
-        if (!StepUps::markCodeVerified($stepUpId, $actorId, $now)) {
+        if (!StepUps::markCodeVerified($stepUpId, $actorId, $now, $expectedCodeHash)) {
             // Already recorded by an earlier check of this code (a retried
             // action) is fine; a step-up that died in between is not.
             $row = StepUps::find($stepUpId, $actorId);
-            if ($row === null || $row->code_verified_at === null || $row->used_at !== null) {
+            if ($row === null || $row->code_hash === null || !hash_equals($expectedCodeHash, $row->code_hash)
+                || $row->code_verified_at === null || $row->used_at !== null
+                || strcmp($row->expires_at, gmdate('Y-m-d H:i:s')) <= 0 || (int) $row->attempts > StepUps::MAX_ATTEMPTS
+            ) {
                 return 'step_up_invalid';
             }
         }
