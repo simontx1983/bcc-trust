@@ -385,7 +385,7 @@ final class NotificationRepository
 
         /** @var list<numeric-string>|null $rows */
         $rows = $wpdb->get_col($wpdb->prepare(
-            "SELECT user_id FROM {$wpdb->usermeta}
+            "SELECT DISTINCT user_id FROM {$wpdb->usermeta}
               WHERE meta_key = %s AND meta_value = %s AND user_id > %d
               ORDER BY user_id ASC
               LIMIT %d",
@@ -409,23 +409,22 @@ final class NotificationRepository
     }
 
     /**
-     * Read one opt-in directly before mail dispatch so an opted-out user
-     * cannot remain eligible through a batch snapshot or a cached preference.
+     * Read the current preference without using the metadata cache.
+     * Conflicting values cannot confirm consent or a saved opt-out.
      */
-    public function hasUserMetaOptIn(int $userId, string $metaKey): bool
+    public function hasUserMetaFlag(int $userId, string $metaKey, bool $enabled): bool
     {
         global $wpdb;
 
-        $value = $wpdb->get_var($wpdb->prepare(
-            "SELECT 1 FROM {$wpdb->usermeta}
-              WHERE user_id = %d AND meta_key = %s AND meta_value = %s
-              LIMIT 1",
+        $values = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT CAST(meta_value AS BINARY) FROM {$wpdb->usermeta}
+              WHERE user_id = %d AND meta_key = %s
+              LIMIT 2",
             $userId,
-            $metaKey,
-            '1'
+            $metaKey
         ));
 
-        return $wpdb->last_error === '' && (string) $value === '1';
+        return $wpdb->last_error === '' && $values === [$enabled ? '1' : '0'];
     }
 
     /**
@@ -442,7 +441,7 @@ final class NotificationRepository
 
         $wpdb->last_error = '';
         $n = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s",
+            "SELECT COUNT(DISTINCT user_id) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s",
             $metaKey,
             '1'
         ));

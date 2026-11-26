@@ -50,7 +50,7 @@ final class EmailDigestAdminControlsTest extends TestCase
     private static function member(int $id, int $n = 1): void
     {
         $GLOBALS['__dg_optins'][] = $id;
-        $GLOBALS['__dg_digest_prefs'][$id]['bcc_notif_pref_email_digest'] = '1';
+        $GLOBALS['__dg_digest_prefs'][$id]['bcc_notif_pref_email_digest'] = ['1'];
         $GLOBALS['__dg_users'][$id] = 'm' . $id . '@example.test';
         $GLOBALS['__dg_unread'][$id] = $n > 0
             ? array_map(static fn ($i) => self::unread('note ' . $i), range(1, $n))
@@ -361,6 +361,49 @@ final class EmailDigestAdminControlsTest extends TestCase
 
         self::assertSame(503, $response->status);
         self::assertSame('1', get_user_meta(1, 'bcc_notif_pref_email_digest', true));
+    }
+
+    public function testConflictingPreferencesDoNotConfirmConsentOrUnsubscribe(): void
+    {
+        self::member(1);
+        $GLOBALS['__dg_digest_prefs'][1]['bcc_notif_pref_email_digest'] = ['0', '1'];
+        $GLOBALS['__dg_preference_write_fails'] = true;
+        $expiry = time() + 60;
+
+        $response = (new DigestUnsubscribeEndpoint())->handle(new \WP_REST_Request([
+            'uid' => 1,
+            'exp' => $expiry,
+            'sig' => hash_hmac('sha256', '1|' . $expiry, wp_salt('auth')),
+        ]));
+
+        self::assertSame(503, $response->status);
+        self::assertSame(0, self::service()->sendWeeklyDigest());
+        self::assertSame([], self::recipients());
+        self::assertSame(1, DigestSettings::runs()[0]['excluded']);
+    }
+
+    public function testDuplicateOptInRowsDispatchOnlyOnceAndCanBeUnsubscribedTwice(): void
+    {
+        self::member(1);
+        $GLOBALS['__dg_optins'][] = 1;
+        $GLOBALS['__dg_digest_prefs'][1]['bcc_notif_pref_email_digest'] = ['1', '1'];
+
+        self::assertSame(1, \BCC\Trust\Core\Support\NotificationPrefs::countEmailDigestOptIns());
+        self::assertSame(1, self::service()->sendWeeklyDigest());
+        self::assertSame(['m1@example.test'], self::recipients());
+        $expiry = time() + 60;
+        $request = new \WP_REST_Request([
+            'uid' => 1,
+            'exp' => $expiry,
+            'sig' => hash_hmac('sha256', '1|' . $expiry, wp_salt('auth')),
+        ]);
+        $endpoint = new DigestUnsubscribeEndpoint();
+
+        self::assertSame(200, $endpoint->handle($request)->status);
+        self::assertSame(200, $endpoint->handle($request)->status);
+        self::assertSame(['0', '0'], get_user_meta(1, 'bcc_notif_pref_email_digest'));
+        self::assertSame(0, self::service()->sendWeeklyDigest());
+        self::assertSame(['m1@example.test'], self::recipients());
     }
 
     public function testMaxItemsCapsTheEmailAndNotesTheOverflow(): void

@@ -102,10 +102,25 @@ if (!class_exists('DigestFakeWpdb')) {
         public function get_col(string $sql): array
         {
             $this->queries[] = $sql;
+            if (str_contains($sql, 'SELECT DISTINCT CAST(meta_value AS BINARY)')) {
+                if (!empty($GLOBALS['__dg_gate_fail'])) {
+                    $this->last_error = 'simulated read failure';
+                    return [];
+                }
+
+                $this->last_error = '';
+                $id = (int) ($this->args[0] ?? 0);
+                $key = (string) ($this->args[1] ?? '');
+                return array_slice(array_values(array_unique($GLOBALS['__dg_digest_prefs'][$id][$key] ?? [])), 0, 2);
+            }
+
             // findUserIdsByMetaFlag: (metaKey, '1', afterUserId, limit)
             $after = (int) ($this->args[2] ?? 0);
             $limit = (int) ($this->args[3] ?? 0);
             $ids   = array_values(array_filter($GLOBALS['__dg_optins'], static fn (int $id) => $id > $after));
+            if (str_contains($sql, 'SELECT DISTINCT user_id')) {
+                $ids = array_values(array_unique($ids));
+            }
             sort($ids);
             return array_map('strval', array_slice($ids, 0, $limit));
         }
@@ -137,20 +152,13 @@ if (!class_exists('DigestFakeWpdb')) {
 
         public function get_var(string $sql)
         {
-            if (str_contains($sql, 'SELECT 1')) {
-                if (!empty($GLOBALS['__dg_gate_fail'])) {
-                    $this->last_error = 'simulated read failure';
-                    return null;
-                }
-
-                $this->last_error = '';
-                return in_array((int) ($this->args[0] ?? 0), $GLOBALS['__dg_optins'], true) ? '1' : null;
-            }
             if (!empty($GLOBALS['__dg_count_fail'])) {
                 $this->last_error = 'simulated read failure';
                 return null;
             }
-            return (string) count($GLOBALS['__dg_optins']);
+            return (string) count(str_contains($sql, 'COUNT(DISTINCT user_id)')
+                ? array_unique($GLOBALS['__dg_optins'])
+                : $GLOBALS['__dg_optins']);
         }
     }
 }
@@ -193,16 +201,18 @@ if (!function_exists('get_user_meta')) {
         if ($key === 'bcc_handle') {
             return 'handle' . $id;
         }
-        return $GLOBALS['__dg_digest_prefs'][$id][$key] ?? '';
+        $values = $GLOBALS['__dg_digest_prefs'][$id][$key] ?? [];
+        return $single ? ($values[0] ?? '') : $values;
     }
 }
 if (!function_exists('update_user_meta')) {
     function update_user_meta(int $id, string $key, string $value): bool
     {
-        if (!empty($GLOBALS['__dg_preference_write_fails']) || get_user_meta($id, $key, true) === $value) {
+        $values = $GLOBALS['__dg_digest_prefs'][$id][$key] ?? [];
+        if (!empty($GLOBALS['__dg_preference_write_fails']) || array_values(array_unique($values)) === [$value]) {
             return false;
         }
-        $GLOBALS['__dg_digest_prefs'][$id][$key] = $value;
+        $GLOBALS['__dg_digest_prefs'][$id][$key] = array_fill(0, max(1, count($values)), $value);
         if ($key === 'bcc_notif_pref_email_digest' && $value === '0') {
             $GLOBALS['__dg_optins'] = array_values(array_filter($GLOBALS['__dg_optins'], static fn (int $candidate): bool => $candidate !== $id));
         }

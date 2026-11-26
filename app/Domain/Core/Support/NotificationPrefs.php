@@ -255,7 +255,7 @@ final class NotificationPrefs
         }
         return \BCC\Trust\Core\Plugin::instance()
             ->notificationRepository()
-            ->hasUserMetaOptIn($userId, self::META_PREFIX . 'email_digest');
+            ->hasUserMetaFlag($userId, self::META_PREFIX . 'email_digest', true);
     }
 
     /**
@@ -362,12 +362,13 @@ final class NotificationPrefs
             return false;
         }
 
-        $metaKey = self::META_PREFIX . 'email_digest';
-        $value = $enabled ? '1' : '0';
         // WordPress returns false both for a failed write and an identical
-        // value. Only acknowledge the latter if the explicit value is present.
-        return update_user_meta($userId, $metaKey, $value) !== false
-            || get_user_meta($userId, $metaKey, true) === $value;
+        // value. Confirm the persisted state, including duplicate rows.
+        $metaKey = self::META_PREFIX . 'email_digest';
+        update_user_meta($userId, $metaKey, $enabled ? '1' : '0');
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->hasUserMetaFlag($userId, $metaKey, $enabled);
     }
 
     /**
