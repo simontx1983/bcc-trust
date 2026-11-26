@@ -11,16 +11,34 @@ declare(strict_types=1);
  * whole unit run.
  *
  * State lives in $GLOBALS['__f521']: `calls` (the recorded calls in order),
- * `revoke_throws` and `chain_id`.
+ * `revoke_throws` and `chain_id`; C1b-2: `current_user` (what
+ * get_current_user_id() answers), `initiator` (what initiatorFor() answers),
+ * `initiator_reads` and `actors` (the actor each revoke was given).
  */
 
 namespace BCC\Trust\Onchain\Services {
+    if (!function_exists(__NAMESPACE__ . '\\get_current_user_id')) {
+        function get_current_user_id(): int
+        {
+            return (int) ($GLOBALS['__f521']['current_user'] ?? 0);
+        }
+    }
+
     if (!class_exists(__NAMESPACE__ . '\\ClaimService', false)) {
         final class ClaimService
         {
-            public static function revokeAllForUser(int $userId, string $reason, ?string $walletAddress = null, ?int $chainId = null): int
+            /** @return array{0: string, 1: int|null} */
+            public static function initiatorFor(int $subjectUserId, int $currentUserId): array
+            {
+                $GLOBALS['__f521']['initiator_reads'][] = [$subjectUserId, $currentUserId];
+
+                return $GLOBALS['__f521']['initiator'] ?? ['system', null];
+            }
+
+            public static function revokeAllForUser(int $userId, string $reason, ?string $walletAddress = null, ?int $chainId = null, string $actorKind = 'system', ?int $actorId = null): int
             {
                 $GLOBALS['__f521']['calls'][] = ['revokeAllForUser', $userId, $reason, $walletAddress, $chainId];
+                $GLOBALS['__f521']['actors'][] = [$actorKind, $actorId];
                 if ($GLOBALS['__f521']['revoke_throws']) {
                     throw new \RuntimeException('revoke failed');
                 }

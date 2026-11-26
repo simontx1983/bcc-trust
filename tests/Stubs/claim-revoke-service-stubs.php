@@ -57,6 +57,10 @@ namespace {
         public static ?int $throwOnCall = null;
         /** @var list<int> F-521: users deleteForUser() purged */
         public static array $deletedFor = [];
+        /** C1b-2: the entity claimEntityStrict() names (non-validator keeps the old revoke path); null = no such claim */
+        public static ?string $entityType = 'collection';
+        /** @var list<int> C1b-2: claim ids claimEntityStrict() read */
+        public static array $entityReads = [];
 
         public static function reset(): void
         {
@@ -81,6 +85,8 @@ namespace {
             self::$idsThrow = null;
             self::$throwOnCall = null;
             self::$deletedFor = [];
+            self::$entityType = 'collection';
+            self::$entityReads = [];
         }
 
         public static function maybeFail(string $step): void
@@ -125,7 +131,16 @@ namespace BCC\Trust\Onchain\Repositories {
                     ?? ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
             }
 
-            /** @return list<int> */
+            /** @return array{user_id: int, entity_type: string, entity_id: int, claim_role: string, status: string, verification_method: string}|null */
+            public static function claimEntityStrict(int $claimId): ?array
+            {
+                \ClaimRevokeWorld::$entityReads[] = $claimId;
+                if (\ClaimRevokeWorld::$entityType === null) {
+                    return null;
+                }
+                return ['user_id' => 0, 'entity_type' => \ClaimRevokeWorld::$entityType, 'entity_id' => 0, 'claim_role' => 'operator', 'status' => 'verified', 'verification_method' => 'wallet'];
+            }
+
             /** @return list<int> */
             public static function verifiedEntityClaimIdsBatch(int $userId, int $limit, ?string $walletAddress = null, ?int $chainId = null): array
             {

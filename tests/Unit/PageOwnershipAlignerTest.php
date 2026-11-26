@@ -138,6 +138,31 @@ final class PageOwnershipAlignerTest extends TestCase
         self::assertSame([self::PAGE, 777, 888], \AlignWorld::$options[A::PENDING], 'the other process\'s page is not dropped');
     }
 
+    /** C1b-2: departed owners' pages are queued, a bounded batch per sweep, the cursor walking and wrapping. */
+    public function testTheDiscoveryPassQueuesDepartedOwnersPagesInBoundedBatches(): void
+    {
+        \AlignWorld::$departedPages = range(1001, 1000 + A::DISCOVERY_BATCH + 3);
+
+        A::discover();
+        self::assertSame(array_merge([self::PAGE], range(1001, 1000 + A::DISCOVERY_BATCH)), A::pending(), 'one batch queued');
+        self::assertSame(1000 + A::DISCOVERY_BATCH, \AlignWorld::$options[A::DISCOVERY_CURSOR], 'the cursor moves on');
+
+        A::discover();
+        self::assertContains(1000 + A::DISCOVERY_BATCH + 3, A::pending(), 'the rest on the next pass');
+        self::assertSame(0, \AlignWorld::$options[A::DISCOVERY_CURSOR], 'a short batch wraps the cursor');
+        self::assertSame([[0, A::DISCOVERY_BATCH], [1000 + A::DISCOVERY_BATCH, A::DISCOVERY_BATCH]], \AlignWorld::$discoveryReads);
+    }
+
+    public function testTheSweepRunsTheDiscoveryPassFirst(): void
+    {
+        \AlignWorld::$departedPages = [2001];
+
+        A::sweep();
+
+        self::assertSame([[0, A::DISCOVERY_BATCH]], \AlignWorld::$discoveryReads);
+        self::assertNotContains(2001, A::pending(), 'queued and then aligned in the same sweep');
+    }
+
     public function testAnUnreadableDepartureNeverSwaps(): void
     {
         \AlignWorld::$desired           = ['state' => 'RESOLVED', 'user_id' => 5];

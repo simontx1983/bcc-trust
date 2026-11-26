@@ -58,6 +58,10 @@ final class PageOwnershipAligner
     public const MAX_PENDING  = 200;
     public const SWEEP_BATCH  = 20;
 
+    /** Validator pages the discovery pass looks at per sweep, and its cursor. */
+    public const DISCOVERY_BATCH  = 20;
+    public const DISCOVERY_CURSOR = 'bcc_validator_align_discovery_cursor';
+
     private const PENDING_LOCK      = 'bcc_validator_pages_to_align';
     private const PENDING_LOCK_WAIT = 5;
 
@@ -117,12 +121,32 @@ final class PageOwnershipAligner
         return $outcome;
     }
 
-    /** Cron (every 15 minutes): retry a bounded batch of pages still to align. */
+    /** Cron: discover departed owners' pages, then retry a bounded batch of pages still to align. */
     public static function sweep(): void
     {
+        self::discover();
         foreach (array_slice(self::pending(), 0, self::SWEEP_BATCH) as $pageId) {
             self::align($pageId);
         }
+    }
+
+    /**
+     * The discovery pass: queue validator pages still authored by an owner
+     * who has DEPARTED (their account is gone, or their owner row on the
+     * page is revoked) and who holds no verified claim bound to the page. So
+     * a page never stays owned by a deleted user even when the deletion's
+     * revoke could not run. A hand-reassigned or legacy page (a living author
+     * who never owned it through a claim) is never queued. Bounded per run;
+     * a cursor walks the pages and wraps.
+     */
+    public static function discover(): void
+    {
+        $after = (int) get_option(self::DISCOVERY_CURSOR, 0);
+        $found = ClaimRepository::pagesOwnedByDepartedAuthors($after, self::DISCOVERY_BATCH);
+        foreach ($found as $pageId) {
+            self::remember($pageId);
+        }
+        update_option(self::DISCOVERY_CURSOR, count($found) < self::DISCOVERY_BATCH ? 0 : (int) end($found), false);
     }
 
     /**

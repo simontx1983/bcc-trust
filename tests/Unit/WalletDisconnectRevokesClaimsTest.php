@@ -28,7 +28,7 @@ final class WalletDisconnectRevokesClaimsTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/wallet-disconnect-revoke-stubs.php';
-        $GLOBALS['__f521'] = ['calls' => [], 'revoke_throws' => false, 'chain_id' => 7];
+        $GLOBALS['__f521'] = ['calls' => [], 'revoke_throws' => false, 'chain_id' => 7, 'current_user' => 0, 'initiator' => ['system', null], 'initiator_reads' => [], 'actors' => []];
     }
 
     public function testTheClaimsAreRevokedBeforeTheRowsArePurged(): void
@@ -42,6 +42,18 @@ final class WalletDisconnectRevokesClaimsTest extends TestCase
             ],
             $GLOBALS['__f521']['calls']
         );
+    }
+
+    /** C1b-2: the initiator is read once, at the boundary, and handed to the revoke. */
+    public function testTheInitiatorIsReadAtTheBoundaryAndPassedToTheRevoke(): void
+    {
+        $GLOBALS['__f521']['current_user'] = 5;
+        $GLOBALS['__f521']['initiator']    = ['member', 5];
+
+        BonusService::handleWalletDisconnect(5, 'cosmoshub', 'cosmos1abc');
+
+        self::assertSame([[5, 5]], $GLOBALS['__f521']['initiator_reads'], 'the subject and the current user');
+        self::assertSame([['member', 5]], $GLOBALS['__f521']['actors']);
     }
 
     /** L4: a deactivated chain still scopes the unlink to that chain. */

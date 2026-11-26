@@ -687,12 +687,24 @@ class ClaimService {
      * ClaimRepository::revoke(), which refuses it.
      *
      * @throws \InvalidArgumentException for a reason outside REVOKE_REASONS
+     * @param array<string, mixed> $payloadExtra added to a validator claim's owner_revoked log payload
      * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure|\RuntimeException
      */
-    public static function revokeClaim(int $claimId, string $reason): bool
+    public static function revokeClaim(int $claimId, string $reason, string $actorKind = 'system', ?int $actorId = null, array $payloadExtra = [], ?string $evidenceNote = null): bool
     {
         if (!in_array($reason, self::REVOKE_REASONS, true)) {
             throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
+        }
+
+        // A VALIDATOR owner claim ends under the relationship lock order with
+        // its log row, naming the initiator; the page move goes to the
+        // aligner. Collection claims keep the path below.
+        $claim = ClaimRepository::claimEntityStrict($claimId);
+        if ($claim === null) {
+            return false;
+        }
+        if ($claim['entity_type'] === 'validator' && in_array($claim['claim_role'], PageClaimRolePolicy::OWNER_ROLES, true)) {
+            return ValidatorRelationshipService::endOwnerClaim($claimId, $reason, $actorKind, $actorId, $payloadExtra, $evidenceNote);
         }
 
         $result = ClaimRepository::revoke($claimId);
@@ -817,7 +829,7 @@ class ClaimService {
      * @throws \InvalidArgumentException for a reason outside REVOKE_REASONS
      * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure|\RuntimeException
      */
-    public static function revokeAllForUser(int $userId, string $reason, ?string $walletAddress = null, ?int $chainId = null): int
+    public static function revokeAllForUser(int $userId, string $reason, ?string $walletAddress = null, ?int $chainId = null, string $actorKind = 'system', ?int $actorId = null): int
     {
         if (!in_array($reason, self::REVOKE_REASONS, true)) {
             throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
@@ -825,7 +837,7 @@ class ClaimService {
 
         $revoked = 0;
         foreach (ClaimRepository::verifiedEntityClaimIdsForUser($userId, $walletAddress, $chainId) as $claimId) {
-            if (self::revokeClaim($claimId, $reason)) {
+            if (self::revokeClaim($claimId, $reason, $actorKind, $actorId)) {
                 ++$revoked;
             }
         }
@@ -839,9 +851,10 @@ class ClaimService {
      * REVOKE_ALL_MAX claims, worked through in batches before an unlink or
      * a deletion. A failed read or revoke throws; earlier revokes stand.
      *
+     * @param array<string, mixed> $payloadExtra added to each validator claim's owner_revoked log payload
      * @return int how many were revoked
      */
-    public static function revokeBatchForUser(int $userId, string $reason, int $limit, ?string $walletAddress = null, ?int $chainId = null): int
+    public static function revokeBatchForUser(int $userId, string $reason, int $limit, ?string $walletAddress = null, ?int $chainId = null, string $actorKind = 'system', ?int $actorId = null, array $payloadExtra = [], ?string $evidenceNote = null): int
     {
         if (!in_array($reason, self::REVOKE_REASONS, true)) {
             throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
@@ -849,7 +862,7 @@ class ClaimService {
 
         $revoked = 0;
         foreach (ClaimRepository::verifiedEntityClaimIdsBatch($userId, $limit, $walletAddress, $chainId) as $claimId) {
-            if (self::revokeClaim($claimId, $reason)) {
+            if (self::revokeClaim($claimId, $reason, $actorKind, $actorId, $payloadExtra, $evidenceNote)) {
                 ++$revoked;
             }
         }
@@ -870,7 +883,7 @@ class ClaimService {
      * rest of the account-deletion cleanup, no failure blocks the WordPress
      * deletion: the rows are still purged.
      */
-    public static function purgeForDeletedUser(int $userId): void
+    public static function purgeForDeletedUser(int $userId, string $actorKind = 'system', ?int $actorId = null): void
     {
         if ($userId <= 0) {
             return;
@@ -889,7 +902,7 @@ class ClaimService {
         $notRevoked = 0;
         foreach ($claimIds as $claimId) {
             try {
-                self::revokeClaim($claimId, 'account_deleted');
+                self::revokeClaim($claimId, 'account_deleted', $actorKind, $actorId);
             } catch (\Throwable $e) {
                 ++$notRevoked;
                 \BCC\Core\Log\Logger::error('[bcc-onchain] account deletion: claim revoke failed', [
@@ -915,6 +928,23 @@ class ClaimService {
             });
         }
         ClaimRepository::deleteForUser($userId);
+    }
+
+    /**
+     * Who is ending a member's claims, as the relationship log names them:
+     * the member themselves, a staff member acting on them, or the system
+     * (cron, CLI: no current user). Read once at the request boundary and
+     * passed down explicitly.
+     *
+     * @return array{0: 'member'|'staff'|'system', 1: int|null}
+     */
+    public static function initiatorFor(int $subjectUserId, int $currentUserId): array
+    {
+        if ($currentUserId <= 0) {
+            return ['system', null];
+        }
+
+        return $currentUserId === $subjectUserId ? ['member', $subjectUserId] : ['staff', $currentUserId];
     }
 
     /** One post-commit step of a revoke: a failure is logged, never thrown. */

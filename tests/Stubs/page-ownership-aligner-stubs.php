@@ -30,6 +30,10 @@ namespace {
         public static array $busyLocks = [];
         /** @var array<string, mixed> the request's option cache (get_option answers from it first) */
         public static array $optionCache = [];
+        /** @var list<int> what the discovery read answers (all pages, ascending) */
+        public static array $departedPages = [];
+        /** @var list<array{int, int}> discovery reads made: [after, limit] */
+        public static array $discoveryReads = [];
         public static bool $swapSkips = false;
         /** @var array<int, int> page => post_author */
         public static array $author = [];
@@ -55,6 +59,8 @@ namespace {
             self::$existenceReadFails = false;
             self::$busyLocks    = [];
             self::$optionCache  = [];
+            self::$departedPages  = [];
+            self::$discoveryReads = [];
             self::$swapSkips    = false;
             self::$author       = [];
             self::$options      = [];
@@ -179,6 +185,14 @@ namespace BCC\Trust\Onchain\Repositories {
                 throw new RepositoryReadFailure(self::class, __FUNCTION__, 'read failed');
             }
             return \AlignWorld::$desired;
+        }
+
+        /** @return list<int> */
+        public static function pagesOwnedByDepartedAuthors(int $afterPageId, int $limit): array
+        {
+            \AlignWorld::$discoveryReads[] = [$afterPageId, $limit];
+            $after = array_values(array_filter(\AlignWorld::$departedPages, static fn (int $p): bool => $p > $afterPageId));
+            return array_slice($after, 0, $limit);
         }
 
         public static function accountExistsStrict(int $userId): bool
