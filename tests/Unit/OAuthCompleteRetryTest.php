@@ -65,9 +65,13 @@ final class OAuthCompleteRetryTest extends TestCase
     }
 
     /** @return array{status: int, data: array<string, mixed>, code: string} */
-    private static function complete(string $handle = 'newcomer', string $token = self::TOKEN): array
+    private static function complete(string $handle = 'newcomer', string $token = self::TOKEN, bool $eligible = true): array
     {
-        $resp = (new OAuthController())->oauthComplete(new \WP_REST_Request(['provider_token' => $token, 'handle' => $handle]));
+        $resp = (new OAuthController())->oauthComplete(new \WP_REST_Request([
+            'provider_token' => $token,
+            'handle' => $handle,
+            'eligibility_token' => $eligible ? AuthSupport::issueSignupEligibilityToken() : null,
+        ]));
         $body = $resp->get_data();
         return [
             'status' => $resp->get_status(),
@@ -83,7 +87,7 @@ final class OAuthCompleteRetryTest extends TestCase
         $users = count($GLOBALS['__bcc_ph']['users']);
         $mails = count($GLOBALS['__bcc_ph']['mail']);
 
-        $retry = self::complete();
+        $retry = self::complete(eligible: false);
 
         self::assertSame(201, $retry['status'], 'was "Session expired."');
         self::assertSame($first['data']['user_id'], $retry['data']['user_id']);
@@ -244,7 +248,12 @@ final class OAuthCompleteRetryTest extends TestCase
     /** @return array{status: int, data: array<string, mixed>, code: string} */
     private static function completeTyping(string $token, string $handle, string $typedEmail): array
     {
-        $resp = (new OAuthController())->oauthComplete(new \WP_REST_Request(['provider_token' => $token, 'handle' => $handle, 'email' => $typedEmail]));
+        $resp = (new OAuthController())->oauthComplete(new \WP_REST_Request([
+            'provider_token' => $token,
+            'handle' => $handle,
+            'email' => $typedEmail,
+            'eligibility_token' => AuthSupport::issueSignupEligibilityToken(),
+        ]));
         $body = $resp->get_data();
         return [
             'status' => $resp->get_status(),

@@ -115,7 +115,12 @@ final class WalletSignupPendingEmailTest extends TestCase
     /** @param array<string, string> $extra */
     private static function signup(array $extra = ['email' => self::TYPED]): \WP_REST_Response
     {
-        $req = new \WP_REST_Request(['wallet_address' => self::ADDR, 'signature' => 'good-sig', 'handle' => 'newhandle'] + $extra);
+        $req = new \WP_REST_Request([
+            'wallet_address' => self::ADDR,
+            'signature' => 'good-sig',
+            'handle' => 'newhandle',
+            'eligibility_token' => AuthSupport::issueSignupEligibilityToken(),
+        ] + $extra);
         return (new WalletAuthController())->walletSignup($req);
     }
 

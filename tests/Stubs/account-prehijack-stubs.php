@@ -226,6 +226,13 @@ namespace {
             {
                 return $this->body;
             }
+
+            /** @return array<array-key, mixed>|null */
+            public function get_json_params(): ?array
+            {
+                $params = json_decode($this->body, true);
+                return is_array($params) ? $params : null;
+            }
         }
     }
 
@@ -259,6 +266,12 @@ namespace {
             public function header(string $key, string $value, bool $replace = true): void
             {
                 $this->headers[$key] = $value;
+            }
+
+            /** @return array<string, string> */
+            public function get_headers(): array
+            {
+                return $this->headers;
             }
         }
     }
