@@ -480,7 +480,7 @@ class ClaimReverifySweepService
 
     protected function revoke(int $claimId, string $reason): bool
     {
-        return ClaimService::revokeClaim($claimId, $reason);
+        return ClaimService::revokeClaim($claimId, $reason, 'system', null);
     }
 
     protected function notify(int $userId, int $claimId, string $entityName, string $reason): void

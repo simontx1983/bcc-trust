@@ -1086,10 +1086,108 @@ class ClaimRepository {
     }
 
     /**
+     * Does the user hold a verified VALIDATOR claim (or one on that wallet
+     * and chain)? The same match as verifiedEntityClaimIdsForUser(), read
+     * fail-closed: the CLI break-glass asks it before revoking.
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function verifiedValidatorClaimExists(int $userId, ?string $walletAddress = null, ?int $chainId = null): bool
+    {
+        return self::verifiedEntityClaimIds($userId, $walletAddress, $chainId, 1, true) !== [];
+    }
+
+    /**
+     * A claim's identity: who holds it, on which entity, in which role and
+     * status, proven how. Read FAIL-CLOSED (a failed read throws, never
+     * reads as "no claim"). Unlocked: it names the locks a revoke then takes.
+     *
+     * @return array{user_id: int, entity_type: string, entity_id: int, claim_role: string, status: string, verification_method: string}|null
+     * @throws RepositoryReadFailure
+     */
+    public static function claimEntityStrict(int $claimId): ?array
+    {
+        if ($claimId <= 0) {
+            return null;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{user_id: numeric-string, entity_type: string, entity_id: numeric-string, claim_role: string, status: string, verification_method: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT user_id, entity_type, entity_id, claim_role, status, verification_method
+               FROM {$table} WHERE id = %d LIMIT 1",
+            $claimId
+        ), __FUNCTION__, true);
+        $row = $rows[0] ?? null;
+        if ($row === null) {
+            return null;
+        }
+
+        return [
+            'user_id'             => (int) $row->user_id,
+            'entity_type'         => (string) $row->entity_type,
+            'entity_id'           => (int) $row->entity_id,
+            'claim_role'          => (string) $row->claim_role,
+            'status'              => (string) $row->status,
+            'verification_method' => (string) $row->verification_method,
+        ];
+    }
+
+    /**
+     * Validator pages still authored by an owner who has DEPARTED, after
+     * $afterPageId (ascending), at most $limit: the author's account is gone,
+     * or their owner row on that page is now revoked; AND the author holds no
+     * verified validator claim bound to the page. The aligner's discovery
+     * pass queues them, so a page can never stay owned by a deleted user or
+     * a released owner. A page whose living author never owned it through a
+     * claim (a hand reassignment, a legacy page) is never returned. Read
+     * fail-soft (cron; a failed read finds nothing this time).
+     *
+     * @return list<int>
+     */
+    public static function pagesOwnedByDepartedAuthors(int $afterPageId, int $limit): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{ID: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT p.ID
+               FROM {$wpdb->posts} p
+               JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = '_bcc_onchain_validator_id'
+               LEFT JOIN {$wpdb->users} u ON u.ID = p.post_author
+              WHERE p.post_type = 'peepso-page' AND p.post_author > 0 AND p.ID > %d
+                AND (
+                     u.ID IS NULL
+                  OR EXISTS (SELECT 1 FROM {$table} r
+                              WHERE r.user_id = p.post_author AND r.entity_type = 'page' AND r.entity_id = p.ID
+                                AND r.status = 'revoked' AND r.claim_role IN ('operator', 'creator'))
+                )
+                AND NOT EXISTS (SELECT 1 FROM {$table} cl
+                                 WHERE cl.user_id = p.post_author AND cl.entity_type = 'validator'
+                                   AND cl.status = 'verified' AND cl.claim_role IN ('operator', 'creator')
+                                   AND cl.entity_id = CAST(pm.meta_value AS UNSIGNED))
+              GROUP BY p.ID
+              ORDER BY p.ID ASC
+              LIMIT %d",
+            max(0, $afterPageId),
+            max(1, min(100, $limit))
+        ), __FUNCTION__, false);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = (int) $row->ID;
+        }
+
+        return $out;
+    }
+
+    /**
      * @return list<int>
      * @throws RepositoryReadFailure
      */
-    private static function verifiedEntityClaimIds(int $userId, ?string $walletAddress, ?int $chainId, int $limit): array
+    private static function verifiedEntityClaimIds(int $userId, ?string $walletAddress, ?int $chainId, int $limit, bool $validatorsOnly = false): array
     {
         if ($userId <= 0) {
             return [];
@@ -1097,7 +1195,9 @@ class ClaimRepository {
         global $wpdb;
         $table = self::table();
 
-        $where = "user_id = %d AND status = 'verified' AND entity_type IN ('validator', 'collection')";
+        $where = $validatorsOnly
+            ? "user_id = %d AND status = 'verified' AND entity_type = 'validator'"
+            : "user_id = %d AND status = 'verified' AND entity_type IN ('validator', 'collection')";
         $args  = [$userId];
         if ($walletAddress !== null) {
             // A wallet's claims are the ones PROVEN by that wallet. A staff

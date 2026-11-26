@@ -363,6 +363,219 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         self::assertSame([], self::logActions());
     }
 
+    // ── member-side and system ends (C1b-2) ────────────────────────────
+
+    /** @return list<object> */
+    private static function revokedRows(): array
+    {
+        return array_values(array_filter(Log::rowsAfter(0, 50), static fn (object $r): bool => (string) $r->action === 'owner_revoked'));
+    }
+
+    public function testTheWeeklySweepEndsAnOwnerClaimOnTheRecordAsTheSystem(): void
+    {
+        $claimId = $this->seedOwner(self::OWNER, 'wallet');
+
+        self::assertTrue(\BCC\Trust\Onchain\Services\ClaimService::revokeClaim($claimId, 'wallet_link_gone', 'system', null));
+
+        self::assertSame('revoked', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null);
+        $rows = self::revokedRows();
+        self::assertCount(1, $rows);
+        self::assertSame(['system', '', (string) self::OWNER], [$rows[0]->actor_kind, (string) $rows[0]->actor_user_id, (string) $rows[0]->subject_user_id]);
+        $payload = json_decode((string) $rows[0]->payload, true);
+        self::assertSame(['wallet_link_gone', 'wallet'], [$payload['reason'] ?? null, $payload['prev']['method'] ?? null]);
+        self::assertSame(['seq' => (int) $rows[0]->seq, 'row_hash' => $rows[0]->row_hash], RelationshipLogAnchor::get(), 'anchored after the commit');
+        self::assertContains(['hook' => PageOwnershipAligner::HOOK, 'args' => [self::PAGE]], array_map(static fn (array $s): array => ['hook' => $s['hook'], 'args' => $s['args']], $GLOBALS['bcc_scheduled']), 'the aligner retries the page release');
+    }
+
+    public function testAWalletUnlinkAndADeletionNameTheirInitiator(): void
+    {
+        $this->seedOwner(self::OWNER, 'wallet');
+        self::assertSame(1, \BCC\Trust\Onchain\Services\ClaimService::revokeAllForUser(self::OWNER, 'wallet_unlinked', 'cosmos1own', 7, 'member', self::OWNER));
+        $rows = self::revokedRows();
+        self::assertSame(['member', (string) self::OWNER], [$rows[0]->actor_kind, (string) $rows[0]->actor_user_id]);
+
+        $this->seedOtherValidatorOwner();
+        \BCC\Trust\Onchain\Services\ClaimService::purgeForDeletedUser(self::OTHER, 'staff', self::STAFF);
+        $rows = self::revokedRows();
+        self::assertSame(['staff', (string) self::STAFF, (string) self::OTHER], [$rows[1]->actor_kind, (string) $rows[1]->actor_user_id, (string) $rows[1]->subject_user_id]);
+        self::assertNull($this->row(self::OTHER, 'validator', $this->validatorId), 'and the rows are purged, as before');
+    }
+
+    public function testNothingToEndWritesNoRecord(): void
+    {
+        $claimId = $this->seedOwner(self::OWNER, 'wallet');
+        self::assertTrue(\BCC\Trust\Onchain\Services\ClaimService::revokeClaim($claimId, 'wallet_link_gone'));
+
+        self::assertFalse(\BCC\Trust\Onchain\Services\ClaimService::revokeClaim($claimId, 'wallet_link_gone'), 'already revoked');
+        self::assertCount(1, self::revokedRows(), 'owner_revoked only when something was revoked');
+    }
+
+    public function testAnEndThatCannotTakeTheLogLockThrowsAndWritesNothing(): void
+    {
+        $claimId = $this->seedOwner(self::OWNER, 'wallet');
+        $other   = new \mysqli(
+            getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+            getenv('BCC_TEST_DB_USER') ?: 'root',
+            getenv('BCC_TEST_DB_PASS') ?: 'root',
+            getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+            (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+        );
+        $other->query("SELECT GET_LOCK('" . Log::LOCK_NAME . "', 0)");
+        try {
+            \BCC\Trust\Onchain\Services\ClaimService::revokeClaim($claimId, 'wallet_link_gone');
+            self::fail('a revoke without the log lock must throw (the caller counts it as failed)');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('busy', $e->getMessage());
+        } finally {
+            $other->query("SELECT RELEASE_LOCK('" . Log::LOCK_NAME . "')");
+            $other->close();
+        }
+
+        self::assertSame('verified', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null);
+        self::assertSame([], self::revokedRows());
+    }
+
+    public function testTheBreakGlassPutsTheApproverAndEvidenceOnTheRecord(): void
+    {
+        $this->seedOwner(self::OWNER, 'wallet');
+
+        self::assertSame(1, \BCC\Trust\Onchain\Services\ClaimService::revokeBatchForUser(self::OWNER, 'ownership_disputed', 10, null, null, 'system', null, ['approver' => 'Approver', 'via' => 'cli'], 'Lost key; written approval on file.'));
+
+        $row     = self::revokedRows()[0];
+        $payload = json_decode((string) $row->payload, true);
+        self::assertSame(['Approver', 'cli', 'ownership_disputed'], [$payload['approver'] ?? null, $payload['via'] ?? null, $payload['reason'] ?? null]);
+        self::assertSame('Lost key; written approval on file.', (string) $row->evidence_note);
+        self::assertTrue(\BCC\Trust\Onchain\Repositories\ClaimRepository::verifiedValidatorClaimExists(self::OWNER) === false);
+    }
+
+    public function testAValidatorClaimArrivingAfterCliPreflightStillRequiresApproval(): void
+    {
+        self::assertFalse(ClaimRepository::verifiedValidatorClaimExists(self::OWNER));
+        $this->seedOwner(self::OWNER, 'wallet');
+
+        foreach ([[[], null], [['approver' => 'Approver'], null], [[], 'Approval recorded'], [['approver' => '  '], 'Approval recorded']] as [$extra, $evidence]) {
+            try {
+                \BCC\Trust\Onchain\Services\ClaimService::revokeBatchForUser(self::OWNER, 'ownership_disputed', 10, null, null, 'system', null, $extra + ['via' => 'cli'], $evidence);
+                self::fail('A fresh validator claim must not bypass CLI approval.');
+            } catch (\RuntimeException $error) {
+                self::assertStringContainsString('cli_approval_required', $error->getMessage());
+            }
+            self::assertSame('verified', $this->row(self::OWNER, 'validator', $this->validatorId)['status'] ?? null);
+            self::assertSame([], self::revokedRows());
+        }
+    }
+
+    /**
+     * A claim that moves between the unlocked read (which names the locks)
+     * and the locked revoke is not revoked under the wrong validator's
+     * locks: the run is abandoned and retried, and the record names the
+     * validator the claim is actually on. The move is made from a second
+     * connection right after the first read, as a concurrent writer would.
+     */
+    public function testAClaimThatMovesBeforeTheLocksIsRetriedUnderTheRightLocks(): void
+    {
+        global $wpdb;
+        $claimId = $this->seedOwner(self::OWNER, 'wallet');
+        $chainId = (int) $wpdb->get_var("SELECT id FROM `" . ChainRepository::table() . "` WHERE slug = 'vrs-chain'");
+        $wpdb->insert($wpdb->prefix . 'bcc_onchain_validators', [
+            'wallet_link_id' => null, 'operator_address' => 'cosmosvaloper1vrs' . uniqid(), 'chain_id' => $chainId,
+            'moniker' => 'VRS Fixture', 'expires_at' => gmdate('Y-m-d H:i:s', time() + 86400),
+        ]);
+        $second = (int) $wpdb->insert_id;
+        $page2  = self::PAGE + 1;
+        $wpdb->insert($wpdb->postmeta, ['post_id' => $page2, 'meta_key' => '_bcc_onchain_validator_id', 'meta_value' => (string) $second]);
+
+        $other = new \mysqli(
+            getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+            getenv('BCC_TEST_DB_USER') ?: 'root',
+            getenv('BCC_TEST_DB_PASS') ?: 'root',
+            getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+            (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+        );
+        $moved = false;
+        $real  = $GLOBALS['wpdb'];
+        $GLOBALS['wpdb'] = new class ($real, static function (string $sql) use (&$moved, $other, $claimId, $second): void {
+            if (!$moved && str_contains($sql, 'SELECT user_id, entity_type, entity_id, claim_role, status, verification_method')) {
+                $moved = true;
+                $other->query('UPDATE `' . ClaimRepository::table() . '` SET entity_id = ' . $second . ' WHERE id = ' . $claimId);
+            }
+        }) {
+            public function __construct(private object $inner, private \Closure $afterQuery)
+            {
+            }
+
+            public function __get(string $name): mixed
+            {
+                return $this->inner->$name;
+            }
+
+            public function __set(string $name, mixed $value): void
+            {
+                $this->inner->$name = $value;
+            }
+
+            public function __isset(string $name): bool
+            {
+                return isset($this->inner->$name);
+            }
+
+            /** @param array<int, mixed> $args */
+            public function __call(string $method, array $args): mixed
+            {
+                return $this->inner->$method(...$args);
+            }
+
+            public function query(string $sql): mixed
+            {
+                $result = $this->inner->query($sql);
+                ($this->afterQuery)($sql);
+
+                return $result;
+            }
+        };
+        try {
+            self::assertTrue(Service::endOwnerClaim($claimId, 'wallet_link_gone', 'system', null));
+        } finally {
+            $GLOBALS['wpdb'] = $real;
+            $other->close();
+            $wpdb->query($wpdb->prepare("DELETE FROM `{$wpdb->postmeta}` WHERE post_id = %d AND meta_key = '_bcc_onchain_validator_id'", $page2));
+        }
+
+        self::assertTrue($moved, 'the claim moved after the first read');
+        self::assertSame('revoked', $this->row(self::OWNER, 'validator', $second)['status'] ?? null);
+        $rows = self::revokedRows();
+        self::assertCount(1, $rows);
+        $payload = json_decode((string) $rows[0]->payload, true);
+        self::assertSame($second, $payload['validator_id'] ?? null, 'revoked under the locks of the validator it is on');
+        self::assertSame($page2, (int) $rows[0]->page_id);
+    }
+
+    /** Only an owner-role validator claim ends through the relationship service; any other keeps the old path. */
+    public function testANonOwnerValidatorClaimKeepsTheOldRevokePath(): void
+    {
+        global $wpdb;
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OWNER, 'entity_type' => 'validator', 'entity_id' => $this->validatorId,
+            'wallet_address' => 'cosmos1own', 'chain_id' => 7, 'claim_role' => 'holder',
+            'status' => 'verified', 'verification_method' => 'wallet', 'verified_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+        $claimId = (int) $wpdb->insert_id;
+
+        self::assertTrue(\BCC\Trust\Onchain\Services\ClaimService::revokeClaim($claimId, 'wallet_link_gone'), 'revoked, never silently skipped');
+        self::assertSame('revoked', (string) $wpdb->get_var($wpdb->prepare('SELECT status FROM `' . ClaimRepository::table() . '` WHERE id = %d', $claimId)));
+        self::assertSame([], self::revokedRows(), 'no owner record for a non-owner claim');
+    }
+
+    private function seedOtherValidatorOwner(): void
+    {
+        global $wpdb;
+        $wpdb->insert(ClaimRepository::table(), [
+            'user_id' => self::OTHER, 'entity_type' => 'validator', 'entity_id' => $this->validatorId,
+            'wallet_address' => 'cosmos1oth', 'chain_id' => 7, 'claim_role' => 'operator',
+            'status' => 'verified', 'verification_method' => 'wallet', 'verified_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+    }
+
     public function testAStaffApprovedOwnerMustBeRevokedFirst(): void
     {
         $this->seedOwner(self::OTHER, 'staff');

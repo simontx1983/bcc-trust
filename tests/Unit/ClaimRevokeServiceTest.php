@@ -158,6 +158,18 @@ final class ClaimRevokeServiceTest extends TestCase
         self::assertSame([], \ClaimRevokeWorld::$audits);
     }
 
+    /** C1b-2: the claim is named first (fail-closed); a claim that is gone is not revoked. */
+    public function testAClaimThatIsGoneIsNotRevoked(): void
+    {
+        \ClaimRevokeWorld::$entityType = null;
+
+        self::assertFalse(ClaimService::revokeClaim(41, 'wallet_link_gone'));
+
+        self::assertSame([41], \ClaimRevokeWorld::$entityReads);
+        self::assertSame([], \ClaimRevokeWorld::$revokeCalls, 'no revoke attempted');
+        self::assertSame([], \ClaimRevokeWorld::$actions);
+    }
+
     public function testAFailedRevokePropagatesWithNoSideEffects(): void
     {
         \ClaimRevokeWorld::$throw = new \RuntimeException('COMMIT failed');
