@@ -626,6 +626,10 @@ final class WalletAuthController
         if (!\BCC\Core\Security\Throttle::allow('wallet_signup', AuthSupport::WALLET_SIGNUP_RATE_LIMIT, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many signups. Please wait.', 429);
         }
+        $eligibilityError = AuthSupport::requireSignupEligibility($request);
+        if ($eligibilityError !== null) {
+            return $eligibilityError;
+        }
 
         $walletAddress = (string) $request->get_param('wallet_address');
         $signature     = wp_strip_all_tags(wp_unslash((string) $request->get_param('signature')));

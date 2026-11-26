@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\REST\Auth\WalletAuthController;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -98,7 +99,12 @@ final class WalletSignInVerifyBeforeConsumeTest extends TestCase
     /** @param array<string, string> $extra */
     private static function signupResponse(string $sig, array $extra = []): \WP_REST_Response
     {
-        $req = new \WP_REST_Request(['wallet_address' => self::ADDR, 'signature' => $sig, 'handle' => 'newhandle'] + $extra);
+        $req = new \WP_REST_Request([
+            'wallet_address' => self::ADDR,
+            'signature' => $sig,
+            'handle' => 'newhandle',
+            'eligibility_token' => AuthSupport::issueSignupEligibilityToken(),
+        ] + $extra);
         return (new WalletAuthController())->walletSignup($req);
     }
 

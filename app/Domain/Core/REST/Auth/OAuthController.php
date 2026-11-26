@@ -519,6 +519,10 @@ final class OAuthController
         if ($data === null) {
             return self::spentProviderToken();
         }
+        $eligibilityError = AuthSupport::requireSignupEligibility($request);
+        if ($eligibilityError !== null) {
+            return $eligibilityError;
+        }
 
         $handleService = Plugin::instance()->handleService();
         $err           = $handleService->validate($handle);

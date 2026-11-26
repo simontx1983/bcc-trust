@@ -87,7 +87,12 @@ final class PendingEmailSignupTest extends TestCase
     /** @return array{status: int, message: string} */
     private static function signup(string $handle, string $email, string $password = 'correct horse battery'): array
     {
-        $req  = new \WP_REST_Request(['handle' => $handle, 'email' => $email, 'password' => $password]);
+        $req = new \WP_REST_Request([
+            'handle' => $handle,
+            'email' => $email,
+            'password' => $password,
+            'eligibility_token' => AuthSupport::issueSignupEligibilityToken(),
+        ]);
         $resp = (new PasswordAuthController())->signup($req);
         $data = $resp->get_data();
         return [

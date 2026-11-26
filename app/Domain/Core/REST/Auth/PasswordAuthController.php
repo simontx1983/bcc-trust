@@ -3,6 +3,7 @@
  * PasswordAuthController — /auth email + password routes.
  *
  * Routes:
+ *   - POST /auth/age-eligibility — issue a signup eligibility proof
  *   - POST /auth/signup          — create account with email + handle
  *   - POST /auth/login           — email OR handle + password → 2FA challenge
  *   - POST /auth/forgot-password — anti-enumeration password-reset request
@@ -44,6 +45,16 @@ final class PasswordAuthController
     public static function register(): void
     {
         $instance = new self();
+
+        register_rest_route(
+            AuthSupport::ROUTE_NAMESPACE,
+            '/auth/age-eligibility',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'ageEligibility'],
+                'permission_callback' => '__return_true',
+            ]
+        );
 
         // POST /auth/signup — create account with email + handle.
         register_rest_route(
@@ -156,6 +167,29 @@ final class PasswordAuthController
         );
     }
 
+    public function ageEligibility(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('signup_age_eligibility', AuthSupport::SIGNUP_RATE_LIMIT, 60)) {
+            $response = ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
+        } else {
+            $params = $request->get_json_params();
+            $eligible = AuthSupport::signupAgeEligible(is_array($params) ? ($params['birth_date'] ?? null) : null);
+            if ($eligible === null) {
+                $response = ApiResponse::error('bcc_invalid_request', 'Enter a valid date of birth.', 400);
+            } elseif (!$eligible) {
+                $response = ApiResponse::error('age_ineligible', 'You’re not eligible to create an account.', 403);
+            } else {
+                $token = AuthSupport::issueSignupEligibilityToken();
+                $response = $token === null
+                    ? ApiResponse::error('bcc_unavailable', 'Eligibility confirmation is unavailable. Please try again.', 503)
+                    : ApiResponse::ok(['eligibility_token' => $token]);
+            }
+        }
+
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
     public function signup(WP_REST_Request $request): WP_REST_Response
     {
         // Throttle::allow buckets unauthenticated callers by client IP
@@ -163,6 +197,10 @@ final class PasswordAuthController
         // per IP is generous for humans, narrow for scripted abuse.
         if (!\BCC\Core\Security\Throttle::allow('signup', AuthSupport::SIGNUP_RATE_LIMIT, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many signups. Please wait.', 429);
+        }
+        $eligibilityError = AuthSupport::requireSignupEligibility($request);
+        if ($eligibilityError !== null) {
+            return $eligibilityError;
         }
 
         $email       = sanitize_email((string) $request->get_param('email'));

@@ -73,6 +73,7 @@ final class AuthLogPrivacyTest extends TestCase
 
         $resp = (new PasswordAuthController())->signup(new \WP_REST_Request([
             'handle' => 'dana', 'email' => 'dana.private@example.test', 'password' => 'correct horse battery',
+            'eligibility_token' => AuthSupport::issueSignupEligibilityToken(),
         ]));
 
         self::assertSame(500, $resp->get_status());
