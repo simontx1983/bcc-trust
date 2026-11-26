@@ -132,23 +132,25 @@ final class ValidatorStepUpRepository
 
     /**
      * Record that the right code was entered, atomically, while the
-     * code-bearing step-up is live, unverified and within the attempt cap.
+     * code-bearing step-up is live, unverified and within the attempt cap,
+     * and still carries the exact code hash that was checked.
      * False: it is dead, password-only, already verified or not this user's.
      *
      * @throws \RuntimeException when the update itself fails
      */
-    public static function markCodeVerified(string $id, int $userId, string $nowUtc): bool
+    public static function markCodeVerified(string $id, int $userId, string $nowUtc, string $expectedCodeHash): bool
     {
         global $wpdb;
         $table = self::table();
 
         return self::changedOne($wpdb->prepare(
             "UPDATE {$table} SET code_verified_at = %s
-              WHERE id = %s AND user_id = %d AND code_hash IS NOT NULL AND code_verified_at IS NULL
+              WHERE id = %s AND user_id = %d AND code_hash = %s AND code_verified_at IS NULL
                 AND used_at IS NULL AND expires_at > %s AND attempts <= %d",
             $nowUtc,
             $id,
             $userId,
+            $expectedCodeHash,
             $nowUtc,
             self::MAX_ATTEMPTS
         ));

@@ -27,9 +27,9 @@ if (!defined('ABSPATH')) {
  *   (only after a COMMIT) → RELEASE vrl (finally)
  *
  * A lock that cannot be taken means no write (503). Only claim rows and log
- * rows are written inside the transaction; the page OWNERSHIP move (PeepSo
- * owner role, post_author, score rows) is left to the PageOwnershipAligner,
- * scheduled after COMMIT and run asynchronously with no current user.
+ * rows are written inside the transaction. Revocation releases ownership
+ * after COMMIT. The PageOwnershipAligner retries page releases and applies
+ * deferred ownership transfers.
  *
  * ## D3 (permanent)
  *
@@ -542,7 +542,9 @@ final class ValidatorRelationshipService
             return ['result' => $result, 'appended' => $appended, 'user_id' => $link['user_id']];
         }, static function (array $done) use ($staffId, $pageId, $linkId, $reason, $logAction): array {
             self::safely('audit', static fn () => AuditLogger::log('validator_' . $logAction, $pageId, ['user_id' => $done['user_id'], 'link_id' => $linkId, 'reason' => $reason], 'page', $staffId));
-            self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, false));
+            // Existing page access checks can still depend on the stored
+            // owner. Release now, and keep the aligner as a retry.
+            self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($linkId, $done['result'], $reason, true));
             foreach ($done['result']['mirror_page_ids'] as $lostPage) {
                 self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule((int) $lostPage));
             }

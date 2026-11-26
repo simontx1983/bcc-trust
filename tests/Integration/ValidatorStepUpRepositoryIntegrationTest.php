@@ -74,7 +74,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         }
         self::assertFalse(StepUps::countAttempt($id, self::STAFF, self::at(0)), 'the cap');
         self::assertSame('5', (string) StepUps::find($id, self::STAFF)?->attempts);
-        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)), 'the last allowed attempt can still be the right one');
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)), 'the last allowed attempt can still be the right one');
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
     }
 
@@ -85,11 +85,11 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         StepUps::countAttempt($id, self::STAFF, self::at(0));
 
         self::assertFalse(StepUps::consume(self::binding($id), self::at(0)), 'attempts under the cap, but no verified code');
-        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
-        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(1)), 'recorded once');
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)));
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(1), str_repeat('c', 64)), 'recorded once');
         self::assertNotNull(StepUps::find($id, self::STAFF)?->code_verified_at);
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
-        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(2)), 'a spent step-up');
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(2), str_repeat('c', 64)), 'a spent step-up');
     }
 
     public function testAPasswordOnlyStepUpNeedsNoCodeAndCannotBeMarked(): void
@@ -102,7 +102,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         ]);
         $binding = ['action' => 'add_team_member', 'role' => 'representative'] + self::binding($id);
 
-        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(0)), 'no code to verify');
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)), 'no code to verify');
         self::assertTrue(StepUps::consume($binding, self::at(0)));
     }
 
@@ -127,11 +127,11 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
     {
         $expired = str_repeat('9', 32);
         self::make($expired, -1);
-        self::assertFalse(StepUps::markCodeVerified($expired, self::STAFF, self::at(0)), 'expired');
+        self::assertFalse(StepUps::markCodeVerified($expired, self::STAFF, self::at(0), str_repeat('c', 64)), 'expired');
 
         $other = str_repeat('6', 32);
         self::make($other);
-        self::assertFalse(StepUps::markCodeVerified($other, self::STAFF + 1, self::at(0)), 'another user');
+        self::assertFalse(StepUps::markCodeVerified($other, self::STAFF + 1, self::at(0), str_repeat('c', 64)), 'another user');
     }
 
     public function testAConsumeNeedsEveryBindingColumnAndWorksOnce(): void
@@ -145,7 +145,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         ] as $override) {
             self::assertFalse(StepUps::consume($override + self::binding($id), self::at(0)), json_encode($override) ?: '');
         }
-        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)));
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
         self::assertFalse(StepUps::consume(self::binding($id), self::at(0)), 'single use');
         // A later consume would rewrite used_at to a NEW value (a changed
@@ -159,7 +159,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         global $wpdb;
         $id = str_repeat('c', 32);
         self::make($id);
-        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)));
 
         $wpdb->query('START TRANSACTION');
         self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
@@ -190,6 +190,22 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
         self::assertSame([str_repeat('9', 64), '1'], [$row?->code_hash, (string) $row?->attempts]);
     }
 
+    public function testConfirmationRequiresTheCurrentCodeVersion(): void
+    {
+        $id = str_repeat('6', 32);
+        self::make($id);
+        self::assertTrue(StepUps::countAttempt($id, self::STAFF, self::at(0)));
+        $checkedHash = StepUps::find($id, self::STAFF)?->code_hash;
+        self::assertSame(str_repeat('c', 64), $checkedHash);
+
+        self::assertTrue(StepUps::replaceCode($id, self::STAFF, str_repeat('9', 64), self::at(600), self::at(60), self::at(0)));
+        self::assertFalse(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)));
+        self::assertNull(StepUps::find($id, self::STAFF)?->code_verified_at);
+        self::assertFalse(StepUps::consume(self::binding($id), self::at(0)));
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('9', 64)));
+        self::assertTrue(StepUps::consume(self::binding($id), self::at(0)));
+    }
+
     public function testAResendClearsTheVerificationAndIsCappedAtThirtyMinutes(): void
     {
         $id      = str_repeat('5', 32);
@@ -200,7 +216,7 @@ final class ValidatorStepUpRepositoryIntegrationTest extends TestCase
             'created_at' => gmdate('Y-m-d H:i:s', $created), 'expires_at' => gmdate('Y-m-d H:i:s', $created + 1790),
             'resend_after' => gmdate('Y-m-d H:i:s', $created),
         ]);
-        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0)));
+        self::assertTrue(StepUps::markCodeVerified($id, self::STAFF, self::at(0), str_repeat('c', 64)));
 
         self::assertTrue(StepUps::replaceCode($id, self::STAFF, str_repeat('9', 64), gmdate('Y-m-d H:i:s', $created + 2300), self::at(60), self::at(0)));
         $row = StepUps::find($id, self::STAFF);

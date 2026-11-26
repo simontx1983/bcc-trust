@@ -115,8 +115,8 @@ final class ValidatorStepUpService
             'resend_after'   => $code === null ? null : gmdate('Y-m-d H:i:s', $now + self::RESEND_SECONDS),
         ]);
 
-        if ($code !== null) {
-            self::mailCode($actorId, $code, $action);
+        if ($code !== null && !self::mailCode($actorId, $code, $action)) {
+            return self::fail('mail_unavailable', 503);
         }
         AuditLogger::log('validator_step_up_started', $pageId, ['action' => $action, 'target_user_id' => $targetUserId], 'page', $actorId);
 
@@ -163,7 +163,9 @@ final class ValidatorStepUpService
         )) {
             return self::fail('resend_not_allowed', 409);
         }
-        self::mailCode($actorId, $code, (string) $row->action);
+        if (!self::mailCode($actorId, $code, (string) $row->action)) {
+            return self::fail('mail_unavailable', 503);
+        }
 
         return ['ok' => true, 'expires_in' => $expires - $now, 'resend_after' => self::RESEND_SECONDS];
     }
@@ -198,17 +200,21 @@ final class ValidatorStepUpService
             // A password-only step-up, which an owner-level action never is.
             return in_array((string) $row->action, self::ACTIONS_WITH_CODE, true) ? 'step_up_invalid' : null;
         }
+        $expectedCodeHash = $row->code_hash;
         if ($code === null || preg_match('/^\d{6}$/', $code) !== 1
-            || !hash_equals((string) $row->code_hash, self::codeHash($stepUpId, $code))
+            || !hash_equals($expectedCodeHash, self::codeHash($stepUpId, $code))
         ) {
             self::recordFailure($actorId, (string) $row->action, (int) $row->page_id, (int) $row->target_user_id, 'code_invalid');
             return 'code_invalid';
         }
-        if (!StepUps::markCodeVerified($stepUpId, $actorId, $now)) {
+        if (!StepUps::markCodeVerified($stepUpId, $actorId, $now, $expectedCodeHash)) {
             // Already recorded by an earlier check of this code (a retried
             // action) is fine; a step-up that died in between is not.
             $row = StepUps::find($stepUpId, $actorId);
-            if ($row === null || $row->code_verified_at === null || $row->used_at !== null) {
+            if ($row === null || $row->code_hash === null || !hash_equals($expectedCodeHash, $row->code_hash)
+                || $row->code_verified_at === null || $row->used_at !== null
+                || strcmp($row->expires_at, gmdate('Y-m-d H:i:s')) <= 0 || (int) $row->attempts > StepUps::MAX_ATTEMPTS
+            ) {
                 return 'step_up_invalid';
             }
         }
@@ -264,12 +270,11 @@ final class ValidatorStepUpService
         return preg_match('/^[0-9a-f]{32}$/', $stepUpId) === 1;
     }
 
-    private static function mailCode(int $actorId, string $code, string $action): void
+    private static function mailCode(int $actorId, string $code, string $action): bool
     {
         $user = get_userdata($actorId);
-        if ($user instanceof \WP_User) {
-            AuthMailer::sendValidatorStepUpCode((string) $user->user_email, $code, self::ACTION_LABELS[$action] ?? 'a validator change');
-        }
+        return $user instanceof \WP_User
+            && AuthMailer::sendValidatorStepUpCode((string) $user->user_email, $code, self::ACTION_LABELS[$action] ?? 'a validator change');
     }
 
     private static function recordFailure(int $actorId, string $action, int $pageId, int $targetUserId, string $reason, string $logAction = 'step_up_failed'): void

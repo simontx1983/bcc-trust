@@ -27,6 +27,7 @@ final class ValidatorStepUpServiceTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/validator-step-up-stubs.php';
+        require_once __DIR__ . '/../../app/Domain/Onchain/Services/ValidatorStepUpService.php';
         \StepUpWorld::reset();
     }
 
@@ -44,6 +45,26 @@ final class ValidatorStepUpServiceTest extends TestCase
         self::assertIsArray($mail);
 
         return [$r['step_up_id'], $mail[1]];
+    }
+
+    public function testMailFailureDoesNotIssueAUsableStartResponse(): void
+    {
+        \StepUpWorld::$mailAccepted = false;
+
+        $result = S::start(self::request(), self::STAFF, 'link_owner', 501, 900, 'owner');
+
+        self::assertSame(['ok' => false, 'error' => 'mail_unavailable', 'status' => 503], $result);
+        self::assertSame([], \StepUpWorld::$audits);
+    }
+
+    public function testMailFailureDoesNotClaimAResendSucceeded(): void
+    {
+        [$id] = self::startLink();
+        \StepUpWorld::$rows[$id]->resend_after = gmdate('Y-m-d H:i:s', time() - 1);
+        \StepUpWorld::$mailAccepted = false;
+
+        self::assertSame(['ok' => false, 'error' => 'mail_unavailable', 'status' => 503], S::resend(self::STAFF, $id));
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
     }
 
     public function testAnOwnerChangeEmailsACodeAndReturnsOnlyAnOpaqueId(): void
@@ -171,6 +192,45 @@ final class ValidatorStepUpServiceTest extends TestCase
         self::assertNull(S::checkCode(self::STAFF, $id, $code), 'already recorded: a retry after a transient failure');
         self::assertTrue(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
         self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code), 'spent');
+    }
+
+    public function testConfirmationAppliesOnlyToTheCodeVersionThatWasChecked(): void
+    {
+        [$id, $code] = self::startLink();
+        \StepUpWorld::$beforeMarkCodeVerified = static function (string $stepId): void {
+            $replacement = clone \StepUpWorld::$rows[$stepId];
+            $replacement->code_hash = str_repeat('9', 64);
+            $replacement->code_verified_at = null;
+            \StepUpWorld::$rows[$stepId] = $replacement;
+        };
+
+        self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code));
+        self::assertNull(\StepUpWorld::$rows[$id]->code_verified_at);
+        self::assertFalse(S::consumeInTransaction(self::STAFF, $id, 'link_owner', 501, 900, 'owner'));
+    }
+
+    public function testAlreadyConfirmedRetryRequiresTheSameCodeVersion(): void
+    {
+        [$id, $code] = self::startLink();
+        \StepUpWorld::$beforeMarkCodeVerified = static function (string $stepId): void {
+            $replacement = clone \StepUpWorld::$rows[$stepId];
+            $replacement->code_hash = str_repeat('9', 64);
+            $replacement->code_verified_at = gmdate('Y-m-d H:i:s');
+            \StepUpWorld::$rows[$stepId] = $replacement;
+        };
+
+        self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code));
+    }
+
+    public function testAlreadyConfirmedRetryRequiresALiveGrant(): void
+    {
+        [$id, $code] = self::startLink();
+        \StepUpWorld::$beforeMarkCodeVerified = static function (string $stepId): void {
+            \StepUpWorld::$rows[$stepId]->code_verified_at = gmdate('Y-m-d H:i:s');
+            \StepUpWorld::$rows[$stepId]->expires_at = gmdate('Y-m-d H:i:s', time() - 1);
+        };
+
+        self::assertSame('step_up_invalid', S::checkCode(self::STAFF, $id, $code));
     }
 
     public function testAPasswordOnlyStepUpNeedsNoCode(): void

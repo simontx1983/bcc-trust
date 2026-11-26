@@ -1952,6 +1952,8 @@ final class Plugin
         // GET/POST /admin/halls + PATCH /admin/halls/:id (topic Halls, F-597).
         // Capability-gated to manage_options, as the reports routes are.
         \BCC\Trust\Core\REST\AdminHallsEndpoint::register();
+        \BCC\Trust\Core\REST\AdminValidatorReadEndpoint::register();
+        \BCC\Trust\Core\REST\AdminValidatorWriteEndpoint::register();
     }
 
     /**

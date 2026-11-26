@@ -711,14 +711,29 @@ class ClaimRepository {
      * @return list<array{claim_id: int, user_id: int, verification_method: string}>
      * @throws RepositoryReadFailure
      */
-    public static function ownerClaimsForPageStrict(int $pageId): array {
+    public static function ownerClaimsForPageStrict(int $pageId, bool $observe = true): array {
         if ($pageId <= 0) {
             return [];
         }
         $claims = [];
-        self::resolveOperators([$pageId], true, $claims);
+        self::resolveOperators([$pageId], true, $claims, $observe);
 
         return $claims[$pageId] ?? [];
+    }
+
+    /**
+     * The staff directory uses the same strict resolution in bounded batches.
+     * @param list<int> $pageIds
+     * @return array<int,list<array{claim_id:int,user_id:int,verification_method:string}>>
+     */
+    public static function ownerClaimsForPagesStrict(array $pageIds): array {
+        $out = [];
+        foreach (array_chunk(array_values(array_unique($pageIds)), 100) as $chunk) {
+            $claims = [];
+            self::resolveOperators($chunk, true, $claims, false);
+            $out += $claims;
+        }
+        return $out;
     }
 
     /**
@@ -734,7 +749,7 @@ class ClaimRepository {
      * @return array<int, array{state: string, user_id: int|null}>
      * @throws RepositoryReadFailure when $failClosed and a read fails
      */
-    private static function resolveOperators(array $pageIds, bool $failClosed, ?array &$claims = null): array {
+    private static function resolveOperators(array $pageIds, bool $failClosed, ?array &$claims = null, bool $observe = true): array {
         $claims = [];
         if ($pageIds === []) {
             return [];
@@ -857,7 +872,9 @@ class ClaimRepository {
                 continue;
             }
             $out[$pageId] = ['state' => self::OPERATOR_AMBIGUOUS, 'user_id' => null];
-            self::recordAmbiguousOperator($pageId, count($userSet));
+            if ($observe) {
+                self::recordAmbiguousOperator($pageId, count($userSet));
+            }
         }
         return $out;
     }

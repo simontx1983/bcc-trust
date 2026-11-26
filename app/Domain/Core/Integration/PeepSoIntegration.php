@@ -24,6 +24,8 @@ class PeepSoIntegration
 {
     private ScoreRepository $scoreRepo;
     private UserInfoRepository $userInfoRepo;
+    /** @var array<int, true> Author resets whose owner bookkeeping is handled by releaseClaimedPage(). */
+    private array $releasingPages = [];
 
     public function __construct(
         ScoreRepository    $scoreRepo,
@@ -449,10 +451,16 @@ class PeepSoIntegration
             $authorResetFailed = false;
             if ((int) get_post_field('post_author', $pageId) === $userId) {
                 // F-361 — pinned, same reason as the claim above.
-                $update = PeepSoAddPostGuard::pinOnly(
-                    [],
-                    static fn () => wp_update_post(['ID' => $pageId, 'post_author' => 0], true)
-                );
+                $previousReleases = $this->releasingPages;
+                $this->releasingPages[$pageId] = true;
+                try {
+                    $update = PeepSoAddPostGuard::pinOnly(
+                        [],
+                        static fn () => wp_update_post(['ID' => $pageId, 'post_author' => 0], true)
+                    );
+                } finally {
+                    $this->releasingPages = $previousReleases;
+                }
                 if (is_wp_error($update)) {
                     $authorResetFailed = true;
                     \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [
@@ -970,6 +978,9 @@ class PeepSoIntegration
 
         if (!$update) {
             $this->onPageCreated($postId, (int) $post->post_author);
+            return;
+        }
+        if (isset($this->releasingPages[$postId])) {
             return;
         }
 

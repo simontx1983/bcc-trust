@@ -861,16 +861,16 @@ HTML;
      * relationship change (link, revoke or cancel an owner). The action is
      * named so a code the recipient did not ask for is recognisable.
      */
-    public static function sendValidatorStepUpCode(string $to, string $otpCode, string $actionLabel): void
+    public static function sendValidatorStepUpCode(string $to, string $otpCode, string $actionLabel): bool
     {
         if ($to === '' || !is_email($to)) {
-            return;
+            return false;
         }
 
         $siteName   = get_bloginfo('name') ?: 'BCC';
         $safeAction = htmlspecialchars($actionLabel, ENT_QUOTES, 'UTF-8');
 
-        BccMailer::send(
+        return BccMailer::send(
             $to,
             sprintf('[%s] Confirm a validator change', $siteName),
             self::buildCodeOnlyOtpHtml(

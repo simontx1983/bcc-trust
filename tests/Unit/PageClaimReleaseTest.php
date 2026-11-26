@@ -117,6 +117,21 @@ final class PageClaimReleaseTest extends TestCase
         self::assertSame(['old_owner' => self::OLD, 'author_reset' => true, 'owner_row' => 'demoted', 'score_rows_moved' => 0, 'score_owner' => 0], $released[0][2]);
     }
 
+    public function testReleaseInAnEditorRequestOnlyRunsOwnerBookkeepingOnce(): void
+    {
+        $integration = $this->integration();
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+        $GLOBALS['__bcc_drain']['page_owner_meta'][self::PAGE] = self::OLD;
+        $GLOBALS['__bcc_drain']['on_post_update'] = [$integration, 'onPageSaved'];
+
+        self::assertTrue($integration->releaseClaimedPage(self::PAGE, self::OLD));
+        self::assertSame([[self::OLD, self::PAGE]], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertSame([], self::audits('page_owner_changed'));
+
+        $integration->onPageSaved(self::PAGE, new \WP_Post(self::NEW), true);
+        self::assertCount(1, self::audits('page_owner_changed'));
+    }
+
     // ── the swap: a wallet proof superseded the staff-approved owner ────
 
     public function testASwapMovesThePageToTheNewOwner(): void
