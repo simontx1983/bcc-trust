@@ -82,8 +82,12 @@ final class DigestUnsubscribeEndpoint
             );
         }
 
-        // Idempotent: writing false on an already-false flag is a no-op.
-        NotificationPrefs::setEmailDigest($verifiedUserId, false);
+        if (!NotificationPrefs::setEmailDigest($verifiedUserId, false)) {
+            return self::htmlResponse(
+                "We couldn't save your email preference. Please try again.",
+                503
+            );
+        }
 
         return self::htmlResponse(
             "You're unsubscribed from the weekly Floor digest. "

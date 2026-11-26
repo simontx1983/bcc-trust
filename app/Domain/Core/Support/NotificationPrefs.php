@@ -253,7 +253,9 @@ final class NotificationPrefs
         if ($userId <= 0) {
             return false;
         }
-        return self::flag($userId, 'email_digest');
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->hasUserMetaFlag($userId, self::META_PREFIX . 'email_digest', true);
     }
 
     /**
@@ -354,12 +356,19 @@ final class NotificationPrefs
      * flip just `email_digest` without round-tripping through the full
      * partial-write surface.
      */
-    public static function setEmailDigest(int $userId, bool $enabled): void
+    public static function setEmailDigest(int $userId, bool $enabled): bool
     {
         if ($userId <= 0) {
-            return;
+            return false;
         }
-        self::writeFlag($userId, 'email_digest', $enabled);
+
+        // WordPress returns false both for a failed write and an identical
+        // value. Confirm the persisted state, including duplicate rows.
+        $metaKey = self::META_PREFIX . 'email_digest';
+        update_user_meta($userId, $metaKey, $enabled ? '1' : '0');
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->hasUserMetaFlag($userId, $metaKey, $enabled);
     }
 
     /**

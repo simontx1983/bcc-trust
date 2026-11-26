@@ -291,7 +291,7 @@ final class EmailDigestPage
 
         echo '<table class="widefat striped"><thead><tr>'
             . '<th>When</th><th>Trigger</th><th>Opted in</th><th>Sent</th><th>Nothing unread</th>'
-            . '<th>Skipped (suspended / banned)</th><th>No email</th><th>Failed</th></tr></thead><tbody>';
+            . '<th>Excluded</th><th>No email</th><th>Failed</th></tr></thead><tbody>';
         foreach ($runs as $r) {
             $failed = (int) ($r['failed'] ?? 0);
             printf(
