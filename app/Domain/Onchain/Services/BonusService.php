@@ -99,7 +99,8 @@ final class BonusService
             // it granted (PeepSo owner and author) and fires
             // bcc_onchain_claim_revoked. A failure throws before the purge, so
             // nothing is removed unaudited.
-            ClaimService::revokeAllForUser($userId, 'wallet_unlinked', $walletAddress, $chainId);
+            [$actorKind, $actorId] = ClaimService::initiatorFor($userId, get_current_user_id());
+            ClaimService::revokeAllForUser($userId, 'wallet_unlinked', $walletAddress, $chainId, $actorKind, $actorId);
 
             // Both deletes run atomically inside the repository's own
             // transaction. Services-layer code does not touch $wpdb

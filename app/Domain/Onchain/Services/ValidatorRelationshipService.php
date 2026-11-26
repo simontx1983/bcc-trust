@@ -54,6 +54,9 @@ final class ValidatorRelationshipService
 
     private const LOCK_TIMEOUT = 5;
 
+    /** Who may end an owner claim outside the staff tool, as the log names them. */
+    public const OWNER_END_ACTORS = ['member', 'staff', 'system'];
+
     /**
      * D3: is an owner proven by $method locked for staff? Everything except a
      * staff approval is; an unknown or missing method counts as locked.
@@ -367,6 +370,111 @@ final class ValidatorRelationshipService
             'mirror_written'      => (bool) ($result['mirror_written'] ?? false),
             'superseded_user_ids' => $supersededIds,
         ];
+    }
+
+    /**
+     * A member-side or system END of a validator owner claim: the wallet
+     * unlink, the weekly re-verify, an account deletion, the CLI break-glass
+     * (ClaimService::revokeClaim routes every validator claim here). Under
+     * the lock order, in one transaction: the claim and the page mirrors it
+     * alone grants are revoked (FOR UPDATE), and `owner_revoked` is logged
+     * ONLY when something was revoked, naming the real initiator. Release
+     * page ownership after commit as in the original revoke path, since
+     * some access checks still depend on PeepSo ownership or post_author.
+     *
+     * The claim's entity is read first, unlocked, only to name the locks.
+     * Whether anything is revoked is decided under them (a claim no longer
+     * verified revokes nothing and logs nothing), and the revoked row must
+     * still be that validator's claim in the same role, or the run is
+     * abandoned and retried once.
+     *
+     * @param array<string, mixed> $payloadExtra added to the log payload (e.g. the break-glass approver)
+     * @param string|null $evidenceNote kept in the log's redactable evidence column
+     * @return bool true when revoked; false when there was nothing to revoke
+     * @throws \RuntimeException on a lock timeout or a failed read or write; the caller treats it as a failed revoke, as before
+     */
+    public static function endOwnerClaim(int $claimId, string $reason, string $actorKind, ?int $actorId, array $payloadExtra = [], ?string $evidenceNote = null): bool
+    {
+        if (!in_array($actorKind, self::OWNER_END_ACTORS, true)) {
+            throw new \InvalidArgumentException('Unknown owner-claim end actor: ' . $actorKind);
+        }
+        if ($evidenceNote !== null && !self::evidenceIsValid($evidenceNote, null)) {
+            throw new \InvalidArgumentException('Evidence must be bounded, valid UTF-8 text.');
+        }
+
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            $claim = ClaimRepository::claimEntityStrict($claimId);
+            if ($claim === null || $claim['entity_type'] !== 'validator'
+                || !in_array($claim['claim_role'], PageClaimRolePolicy::OWNER_ROLES, true)
+            ) {
+                return false;
+            }
+            $validatorId = $claim['entity_id'];
+            $pages       = ClaimRepository::boundPagesFor('validator', $validatorId);
+
+            $result = self::underLocks($validatorId, static function () use ($claimId, $claim, $validatorId, $reason, $actorKind, $actorId, $payloadExtra, $evidenceNote): array {
+                // A CLI preflight can precede a newly verified claim. Enforce
+                // break-glass evidence at the locked owner-end boundary too.
+                if (($payloadExtra['via'] ?? null) === 'cli') {
+                    $approver = $payloadExtra['approver'] ?? null;
+                    if (!is_string($approver) || trim($approver) === ''
+                        || !self::evidenceIsValid($approver, null)
+                        || $evidenceNote === null || trim($evidenceNote) === ''
+                    ) {
+                        throw new RelationshipRefusal('cli_approval_required', 422);
+                    }
+                }
+                $revoked = ClaimRepository::revokeInTransaction($claimId);
+                if (!$revoked['revoked']) {
+                    return [];
+                }
+                if ($revoked['entity_type'] !== 'validator' || $revoked['entity_id'] !== $validatorId || $revoked['claim_role'] !== $claim['claim_role']) {
+                    throw new RelationshipRefusal('claim_moved', 409); // not the claim the locks were taken for
+                }
+                $appended = Log::append([
+                    'action'          => 'owner_revoked',
+                    'page_id'         => $revoked['mirror_page_ids'][0] ?? ($revoked['bound_page_ids'][0] ?? 0),
+                    'subject_user_id' => $revoked['user_id'],
+                    'actor_kind'      => $actorKind,
+                    'actor_user_id'   => $actorId,
+                    'payload'         => [
+                        'prev'         => ['user_id' => $revoked['user_id'], 'method' => $claim['verification_method']],
+                        'new'          => null,
+                        'reason'       => $reason,
+                        'validator_id' => $validatorId,
+                    ] + $payloadExtra,
+                    'evidence_note'   => $evidenceNote,
+                ]);
+
+                return [
+                    'appended' => $appended,
+                    'release'  => static function () use ($claimId, $revoked, $reason): void {
+                        self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($claimId, $revoked, $reason, true));
+                        foreach (array_values(array_unique(array_merge($revoked['mirror_page_ids'], $revoked['bound_page_ids']))) as $page) {
+                            self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule($page));
+                        }
+                    },
+                ];
+            }, static function (array $done): array {
+                $release = $done['release'] ?? null;
+                if (!$release instanceof \Closure) {
+                    return ['ok' => true, 'revoked' => false];
+                }
+                $release();
+                return ['ok' => true, 'revoked' => true];
+            }, $pages);
+
+            if (($result['ok'] ?? false) === true) {
+                return ($result['revoked'] ?? false) === true;
+            }
+            if (($result['reason'] ?? '') === 'claim_moved' && $attempt === 1) {
+                continue;
+            }
+
+            throw new \RuntimeException('validator owner claim end failed: ' . (string) ($result['reason'] ?? 'unavailable'));
+        }
+
+        throw new \RuntimeException('validator owner claim end failed: claim_moved');
     }
 
     // ── internals ───────────────────────────────────────────────────────

@@ -798,6 +798,7 @@ $created = $GLOBALS['wpdb']->query(
         post_title VARCHAR(255) NOT NULL DEFAULT '',
         post_name VARCHAR(200) NOT NULL DEFAULT '',
         post_content LONGTEXT NULL,
+        post_author BIGINT UNSIGNED NOT NULL DEFAULT 0,
         post_type VARCHAR(20) NOT NULL DEFAULT 'post',
         post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
         PRIMARY KEY (ID),

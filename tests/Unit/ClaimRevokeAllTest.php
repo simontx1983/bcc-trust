@@ -222,7 +222,8 @@ final class ClaimRevokeAllTest extends TestCase
     public function testClaimsArePurgedOnlyThroughTheRevokeFirstPath(): void
     {
         $body = GateOrder::body(GateOrder::code('app/Domain/Core/Services/UserLifecycleService.php'), 'onUserDelete');
-        self::assertSame(1, substr_count($body, 'ClaimService::purgeForDeletedUser($userId)'));
+        self::assertSame(1, substr_count($body, 'ClaimService::purgeForDeletedUser($userId, $claimActorKind, $claimActorId)'));
+        self::assertSame(1, substr_count($body, '[$claimActorKind, $claimActorId] = \BCC\Trust\Onchain\Services\ClaimService::initiatorFor($userId, get_current_user_id())'), 'C1b-2: the initiator is read once, at the boundary');
 
         $root  = dirname(__DIR__, 2);
         $files = ['bcc-trust.php'];
