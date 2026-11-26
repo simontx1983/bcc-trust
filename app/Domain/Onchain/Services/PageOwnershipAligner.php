@@ -18,8 +18,8 @@ if (!defined('ABSPATH')) {
  * It runs ONLY from cron (a single event a minute after the change, and a
  * bounded 15-minute sweep that retries), never inline in a staff request: a
  * page write from a logged-in editor would fire the page save handlers as
- * that editor. Every BCC authority check reads the claims, so until this
- * runs the only lag is in PeepSo's own surfaces.
+ * that editor. Some page-access checks still use PeepSo ownership or
+ * post_author, so existing claim-revoke paths also release inline.
  *
  * Rules (security's design check):
  *  - No parameters from the change: the page's desired owner is read FRESH

@@ -378,9 +378,9 @@ final class ValidatorRelationshipService
      * (ClaimService::revokeClaim routes every validator claim here). Under
      * the lock order, in one transaction: the claim and the page mirrors it
      * alone grants are revoked (FOR UPDATE), and `owner_revoked` is logged
-     * ONLY when something was revoked, naming the real initiator. The page
-     * ownership move is left to the aligner: no page-save handlers in a
-     * member's request.
+     * ONLY when something was revoked, naming the real initiator. Release
+     * page ownership after commit as in the original revoke path, since
+     * some access checks still depend on PeepSo ownership or post_author.
      *
      * The claim's entity is read first, unlocked, only to name the locks.
      * Whether anything is revoked is decided under them (a claim no longer
@@ -426,7 +426,7 @@ final class ValidatorRelationshipService
                 }
                 $revoked = ClaimRepository::revokeInTransaction($claimId);
                 if (!$revoked['revoked']) {
-                    return ['revoked' => false];
+                    return [];
                 }
                 if ($revoked['entity_type'] !== 'validator' || $revoked['entity_id'] !== $validatorId || $revoked['claim_role'] !== $claim['claim_role']) {
                     throw new RelationshipRefusal('claim_moved', 409); // not the claim the locks were taken for
@@ -446,18 +446,21 @@ final class ValidatorRelationshipService
                     'evidence_note'   => $evidenceNote,
                 ]);
 
-                return ['revoked' => true, 'result' => $revoked, 'appended' => $appended];
-            }, static function (array $done) use ($claimId, $reason): array {
-                if (($done['revoked'] ?? false) !== true) {
+                return [
+                    'appended' => $appended,
+                    'release'  => static function () use ($claimId, $revoked, $reason): void {
+                        self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($claimId, $revoked, $reason, true));
+                        foreach (array_values(array_unique(array_merge($revoked['mirror_page_ids'], $revoked['bound_page_ids']))) as $page) {
+                            self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule($page));
+                        }
+                    },
+                ];
+            }, static function (array $done): array {
+                $release = $done['release'] ?? null;
+                if (!$release instanceof \Closure) {
                     return ['ok' => true, 'revoked' => false];
                 }
-                /** @var array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>} $result */
-                $result = $done['result'];
-                self::safely('revoke_followups', static fn () => ClaimService::afterRevokeCommitted($claimId, $result, $reason, false));
-                foreach (array_values(array_unique(array_merge($result['mirror_page_ids'], $result['bound_page_ids']))) as $page) {
-                    self::safely('align_schedule', static fn () => PageOwnershipAligner::schedule((int) $page));
-                }
-
+                $release();
                 return ['ok' => true, 'revoked' => true];
             }, $pages);
 

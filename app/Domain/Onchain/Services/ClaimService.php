@@ -697,8 +697,8 @@ class ClaimService {
         }
 
         // A VALIDATOR owner claim ends under the relationship lock order with
-        // its log row, naming the initiator; the page move goes to the
-        // aligner. Collection claims keep the path below.
+        // its log row, naming the initiator. Collection claims keep the
+        // path below.
         $claim = ClaimRepository::claimEntityStrict($claimId);
         if ($claim === null) {
             return false;

@@ -384,7 +384,7 @@ final class ValidatorRelationshipServiceIntegrationTest extends TestCase
         $payload = json_decode((string) $rows[0]->payload, true);
         self::assertSame(['wallet_link_gone', 'wallet'], [$payload['reason'] ?? null, $payload['prev']['method'] ?? null]);
         self::assertSame(['seq' => (int) $rows[0]->seq, 'row_hash' => $rows[0]->row_hash], RelationshipLogAnchor::get(), 'anchored after the commit');
-        self::assertContains(['hook' => PageOwnershipAligner::HOOK, 'args' => [self::PAGE]], array_map(static fn (array $s): array => ['hook' => $s['hook'], 'args' => $s['args']], $GLOBALS['bcc_scheduled']), 'the page release goes to the aligner');
+        self::assertContains(['hook' => PageOwnershipAligner::HOOK, 'args' => [self::PAGE]], array_map(static fn (array $s): array => ['hook' => $s['hook'], 'args' => $s['args']], $GLOBALS['bcc_scheduled']), 'the aligner retries the page release');
     }
 
     public function testAWalletUnlinkAndADeletionNameTheirInitiator(): void
