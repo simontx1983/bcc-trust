@@ -102,12 +102,14 @@ final class RealNameHiddenEverywhereTest extends TestCase
 
     public function testNoPublicSurfaceStillCallsTheUnmaskedDisplayName(): void
     {
-        // displayName() ignores the hide flag; only the admin read model
-        // (UserSyncService mirror) and moderation may use it directly.
+        // displayName() ignores the hide flag. Limit direct calls to the
+        // admin read model, moderation and the administrator-only validator
+        // directory. AdminValidatorReadEndpointTest pins that boundary.
         $allowed = [
             'app/Domain/Core/Support/PublicIdentity.php',
             'app/Domain/Core/Services/UserSyncService.php',
             'app/Domain/Core/Services/ModerationQueueService.php',
+            'app/Domain/Core/Services/AdminValidatorReadService.php',
         ];
         $root = dirname(__DIR__, 2);
         $it   = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app'));
