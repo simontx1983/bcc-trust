@@ -72,6 +72,7 @@ final class SuspendedWriteGate
         '/auth/wallet-login',
         '/auth/wallet-signup',
         '/auth/signup',
+        '/auth/age-eligibility',
         '/auth/oauth',
         '/auth/oauth-complete',
         '/auth/2fa/verify',

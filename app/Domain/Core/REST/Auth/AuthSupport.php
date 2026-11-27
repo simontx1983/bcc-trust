@@ -41,6 +41,40 @@ if (!defined('ABSPATH')) {
 final class AuthSupport
 {
     public const ROUTE_NAMESPACE = 'bcc/v1';
+    private const SIGNUP_ELIGIBILITY_TTL_SECONDS = 20 * 60;
+    private const SIGNUP_ELIGIBILITY_PURPOSE = 'bcc-signup-eligibility-v1|';
+
+    /** Null means the answer is not a real, non-future UTC calendar date. */
+    public static function signupAgeEligible(mixed $birthDate, ?int $now = null): ?bool
+    {
+        if (!is_string($birthDate)
+            || preg_match('/\A([0-9]{4})-([0-9]{2})-([0-9]{2})\z/', $birthDate, $parts) !== 1
+            || !checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1])
+            || $birthDate > gmdate('Y-m-d', $now)
+        ) {
+            return null;
+        }
+
+        $cutoff = sprintf('%04d-%s', (int) gmdate('Y', $now) - 18, gmdate('m-d', $now));
+        return $birthDate <= $cutoff;
+    }
+
+    /** Carry eligibility across a signup flow without saving the age answer. */
+    public static function issueSignupEligibilityToken(): ?string
+    {
+        $salt = wp_salt('auth');
+        if ($salt === '') {
+            return null;
+        }
+
+        try {
+            $payload = (time() + self::SIGNUP_ELIGIBILITY_TTL_SECONDS) . '.' . self::generateVerifyToken();
+        } catch (\Random\RandomException) {
+            return null;
+        }
+
+        return $payload . '.' . hash_hmac('sha256', self::SIGNUP_ELIGIBILITY_PURPOSE . $payload, $salt);
+    }
 
     /**
      * Hygiene gate for a user-supplied PUBLIC display name
